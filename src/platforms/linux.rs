@@ -13,3 +13,9 @@
 #[cfg(feature = "domain-network")]
 #[path = "linux/network.rs"]
 pub mod network;
+
+// The kernel-first read seam for the network domain (law #9): netlink behind a
+// mockable `NetlinkReader`, feeding the backend's state store.
+#[cfg(feature = "domain-network")]
+#[path = "linux/netlink.rs"]
+pub mod netlink;

@@ -179,6 +179,19 @@ domain-windowmanager = []
 # above; it implies `alloc`.
 capnp = { version = "0.27.2", default-features = false, features = ["alloc"] }
 
+# The Linux network domain's kernel-first read path (charter law #9), the
+# maintained rust-netlink crate ecosystem: netlink-sys is the synchronous
+# socket (no async runtime — this backend is synchronous), netlink-packet-core
+# is the netlink framing, netlink-packet-route is the rtnetlink message
+# vocabulary. rtnetlink itself was NOT used: its current line is async-only
+# (its default features pull tokio), and a tokio runtime for one socket is the
+# wrong trade for this backend. All three sit behind the mockable `NetlinkReader`
+# seam in src/platforms/linux/netlink.rs; the core and the contract stay
+# no_std + alloc.
+netlink-packet-core = "0.9.0"
+netlink-packet-route = "0.33.0"
+netlink-sys = "0.9.0"
+
 [build-dependencies]
 # The codegen half of the triad (capnpc 0.27.0 — pure-Rust schema compiler that
 # drives the system `capnp` binary).

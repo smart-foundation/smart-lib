@@ -3,13 +3,21 @@
 //! `NetworkBackend` trait with 76 contract-faithful methods.
 //!
 //! What this domain is: the frozen `network.capnp` surface (`getInterfaces`
-//! through `listRadioStates @75`) as an honest backend. What the Linux backend
-//! actually does: reads NetworkManager over a small, self-contained D-Bus client
-//! (no `nmcli`/`ip` shellouts) for the read surface — `isNetworkingEnabled`,
-//! `getStatus` with the `hostState` diagnostic, interfaces, radios and counters
-//! — and maps the mutating host-global verbs (`setNetworking`, `setRadioEnabled`,
-//! the cellular/mobile-data home) onto the NM write methods behind a mockable
-//! seam. What is honestly Unavailable, and why: ~61 pre-existing methods are the
+//! through `listRadioStates @75`) as an honest backend.
+//!
+//! ## The transport hierarchy on this backend (law #9)
+//!
+//! What the Linux backend actually does: reads the **kernel first** — links,
+//! addresses, routes, counters, carrier — over netlink
+//! (`platforms::linux::netlink`'s `NetlinkReader` seam), event-fed into a local
+//! state store, so a status/interfaces/counters read costs no daemon hop.
+//! NetworkManager is used for what the kernel does not own (the host-global
+//! networking switch, radio policy, per-device management, connection profiles)
+//! and for the control (mutating) verbs only NM exposes — over the `NmClient`
+//! seam, which is now policy + control only. The D-Bus path is a **counted
+//! fallback**: a read that misses the store issues exactly one fallback sweep,
+//! every subsequent read is local. No `nmcli`/`ip` shellouts on either path.
+//! What is honestly Unavailable, and why: ~61 pre-existing methods are the
 //! subsystem/privileged surface (VPN, hotspot, DHCP, QoS, firewall, slicing,
 //! DTN, NAN, the NIC driver) that Linux needs real services or `CAP_NET_ADMIN`
 //! for; each returns `notSupported` with a nameable reason. The domain exists
@@ -32,8 +40,8 @@ pub use backend::NetworkBackend;
 pub use types::{
     AddressAssignmentInfo, AddressAssignmentOptionsEcho, AddressAssignmentOutcome,
     BandwidthSlotInfo, CaptivePortalInfo, CellularConfigInfo, ConnectConfig, ConnStatus,
-    DnsServerInfo, DtnBundleInfo, FirewallRuleInfo, HotspotConfigEcho, HotspotStatusInfo,
-    HostState, InterfaceCounters, InterfaceSnapshot, IpAddress, Ipv6ConfigInfo, MacAddress,
+    DnsServerInfo, DtnBundleInfo, FirewallRuleInfo, HostState, HostStateSource, HotspotConfigEcho,
+    HotspotStatusInfo, InterfaceCounters, InterfaceSnapshot, IpAddress, Ipv6ConfigInfo, MacAddress,
     NanPeerInfo, NicProviderHandle, Page, Pagination, QosRuleInfo, RadioState,
     SatelliteConfigEcho, SliceConfigEcho, SliceId, SliceInfo, SubscriptionId, TelemetryInfo,
     TimeSyncInfo, TopologyLinkInfo, TopologyNodeInfo, TracerouteHopInfo, VpnConnectionInfo,

@@ -179,6 +179,32 @@ impl HostState {
     }
 }
 
+/// WHERE a `HostState` value came from — the transport hierarchy (charter law
+/// #9: kernel first, daemon for policy, contract for consumers) made
+/// auditable. `Kernel` states are the kernel's own facts read over netlink
+/// (carrier-down, no-firmware); `NmPolicy` states are NetworkManager policy
+/// read over the counted D-Bus fallback (networking-disabled, radio-off,
+/// unmanaged). A consumer that reads the state with its source can tell a
+/// dead wire from a switched-off host without guessing which layer lied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HostStateSource {
+    /// The kernel's own fact (netlink): the wire, the firmware, the operstate.
+    Kernel,
+    /// NetworkManager policy over the D-Bus fallback: the master switch, the
+    /// radio enables, per-device management.
+    NmPolicy,
+}
+
+impl HostStateSource {
+    /// The token a diagnostic surface prints.
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            HostStateSource::Kernel => "kernel",
+            HostStateSource::NmPolicy => "nm-policy",
+        }
+    }
+}
+
 /// Per-interface connection status, the honest subset this milestone reports
 /// (`InterfaceConnectionStatus` minus the WiFi sub-struct, whose `ssid` this
 /// domain surfaces directly).
