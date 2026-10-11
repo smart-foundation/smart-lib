@@ -1,0 +1,191 @@
+# smart-lib — next generation: protocol-compliant backends for common OSes.
+#
+# Charter law #2 is the reason this manifest is shaped the way it is:
+#
+#   FEATURE = DOMAIN.  Exactly one cargo feature per contract schema, named
+#   `domain-<schema-stem>`; build.rs derives the schema file from the feature
+#   name, so adding a domain never edits build.rs and never edits src/lib.rs.
+#
+# Foundation (types.capnp, capability.capnp, abi.capnp + their imports) is
+# NEVER feature-gated: it compiles in every configuration, including
+# `--no-default-features`.
+#
+# The 86 domain features below are the complete set derived mechanically from
+# the canonical tree: `ls /home/lufuno/smart/smart-protocol-official/schema` =
+# 89 files, minus the 3 foundation files. (The charter and BRIEF-01 say "88
+# domains"; the tree gives 86 — see knowledge/reports/06-all-features.md.)
+
+[package]
+name = "smart-lib"
+version = "0.1.0"
+edition = "2021"
+description = "Protocol-compliant backends for common operating systems (no_std core, one backend trait per domain)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+resolver = "2"
+
+[lib]
+name = "smart_lib"
+path = "src/lib.rs"
+
+[features]
+# The default set is deliberately NOT "everything": charter law #2 exists to stop
+# the old all-domains-at-once build. An application enables the domains it uses;
+# `--all-features` is reserved for a build-graph integrity check.
+default = ["std", "domain-files", "domain-network", "domain-audio", "domain-system"]
+
+# ─── std ────────────────────────────────────────────────────────────────
+# Opt-in widening only. The core stays no_std + alloc (law #1); `std` turns on
+# capnp's std support (std error conversions, std I/O for serialize helpers)
+# and is the seam where later waves hang host-only conveniences.
+#
+# Note: `std` also enables the host-socket transports today, because their
+# gates still read `#[cfg(feature = "std")]`. `std-transports` below is the
+# feature that exists to replace that reading.
+std = ["capnp/std", "capnp/alloc"]
+
+# ─── std-transports ─────────────────────────────────────────────────────
+# Gate for the host-socket transports: `UnixSocket` and `Tcp` (law #4). Requested
+# by the wave-3 report, `knowledge/reports/05-transport.md` §7.2, which notes
+# that UnixSocket/Tcp currently gate on `std` — a feature that also widens capnp
+# — so a consumer cannot take the sockets without the rest of std, or the rest
+# of std without the sockets.
+#
+# It implies `std` **for now**, deliberately: their gates read
+# `#[cfg(feature = "std")]`, and `src/transport/**` belongs to the wave-3 agent,
+# so the skeleton agent cannot move them. With the implication in place the
+# feature is usable today:
+#
+#     --features std-transports                                  # green
+#     --no-default-features --features std-transports --features domain-files
+#
+# The decoupling step, when the wave-3 agent is ready (their four gate lines in
+# `unix.rs`, `tcp.rs`, `mod.rs`, `channel.rs`), is two edits and no code change
+# for consumers:
+#
+#   1. those gates become `#[cfg(feature = "std-transports")]`;
+#   2. this line becomes `std-transports = ["capnp/std", "capnp/alloc"]` — the
+#      socket transports need capnp's std serialize helpers — after which `std`
+#      no longer pulls in UnixSocket/Tcp.
+#
+# `default` does not list it: default keeps `std`, which is what turns the
+# sockets on today, so the default feature set is unchanged by adding this line.
+std-transports = ["std"]
+
+# ─── domains: one line per schema ───────────────────────────────────────
+# `domain-<stem>` compiles `<stem>.capnp` (dashes in the feature name are
+# underscores in the file name, e.g. `domain-key-management` ->
+# `key_management.capnp`). Transitive imports are pulled in automatically by
+# build.rs. The hand-written half lives in src/domains/<stem>.rs and is
+# registered by build.rs too, so a domain agent touches NO shared file.
+#
+# All 86 stems of the contract, alphabetical; the pilot four appear again in
+# `default` above (a feature listed twice is a cargo error, so they are NOT
+# repeated here).
+domain-access = []
+domain-accessibility = []
+domain-ai = []
+domain-app = []
+domain-appindex = []
+domain-archive = []
+domain-audio = []
+domain-auth = []
+domain-backup = []
+domain-biometric = []
+domain-bluetooth = []
+domain-boot = []
+domain-buffer = []
+domain-calendar = []
+domain-camera = []
+domain-capture = []
+domain-cli = []
+domain-clipboard = []
+domain-clock = []
+domain-compositor = []
+domain-console = []
+domain-contacts = []
+domain-content = []
+domain-crypto = []
+domain-database = []
+domain-device = []
+domain-diagnostics = []
+domain-discovery = []
+domain-display = []
+domain-dns = []
+domain-endpoint = []
+domain-extension = []
+domain-files = []
+domain-font = []
+domain-framebuffer = []
+domain-gpu = []
+domain-hal = []
+domain-ime = []
+domain-init = []
+domain-input = []
+domain-intent = []
+domain-kernel = []
+domain-key-management = []
+domain-klog = []
+domain-location = []
+domain-logging = []
+domain-manifest = []
+domain-media = []
+domain-module = []
+domain-mount = []
+domain-network = []
+domain-nfc = []
+domain-notification = []
+domain-package = []
+domain-power = []
+domain-print = []
+domain-process = []
+domain-queue = []
+domain-runtime-search = []
+domain-sandbox = []
+domain-screenlock = []
+domain-secret = []
+domain-sensor = []
+domain-service = []
+domain-session = []
+domain-settings = []
+domain-shell = []
+domain-signal = []
+domain-signature = []
+domain-socket = []
+domain-speech = []
+domain-storage = []
+domain-system = []
+domain-system-search = []
+domain-task-scheduler = []
+domain-telephony = []
+domain-theme = []
+domain-time = []
+domain-timezone = []
+domain-translation = []
+domain-tunnel = []
+domain-update = []
+domain-usb = []
+domain-vcard = []
+domain-web = []
+domain-windowmanager = []
+
+[dependencies]
+# The runtime half of the capnp triad (capnp 0.27.x — the canonical contract's
+# line). `default-features = false` + `alloc` keeps capnp itself no_std + alloc:
+# `alloc` enables the capability/RPC traits the generated interfaces use
+# (`FromClientHook`, `DynClientHook`). `std` is the separate widening feature
+# above; it implies `alloc`.
+capnp = { version = "0.27.2", default-features = false, features = ["alloc"] }
+
+[build-dependencies]
+# The codegen half of the triad (capnpc 0.27.0 — pure-Rust schema compiler that
+# drives the system `capnp` binary).
+capnpc = "0.27.0"
+# The runtime half again, so build.rs can decode the very CodeGeneratorRequest
+# it hands to capnpc and derive the feature-gated inventory in OUT_DIR (see
+# `src/codegen/inventory.rs`). It is a build-time consumer of the pinned
+# runtime, NOT a second codegen path: one artifact, one parser, the same one
+# that produces the generated code under test.
+capnp = { version = "0.27.2", default-features = false, features = ["alloc"] }
