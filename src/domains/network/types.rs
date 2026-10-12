@@ -446,6 +446,195 @@ pub struct FirewallRuleInfo {
     pub enabled: bool,
     pub protocol: String,
     pub action: String,
+    /// How many packets this rule has matched (`FirewallRule.hitCount @13`).
+    ///
+    /// The contract's law, repeated here because it is the one unforgivable
+    /// place to get it wrong: **a counter is measured by the host or it is
+    /// absent.** A backend that cannot count reports 0 only when it knows the
+    /// count is zero, and says so in metadata. This field exists on the type
+    /// so a firewall backend has somewhere honest to put the number; it is
+    /// never fabricated here (the Linux backend cannot read the host's
+    /// firewall tables at all in this milestone, so `getFirewallRules` answers
+    /// `notSupported` rather than an empty rule list with invented counters).
+    pub hit_count: u64,
+}
+
+impl FirewallRuleInfo {
+    /// Write into a generated `FirewallRule` builder. `hit_count` is written
+    /// verbatim: 0 is the kernel's measured zero or the row's neutral value,
+    /// and the reason class a caller reads to tell them apart lives in the
+    /// availability matrix, not in a silent field.
+    pub fn write_to(&self, builder: &mut network_capnp::firewall_rule::Builder<'_>) {
+        builder.set_name(&self.name);
+        builder.set_enabled(self.enabled);
+        builder.set_protocol(&self.protocol);
+        builder.set_action(firewall_action_from_token(&self.action));
+        builder.set_hit_count(self.hit_count);
+    }
+
+    /// Read from a generated `FirewallRule` reader.
+    pub fn from_reader(reader: &network_capnp::firewall_rule::Reader<'_>) -> Self {
+        FirewallRuleInfo {
+            name: text_field(reader.get_name()),
+            enabled: reader.get_enabled(),
+            protocol: text_field(reader.get_protocol()),
+            action: firewall_action_token(reader.get_action().unwrap_or(network_capnp::FirewallAction::Custom)).to_string(),
+            hit_count: reader.get_hit_count(),
+        }
+    }
+}
+
+/// The contract's `FirewallAction` enum from a host-spelled open token. An
+/// unrecognised token — a 2046 action nobody has named — maps to `custom`,
+/// the enum's own open member, never to a guessed action.
+pub fn firewall_action_from_token(token: &str) -> network_capnp::FirewallAction {
+    match token {
+        "accept" => network_capnp::FirewallAction::Accept,
+        "drop" => network_capnp::FirewallAction::Drop,
+        "reject" => network_capnp::FirewallAction::Reject,
+        "log" => network_capnp::FirewallAction::Log,
+        _ => network_capnp::FirewallAction::Custom,
+    }
+}
+
+/// The open token for a contract `FirewallAction`, so a read-back row spells
+/// its action the way the host did.
+pub fn firewall_action_token(action: network_capnp::FirewallAction) -> &'static str {
+    match action {
+        network_capnp::FirewallAction::Accept => "accept",
+        network_capnp::FirewallAction::Drop => "drop",
+        network_capnp::FirewallAction::Reject => "reject",
+        network_capnp::FirewallAction::Log => "log",
+        network_capnp::FirewallAction::Custom => "custom",
+    }
+}
+
+/// One network the host remembers (`KnownWifiNetwork`): the bookkeeping half
+/// of `wifiConnect` — what is known, whether it joins automatically, and when
+/// it last did.
+///
+/// **The credential is NOT here and can never be here.** `KnownWifiNetwork`
+/// carries `ssid`, `autoConnect`, `lastConnected` and an open `security`
+/// token; the secret stays a `T.SecretKeyId` reference owned by the host's
+/// secret material, exactly as `wifiConnect @7`'s parameter does. A struct
+/// with no credential field cannot leak one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KnownWifiNetwork {
+    pub ssid: String,
+    pub auto_connect: bool,
+    /// The contract's `T.Timestamp` unit: nanoseconds since the epoch, 0 when
+    /// the host did not report when it last connected (never fabricated).
+    pub last_connected: u64,
+    /// Security as an open token ("wpa3", "wpa2", "open", or a scheme nobody
+    /// has named yet).
+    pub security: String,
+}
+
+impl KnownWifiNetwork {
+    /// Write into a generated `KnownWifiNetwork` builder.
+    pub fn write_to(&self, builder: &mut network_capnp::known_wifi_network::Builder<'_>) {
+        builder.set_ssid(&self.ssid);
+        builder.set_auto_connect(self.auto_connect);
+        builder.reborrow().init_last_connected().set_nanoseconds(self.last_connected);
+        builder.set_security(&self.security);
+    }
+
+    /// Read from a generated `KnownWifiNetwork` reader.
+    pub fn from_reader(reader: &network_capnp::known_wifi_network::Reader<'_>) -> Self {
+        KnownWifiNetwork {
+            ssid: text_field(reader.get_ssid()),
+            auto_connect: reader.get_auto_connect(),
+            last_connected: reader
+                .get_last_connected()
+                .map(|t| t.get_nanoseconds())
+                .unwrap_or(0),
+            security: text_field(reader.get_security()),
+        }
+    }
+}
+
+/// One entry in the host's routing table (`Route`): the destination in CIDR
+/// text, the next hop (empty for a directly-connected route), the metric, and
+/// the interface the kernel would send it out of.
+///
+/// The whole table for an interface is read with `getRoutes` and replaced
+/// with `setRoutes` — the same shape as the firewall surface, for the same
+/// reason: a full-set mutator is honest about being one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RouteInfo {
+    /// "10.0.0.0/8"; "0.0.0.0/0" for the default route (the kernel's own
+    /// spelling of "no destination", which is prefix length 0).
+    pub destination_cidr: String,
+    /// Next hop; empty for an on-link route.
+    pub gateway: String,
+    pub metric: u32,
+    pub interface_id: NetworkInterfaceId,
+}
+
+impl RouteInfo {
+    /// Write into a generated `Route` builder.
+    pub fn write_to(&self, builder: &mut network_capnp::route::Builder<'_>) {
+        builder.set_destination_cidr(&self.destination_cidr);
+        builder.set_gateway(&self.gateway);
+        builder.set_metric(self.metric);
+        builder.reborrow().init_interface_id().set_id(self.interface_id.get());
+    }
+
+    /// Read from a generated `Route` reader.
+    pub fn from_reader(reader: &network_capnp::route::Reader<'_>) -> Self {
+        RouteInfo {
+            destination_cidr: text_field(reader.get_destination_cidr()),
+            gateway: text_field(reader.get_gateway()),
+            metric: reader.get_metric(),
+            interface_id: NetworkInterfaceId::new(
+                reader.get_interface_id().map(|i| i.get_id()).unwrap_or(0),
+            ),
+        }
+    }
+}
+
+/// The host's own proxy configuration (`ProxyConfig`) — not a fetch override
+/// (`web.capnp` owns the fetch-scoped one). `url` is an open token
+/// ("http://host:port", "socks5://host:port", or a scheme that does not exist
+/// yet); `bypass` is the open set of destinations that never use it.
+///
+/// `bypass` is carried as ordered pairs rather than a `T.StringMap` because
+/// the host sources spell it as a list (comma-separated `no_proxy`), and a map
+/// would silently collapse duplicates the host actually keeps.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProxyConfigInfo {
+    pub enabled: bool,
+    pub url: String,
+    pub bypass: Vec<(String, String)>,
+}
+
+impl ProxyConfigInfo {
+    /// Write into a generated `ProxyConfig` builder.
+    pub fn write_to(&self, builder: &mut network_capnp::proxy_config::Builder<'_>) {
+        builder.set_enabled(self.enabled);
+        builder.set_url(&self.url);
+        let mut entries = builder.reborrow().init_bypass().init_entries(self.bypass.len() as u32);
+        for (i, (key, value)) in self.bypass.iter().enumerate() {
+            let mut entry = entries.reborrow().get(i as u32);
+            entry.set_key(key);
+            entry.set_value(value);
+        }
+    }
+
+    /// Read from a generated `ProxyConfig` reader.
+    pub fn from_reader(reader: &network_capnp::proxy_config::Reader<'_>) -> Self {
+        let mut bypass = Vec::new();
+        if let Ok(entries) = reader.get_bypass().and_then(|m| m.get_entries()) {
+            for entry in entries.iter() {
+                bypass.push((text_field(entry.get_key()), text_field(entry.get_value())));
+            }
+        }
+        ProxyConfigInfo {
+            enabled: reader.get_enabled(),
+            url: text_field(reader.get_url()),
+            bypass,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -569,6 +758,17 @@ pub struct SliceConfigEcho {
 }
 
 // ── Conversions to the frozen contract for the implemented seam ────────────
+
+/// Read a `Text` field into an owned string. An absent or non-UTF-8 field is
+/// the empty string: the same equivalence the writers below emit, so the
+/// round-trip stays total (a peer's invalid UTF-8 is a protocol violation the
+/// message validation catches, never fabricated over here).
+pub(crate) fn text_field(reader: capnp::Result<capnp::text::Reader<'_>>) -> String {
+    match reader {
+        Ok(text) => core::str::from_utf8(text.as_bytes()).unwrap_or("").to_string(),
+        Err(_) => String::new(),
+    }
+}
 
 /// Read the domain host state out of a generated `hostState` Text field.
 ///

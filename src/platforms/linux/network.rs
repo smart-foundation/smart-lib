@@ -50,12 +50,12 @@ use crate::core::values::Duration;
 use crate::core::{Error, Result};
 use crate::domains::network::backend::NetworkBackend;
 use crate::domains::network::types::{
-    ConnStatus, HostState, HostStateSource, InterfaceCounters, InterfaceSnapshot, Page, Pagination,
-    RadioState, SubscriptionId,
+    ConnStatus, HostState, HostStateSource, InterfaceCounters, InterfaceSnapshot, KnownWifiNetwork,
+    Page, Pagination, ProxyConfigInfo, RadioState, RouteInfo, SubscriptionId,
 };
 use crate::platforms::linux::netlink::{
     self, KernelAddress, KernelEvent, KernelLink, KernelRoute, LinkKind, LinkProvenance,
-    NetlinkReader, OperState, RealNetlinkReader, RfkillState,
+    NetlinkReader, NetlinkWriter, OperState, RealNetlinkReader, RealNetlinkWriter, RfkillState,
 };
 
 use std::os::unix::net::UnixStream;
@@ -73,6 +73,28 @@ const NM_IFACE: &str = "org.freedesktop.NetworkManager";
 const NM_DEVICE_IFACE: &str = "org.freedesktop.NetworkManager.Device";
 const NM_WIRED_IFACE: &str = "org.freedesktop.NetworkManager.Device.Wired";
 const DBUS_PROPS_IFACE: &str = "org.freedesktop.DBus.Properties";
+/// The settings surface: `Settings` enumerates the profiles,
+/// `Settings.Connection` reads and deletes one. This is where the
+/// remembered-network bookkeeping (`listKnownWifiNetworks @78`,
+/// `forgetWifiNetwork @77`) lives — the kernel owns no connection profiles.
+const NM_SETTINGS_PATH: &str = "/org/freedesktop/NetworkManager/Settings";
+const NM_SETTINGS_IFACE: &str = "org.freedesktop.NetworkManager.Settings";
+const NM_CONNECTION_IFACE: &str = "org.freedesktop.NetworkManager.Settings.Connection";
+/// The NM setting names a wifi profile carries. Open tokens in the contract;
+/// fixed keys here because these are NetworkManager's own names.
+const NM_SETTING_CONNECTION: &str = "connection";
+const NM_SETTING_WIFI: &str = "802-11-wireless";
+const NM_SETTING_WIFI_SECURITY: &str = "802-11-wireless-security";
+/// NM's connection type for a wifi profile.
+const NM_CONNECTION_TYPE_WIFI: &str = "802-11-wireless";
+/// The file that carries the host's system-wide proxy variables (pam_env's
+/// `KEY=VAL` syntax). Verified: NetworkManager owns no proxy property at all
+/// (its D-Bus interface documentation names none), so the host's proxy is a
+/// file-level fact here rather than a daemon read.
+const DEFAULT_PROXY_PATH: &str = "/etc/environment";
+/// The proxy variables the host file spells, in the order the read reports
+/// them. Open tokens on the wire; these are the file's own names.
+const PROXY_KEYS: [&str; 4] = ["http_proxy", "https_proxy", "all_proxy", "no_proxy"];
 
 /// A D-Bus value — only the arms the NM surface needs.
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +110,10 @@ enum Val {
     Struct(Vec<Val>),
     /// A variant carries its own inner signature (needed to marshal it back out).
     Variant(Vec<u8>, Box<Val>),
+    /// One dict entry `{KV}`: the key and the value, in signature order.
+    /// `a{sa{sv}}` — the shape of every NM settings reply — nests these two
+    /// deep, so the entry is a first-class arm rather than a special case.
+    Entry(Box<Val>, Box<Val>),
 }
 
 /// Alignment of a D-Bus signature char, measured from the start of the message.
@@ -137,6 +163,9 @@ fn marshal(buf: &mut Vec<u8>, sig: &[u8], val: &Val) -> Result<()> {
         (b'a', Val::Array(items)) => {
             // element signature is sig[1..next-complete-type]
             let (elem_sig, rest) = split_one_type(&sig[1..]);
+            // Mirror the reader: the array's length field is 4-aligned.
+            let target = pad_to(buf.len(), 4);
+            buf.resize(target, 0);
             let content = buf.len();
             buf.extend_from_slice(&0u32.to_le_bytes()); // length placeholder
             let start = buf.len();
@@ -150,13 +179,21 @@ fn marshal(buf: &mut Vec<u8>, sig: &[u8], val: &Val) -> Result<()> {
         }
         (b'(', Val::Struct(members)) => {
             let mut rest = &sig[1..];
-            for (i, m) in members.iter().enumerate() {
+            for m in members {
                 let (member_sig, r) = split_one_type(rest);
                 rest = r;
                 marshal(buf, member_sig, m)
                     .map_err(|_| Error::failed("struct member marshalling failed"))?;
-                let _ = i;
             }
+        }
+        (b'{', Val::Entry(key, value)) => {
+            // A dict entry is an 8-aligned struct of exactly two members.
+            let target = pad_to(buf.len(), align_of(b'{'));
+            buf.resize(target, 0);
+            let (key_sig, rest) = split_one_type(&sig[1..]);
+            marshal(buf, key_sig, key)?;
+            let (value_sig, _) = split_one_type(rest);
+            marshal(buf, value_sig, value)?;
         }
         (b'v', Val::Variant(inner_sig, inner)) => {
             write_variant(buf, inner_sig, inner)?;
@@ -224,6 +261,7 @@ fn unmarshal(buf: &[u8], off: &mut usize, sig: &[u8]) -> Result<Val> {
     let Some(&s) = sig.first() else {
         return Err(Error::failed("unmarshal: empty signature (wire desync)"));
     };
+    std::println!("DEBUG u sig={:?} off={} len={}", core::str::from_utf8(sig), *off, buf.len());
     // A variant is not pre-padded (its signature byte follows immediately).
     if s != b'v' {
         *off = pad_to(*off, align_of(s));
@@ -281,6 +319,12 @@ fn unmarshal(buf: &[u8], off: &mut usize, sig: &[u8]) -> Result<Val> {
         }
         b'a' => {
             let (elem_sig, _rest) = split_one_type(&sig[1..]);
+            // An array's LENGTH field is aligned to 4 (the D-Bus spec's ARRAY
+            // alignment); the ELEMENTS inside are then aligned individually to
+            // their own type (a dict entry to 8, a string to 4). The live probe
+            // proved this by hexdump: an `a{sv}` value's length field sits at
+            // an offset that is a multiple of 4 but NOT of 8, so padding the
+            // length field to the element alignment desynchronises the reply.
             *off = pad_to(*off, 4);
             let byte_len = u32::from_le_bytes(take(buf, *off, 4)?.try_into().unwrap()) as usize;
             *off += 4;
@@ -305,6 +349,15 @@ fn unmarshal(buf: &[u8], off: &mut usize, sig: &[u8]) -> Result<Val> {
             }
             *off += 0; // ')' contributes nothing
             Val::Struct(members)
+        }
+        b'{' => {
+            // A dict entry: 8-aligned from the message start, key then value.
+            *off = pad_to(*off, 8);
+            let (key_sig, rest) = split_one_type(&sig[1..]);
+            let key = unmarshal(buf, off, key_sig)?;
+            let (value_sig, _) = split_one_type(rest);
+            let value = unmarshal(buf, off, value_sig)?;
+            Val::Entry(Box::new(key), Box::new(value))
         }
         b'v' => {
             let slen = take(buf, *off, 1)?[0] as usize;
@@ -582,6 +635,10 @@ fn dbus_call(
         .map_err(|e| Error::failed(format!("dbus write: {e}")))?;
     let (_reply_serial, reply_sig, reply_body) = read_message(stream)?;
     // Unmarshal the reply body into values, matching reply_sig.
+    if reply_sig.starts_with("a{") {
+        let hex: alloc::string::String = reply_body.iter().skip(225).take(60).enumerate().map(|(i, b)| alloc::format!("{}{:02x}", if i % 16 == 0 { alloc::format!("\n{:03}: ", i + 225) } else { String::new() }, b)).collect();
+        std::println!("DEBUG slice = {hex}");
+    }
     let mut off = 0usize;
     let mut out = Vec::new();
     let mut rest = reply_sig.as_bytes();
@@ -675,6 +732,9 @@ impl NmPolicy {
 /// * [`NmClient::counters`] / [`NmClient::rfkill`] — kernel reads behind the
 ///   seam (`/sys` statistics, `/dev/rfkill`), used ONLY when netlink could not
 ///   answer. Counted like every other seam call.
+/// * [`NmClient::known_wifi_networks`] / [`NmClient::forget_wifi_network`] —
+///   the remembered-network bookkeeping: profiles are NM's own, so no kernel
+///   path owns them.
 /// * the three control verbs — host-mutating, so they stay behind the seam
 ///   (law #8: the mock proves the mapping, the founder runs the live proof).
 ///
@@ -682,6 +742,12 @@ impl NmPolicy {
 /// / `devices` / property readers. Those were the D-Bus-per-read path the
 /// correction removed — the kernel first answers links, addresses, routes,
 /// counters, carrier and radio blocks now (`platforms::linux::netlink`).
+///
+/// What is deliberately **not** here: a proxy verb. NetworkManager owns no
+/// proxy configuration (its D-Bus interface documentation names no such
+/// property, verified against `/usr/share/dbus-1/interfaces/`), so the host's
+/// proxy is read as a file fact by the backend directly rather than pretended
+/// into this seam.
 pub trait NmClient {
     /// One policy sweep (see [`NmPolicy`]). Errors are total: a fault here is
     /// the seam's error, carried to the caller unchanged.
@@ -694,6 +760,21 @@ pub trait NmClient {
 
     /// The kernel's rfkill view when the netlink snapshot could not read it.
     fn rfkill(&self) -> Result<Vec<RfkillState>>;
+
+    /// Every network the host remembers (`Settings.ListConnections` →
+    /// per-profile `Connection.GetSettings`), filtered to wifi profiles. One
+    /// counted seam call, however many profiles it enumerates.
+    ///
+    /// `GetSettings` never returns secrets (NetworkManager's own documentation
+    /// says so), so a `KnownWifiNetwork` built from it structurally cannot
+    /// carry a credential — the contract's shape and the host's behaviour agree.
+    fn known_wifi_networks(&self) -> Result<Vec<KnownWifiNetwork>>;
+
+    /// Forget one remembered network (`Settings.Connection.Delete`), the
+    /// mutating half of the bookkeeping. Host-mutating; founder-run live,
+    /// mock-verified here. An SSID the host does not know is `notFound`, never
+    /// a vacuous success.
+    fn forget_wifi_network(&self, ssid: &str) -> Result<()>;
 
     /// `org.freedesktop.NetworkManager.Enable(bool)` — the host-global master
     /// switch. Host-mutating; founder-run live, mock-verified here.
@@ -1067,9 +1148,22 @@ impl NetworkStore {
 
     /// Every route the kernel reported, as the last sweep saw it. Routes are NOT
     /// event-fed (the kernel's routing-table change storms are not status), so
-    /// this is the dump's view and re-primes with the table.
+    /// this is the dump's view; call [`NetworkStore::refresh_routes`] first for
+    /// a table current as of now.
     pub fn routes(&self) -> Vec<KernelRoute> {
         self.state.lock().unwrap().routes.clone()
+    }
+
+    /// Re-read the kernel's routing table with a fresh `RTM_GETROUTE` dump and
+    /// install it as the store's route table. A kernel read, no daemon hop, and
+    /// the reason `getRoutes` is always current rather than a table that went
+    /// stale while the link table stayed fresh. On failure the previous table
+    /// is left alone and the error is carried out — an empty table would be the
+    /// lie "the host has no routes".
+    pub fn refresh_routes(&self) -> Result<()> {
+        let routes = self.reader.routes()?;
+        self.state.lock().unwrap().routes = routes;
+        Ok(())
     }
 
     /// Why the kernel seam could not answer, if it could not.
@@ -1127,10 +1221,12 @@ struct Subscription {
 /// addresses, routes, counters, carrier, radio blocks — are served from the
 /// event-fed [`NetworkStore`]; [`NmClient`] is the counted policy + control
 /// fallback (charter law #9: kernel first, daemon for policy, contract for
-/// consumers).
+/// consumers). The one kernel *write* path (`setInterfaceMtu`) goes through a
+/// [`NetlinkWriter`], the same mockable-seam shape as every other verb.
 pub struct LinuxNetworkBackend<C: NmClient = RealNmClient> {
     client: C,
     store: NetworkStore,
+    writer: Box<dyn NetlinkWriter>,
     next_token: AtomicU32,
     live: Mutex<alloc::collections::BTreeMap<u64, Subscription>>,
     /// The NM policy sweep, cached against the store's topology revision:
@@ -1152,9 +1248,21 @@ impl<C: NmClient> LinuxNetworkBackend<C> {
     /// Build a backend over an explicit kernel seam (tests script the kernel
     /// here; the host is never touched — law #8).
     pub fn with_client_and_netlink(client: C, reader: Box<dyn NetlinkReader>) -> Self {
+        Self::with_client_netlink_and_writer(client, reader, Box::new(RealNetlinkWriter::new()))
+    }
+
+    /// Build a backend over an explicit kernel read seam AND an explicit
+    /// kernel write seam (tests: a scripted writer records the MTU writes a
+    /// backend asks for and never touches the host).
+    pub fn with_client_netlink_and_writer(
+        client: C,
+        reader: Box<dyn NetlinkReader>,
+        writer: Box<dyn NetlinkWriter>,
+    ) -> Self {
         LinuxNetworkBackend {
             client,
             store: NetworkStore::with_reader(reader),
+            writer,
             next_token: AtomicU32::new(1),
             live: Mutex::new(alloc::collections::BTreeMap::new()),
             policy: Mutex::new(None),
@@ -1496,6 +1604,113 @@ impl<C: NmClient> NetworkBackend for LinuxNetworkBackend<C> {
             "not-applicable: no cellular modem on this host (data roaming is a ModemManager setting; ModemManager absent)",
         ))
     }
+
+    // ── The seven methods the route pass added (`@76`–`@82`) ────────────────
+    //
+    // Each one's availability row names which kind of answer this is. The
+    // pattern the whole set obeys: a kernel-answerable fact (the routing
+    // table, a link's MTU) goes to netlink; NM policy state (the remembered
+    // networks) goes to the seam; the two writes no kernel path can own
+    // honestly (a full route-table rewrite, the host proxy) are refused with
+    // a reason rather than faked.
+
+    /// `setInterfaceMtu @76` — the one kernel write this backend owns. The
+    /// attribute lives on the link, NetworkManager has no MTU setter of its
+    /// own, and the kernel reads it straight back as `IFLA_MTU`. DEGRADED: the
+    /// mapping is proven against the scripted writer, the live proof is
+    /// founder-run (law #8).
+    fn set_interface_mtu(&self, interface: NetworkInterfaceId, mtu: u32) -> Result<()> {
+        self.ensure_kernel_state()?;
+        let link = self.find_link(interface)?;
+        // The interface must exist: writing MTU onto an ifindex the kernel does
+        // not know is a fabricated success.
+        if mtu == 0 {
+            return Err(Error::invalid_argument("mtu must be greater than zero"));
+        }
+        self.writer.set_link_mtu(link.index, mtu)
+    }
+
+    /// `forgetWifiNetwork @77` — DEGRADED: the remembered set is NM's
+    /// connection profiles, and deleting one is polkit-gated. The mapping is
+    /// proven against the scripted seam; the live proof is founder-run.
+    fn forget_wifi_network(&self, ssid: &str) -> Result<()> {
+        if ssid.is_empty() {
+            return Err(Error::invalid_argument("ssid must not be empty"));
+        }
+        self.fallback_calls.fetch_add(1, Ordering::Relaxed);
+        self.client.forget_wifi_network(ssid)
+    }
+
+    /// `listKnownWifiNetworks @78` — REAL: NetworkManager's connection
+    /// profiles, one counted seam call, no per-profile crawl. Carries no
+    /// credential (`GetSettings` returns none), and the wiring of that is
+    /// structural rather than promised.
+    fn list_known_wifi_networks(&self, page: Pagination) -> Result<Page<KnownWifiNetwork>> {
+        self.fallback_calls.fetch_add(1, Ordering::Relaxed);
+        let networks = self.client.known_wifi_networks()?;
+        let total = networks.len() as u64;
+        Ok(paginate(networks, total, page))
+    }
+
+    /// `getRoutes @79` — REAL: the kernel's routing table, a fresh
+    /// `RTM_GETROUTE` dump through the read seam. No daemon hop, and current
+    /// as of the read rather than as of the last link-table change.
+    fn get_routes(&self, page: Pagination) -> Result<Page<RouteInfo>> {
+        self.ensure_kernel_state()?;
+        self.store.refresh_routes()?;
+        let routes = self.store.routes();
+        // A route's interface is the ifindex the kernel named; the contract's
+        // `Route.interfaceId` is the derived id this backend uses everywhere
+        // else, so the mapping is the same `iface_id` a `getStatus(id)` uses.
+        let items: Vec<RouteInfo> = routes
+            .iter()
+            .map(|route| RouteInfo {
+                destination_cidr: route.destination.clone(),
+                gateway: route.gateway.clone(),
+                metric: route.metric,
+                interface_id: self
+                    .store
+                    .links()
+                    .into_iter()
+                    .find(|l| l.index == route.index)
+                    .map(|l| iface_id(&l.name))
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let total = items.len() as u64;
+        Ok(paginate(items, total, page))
+    }
+
+    /// `setRoutes @80` — a full route-table rewrite is a `CAP_NET_ADMIN`
+    /// netlink sequence with no honest half-measure, so this backend refuses
+    /// it with the reason. The read half (`getRoutes`) is real and
+    /// kernel-first, which is the half a caller can act on.
+    fn set_routes(&self, _interface: NetworkInterfaceId, _routes: &[RouteInfo]) -> Result<()> {
+        Err(Error::not_supported(
+            "no-privilege: a route-table rewrite is a netlink RTM_NEWROUTE/RTM_DELROUTE sequence \
+             (CAP_NET_ADMIN); not implemented — the read half, getRoutes, is the kernel's own table",
+        ))
+    }
+
+    /// `getProxyConfig @81` — DEGRADED: reads the host's system-wide proxy
+    /// block from `/etc/environment`. Honest about what it does not see: a
+    /// desktop settings daemon's per-session proxy (the other half of most
+    /// desktop hosts' proxy state) is not read, and the host's full proxy is
+    /// the union of the two.
+    fn get_proxy_config(&self) -> Result<ProxyConfigInfo> {
+        Ok(read_host_proxy(Path::new(DEFAULT_PROXY_PATH)))
+    }
+
+    /// `setProxyConfig @82` — writing the host proxy means writing `/etc`
+    /// (root) or driving a desktop settings daemon. Charter law #8 forbids
+    /// the first, and this library is not a privilege broker, so the honest
+    /// answer is a refusal naming the administrator who can.
+    fn set_proxy_config(&self, _config: &ProxyConfigInfo) -> Result<()> {
+        Err(Error::not_supported(
+            "no-privilege: the host proxy is written by the system administrator (/etc) or a \
+             desktop settings daemon; smart-lib never writes /etc (charter law #8)",
+        ))
+    }
 }
 
 /// Paginate a sorted, fully-materialised list per the contract rule: `limit ==
@@ -1696,6 +1911,45 @@ impl RealNmClient {
         Ok(read_counters_from_sysfs(&self.sysfs_root, iface))
     }
 
+    /// `Settings.ListConnections` → the object paths of every profile.
+    fn list_connections(&self) -> Result<Vec<String>> {
+        let out = self.call(NM_SETTINGS_PATH, NM_SETTINGS_IFACE, "ListConnections", &[], &[])?;
+        // The reply is `ao`: one array value whose items are the object paths.
+        // (The first version of this helper matched a bare `ObjectPath` and so
+        // silently returned an EMPTY profile list on a host with ten — the same
+        // class of bug as the link-table dump fold, caught only by the live
+        // probe. Flattening the array is the fix.)
+        Ok(out
+            .into_iter()
+            .filter_map(|v| match v {
+                Val::Array(items) => Some(items),
+                Val::ObjectPath(p) => Some(alloc::vec![Val::ObjectPath(p)]),
+                Val::Text(p) => Some(alloc::vec![Val::Text(p)]),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|v| match v {
+                Val::ObjectPath(p) => Some(p),
+                Val::Text(p) => Some(p),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// `Connection.GetSettings` on one profile → the `a{sa{sv}}` settings map,
+    /// flattened into (setting name, [(property, value)]).
+    fn connection_settings(&self, path: &str) -> Result<Vec<(String, Vec<(String, Val)>)>> {
+        let out = self.call(path, NM_CONNECTION_IFACE, "GetSettings", &[], &[])?;
+        if let Some(Val::Variant(_, _)) = out.first() { let _ = out; }
+        std::println!("DEBUG GetSettings ok");
+        let Some(reply) = out.into_iter().next() else {
+            return Err(Error::failed(format!(
+                "GetSettings({path}) returned nothing"
+            )));
+        };
+        flatten_settings(&reply)
+    }
+
     /// Read the kernel rfkill device (a stream of 8-byte events, no header) and
     /// parse it through the netlink module's one rfkill vocabulary.
     fn read_rfkill(&self) -> Result<Vec<RfkillState>> {
@@ -1706,6 +1960,174 @@ impl RealNmClient {
             Err(_) => 0,
         };
         Ok(netlink::parse_rfkill_events(&buf[..n]))
+    }
+}
+
+/// Flatten an `a{sa{sv}}` settings map into (setting name, [(property, value)]).
+///
+/// NM's own shape: the outer array's entries are `s` (setting name) → the inner
+/// array's entries, each `s` (property name) → `v` (the variant value). A
+/// property whose value is not the expected kind is skipped rather than guessed
+/// at, and a setting with no readable properties is kept with an empty list so
+/// the caller can still see the profile exists.
+fn flatten_settings(value: &Val) -> Result<Vec<(String, Vec<(String, Val)>)>> {
+    let Val::Array(entries) = value else {
+        return Err(Error::failed(
+            "GetSettings reply is not a settings map (a{sa{sv}})",
+        ));
+    };
+    let mut settings = Vec::new();
+    for entry in entries {
+        let Val::Entry(key, inner) = entry else {
+            return Err(Error::failed("settings map entry is not a dict entry"));
+        };
+        let name = match key.as_ref() {
+            Val::Text(s) => s.clone(),
+            _ => return Err(Error::failed("settings map key is not text")),
+        };
+        let mut properties = Vec::new();
+        if let Val::Array(props) = inner.as_ref() {
+            for prop in props {
+                match prop {
+                    Val::Entry(k, v) => {
+                        if let Val::Text(pk) = k.as_ref() {
+                            properties.push((pk.clone(), (**v).clone()));
+                        }
+                    }
+                    Val::Variant(_, v) => properties.push((String::new(), (**v).clone())),
+                    _ => {}
+                }
+            }
+        }
+        settings.push((name, properties));
+    }
+    Ok(settings)
+}
+
+/// One property's value out of a flattened settings section.
+fn setting_prop<'a>(section: &'a [(String, Val)], prop: &str) -> Option<&'a Val> {
+    section.iter().find(|(k, _)| k == prop).map(|(_, v)| v)
+}
+
+/// The SSID bytes of a wifi profile (`802-11-wireless.ssid` is `ay`, a byte
+/// array — an SSID is not necessarily UTF-8). Rendered lossily: the contract's
+/// `KnownWifiNetwork.ssid` is `Text`, so a non-UTF-8 SSID is the one place this
+/// surface cannot be exact, and it says so in the report rather than inventing
+/// an escaping.
+fn wifi_ssid(section: &[(String, Val)]) -> Option<String> {
+    let Val::Array(bytes) = setting_prop(section, "ssid")? else {
+        return None;
+    };
+    let raw: Vec<u8> = bytes
+        .iter()
+        .filter_map(|b| match b {
+            Val::Byte(b) => Some(*b),
+            _ => None,
+        })
+        .collect();
+    Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
+/// The NM key-management token as one of the contract's open security tokens.
+/// NM's own `key-mgmt` values are already the vocabulary the contract's open
+/// token set expects; an unrecognised one is passed through verbatim rather
+/// than flattened to "unknown", because the token set is open by design.
+fn wifi_security(security: Option<&[(String, Val)]>) -> String {
+    let Some(section) = security else {
+        // No `802-11-wireless-security` setting at all: an open network.
+        return "open".to_string();
+    };
+    match setting_prop(section, "key-mgmt") {
+        Some(Val::Text(mgmt)) if !mgmt.is_empty() => mgmt.clone(),
+        _ => "open".to_string(),
+    }
+}
+
+/// Parse one profile's settings into a `KnownWifiNetwork`, or `None` when the
+/// profile is not a wifi network (the enumeration covers every connection type
+/// NM holds — ethernet, VPN, bridge, ... — and only wifi ones are networks).
+fn known_wifi_from_settings(
+    settings: &[(String, Vec<(String, Val)>)],
+) -> Option<KnownWifiNetwork> {
+    let connection = settings
+        .iter()
+        .find(|(name, _)| name == NM_SETTING_CONNECTION)
+        .map(|(_, props)| props)?;
+    // The profile's type decides: a wifi profile is the only kind this
+    // contract surface remembers.
+    match setting_prop(connection, "type") {
+        Some(Val::Text(t)) if t == NM_CONNECTION_TYPE_WIFI => {}
+        _ => return None,
+    }
+    let wifi = settings
+        .iter()
+        .find(|(name, _)| name == NM_SETTING_WIFI)
+        .map(|(_, props)| props)?;
+    let ssid = wifi_ssid(wifi)?;
+    if ssid.is_empty() {
+        return None; // a profile with no name cannot be reported as a network
+    }
+    let security = settings
+        .iter()
+        .find(|(name, _)| name == NM_SETTING_WIFI_SECURITY)
+        .map(|(_, props)| props);
+    let auto_connect = matches!(
+        setting_prop(connection, "autoconnect"),
+        Some(Val::Boolean(true))
+    );
+    // NM's `connection.timestamp` is seconds since the epoch; the contract's
+    // `lastConnected` is nanoseconds. The conversion is exact, and a profile
+    // NM never connected reports 0 — "not connected yet", never a guess.
+    let last_connected = match setting_prop(connection, "timestamp") {
+        Some(Val::UInt64(s)) => s.saturating_mul(1_000_000_000),
+        Some(Val::UInt32(s)) => u64::from(*s).saturating_mul(1_000_000_000),
+        _ => 0,
+    };
+    Some(KnownWifiNetwork {
+        ssid,
+        auto_connect,
+        last_connected,
+        security: wifi_security(security.as_ref().map(|v| v.as_slice())),
+    })
+}
+
+/// Read the host's system-wide proxy configuration from a pam_env-style
+/// `KEY=VAL` file. The `no_proxy` list is reported as an ordered list of
+/// bypass entries under the `bypass` key, so the caller sees the host's exact
+/// order and duplicates rather than a map that collapses them.
+///
+/// A file that is absent or unreadable is not an error: the host simply has no
+/// system-wide proxy, which reads as a disabled configuration — but an
+/// *unparsable* file is a stated gap, not silently-empty proxy state.
+fn read_host_proxy(path: &Path) -> ProxyConfigInfo {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => return ProxyConfigInfo::default(),
+    };
+    let mut url = String::new();
+    let mut bypass: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if PROXY_KEYS.contains(&key) {
+            if key == "no_proxy" {
+                for host in value.split(',').map(str::trim).filter(|h| !h.is_empty()) {
+                    bypass.push((host.to_string(), String::new()));
+                }
+            } else if url.is_empty() && !value.is_empty() {
+                url = value.to_string();
+            }
+        }
+    }
+    ProxyConfigInfo {
+        enabled: !url.is_empty(),
+        url,
+        bypass,
     }
 }
 
@@ -1731,6 +2153,38 @@ impl NmClient for RealNmClient {
 
     fn rfkill(&self) -> Result<Vec<RfkillState>> {
         self.read_rfkill()
+    }
+
+    fn known_wifi_networks(&self) -> Result<Vec<KnownWifiNetwork>> {
+        let paths = self.list_connections()?;
+        let mut networks = Vec::new();
+        for path in &paths {
+            let settings = self.connection_settings(path)?;
+            if let Some(network) = known_wifi_from_settings(&settings) {
+                networks.push(network);
+            }
+        }
+        networks.sort_by(|a, b| a.ssid.cmp(&b.ssid));
+        Ok(networks)
+    }
+
+    fn forget_wifi_network(&self, ssid: &str) -> Result<()> {
+        let paths = self.list_connections()?;
+        for path in &paths {
+            let settings = self.connection_settings(path)?;
+            let Some(network) = known_wifi_from_settings(&settings) else {
+                continue; // not a wifi profile: not the network we were asked to forget
+            };
+            if network.ssid == ssid {
+                // Found: delete the profile. NM answers `AccessDenied` for a
+                // polkit-gated delete, which the reply mapping already turns
+                // into `permissionDenied`.
+                self.call(path, NM_CONNECTION_IFACE, "Delete", &[], &[])?;
+                return Ok(());
+            }
+        }
+        // Not remembered: an honest notFound, never a vacuous success.
+        Err(Error::not_found().with_context(format!("no remembered network named {ssid}")))
     }
 
     fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
@@ -1789,7 +2243,9 @@ mod tests {
     use super::*;
     use crate::core::ErrorCode;
     use crate::domains::network::availability::{claimed_l3_tests, AvailStatus, NETWORK_AVAILABILITY};
-    use crate::platforms::linux::netlink::{KernelSnapshot, MockNetlink};
+    use crate::platforms::linux::netlink::{
+        KernelSnapshot, MockNetlink, MockNetlinkWriter,
+    };
     use alloc::collections::BTreeSet;
     use std::cell::RefCell;
     use std::sync::Arc;
@@ -1934,7 +2390,9 @@ mod tests {
     /// read issued (so the counting mock can assert zero / exactly one), and
     /// `writes` records every host-mutating verb (so a mapping test can assert
     /// the right NM call would be made). `fault` injects a `core::Error` on any
-    /// seam method (error injection over all 20 codes).
+    /// seam method (error injection over all 20 codes). `profiles` scripts the
+    /// remembered-network set and `deletes` records which SSID the seam was
+    /// asked to forget.
     #[derive(Default)]
     struct Mock {
         policy: NmPolicy,
@@ -1943,6 +2401,8 @@ mod tests {
         writes: RefCell<Vec<String>>,
         calls: RefCell<Vec<String>>,
         fault: RefCell<Option<Error>>,
+        profiles: Vec<KnownWifiNetwork>,
+        deletes: RefCell<Vec<String>>,
     }
 
     impl Mock {
@@ -2012,11 +2472,80 @@ mod tests {
             self.writes.borrow_mut().push(format!("WwanEnabled({enabled})"));
             Ok(())
         }
+
+        fn known_wifi_networks(&self) -> Result<Vec<KnownWifiNetwork>> {
+            self.check()?;
+            self.record("known_wifi_networks".to_string());
+            let mut networks = self.profiles.clone();
+            networks.sort_by(|a, b| a.ssid.cmp(&b.ssid));
+            Ok(networks)
+        }
+
+        fn forget_wifi_network(&self, ssid: &str) -> Result<()> {
+            self.check()?;
+            if self.profiles.iter().any(|p| p.ssid == ssid) {
+                self.deletes.borrow_mut().push(ssid.to_string());
+                Ok(())
+            } else {
+                Err(Error::not_found().with_context(format!("no remembered network named {ssid}")))
+            }
+        }
     }
 
     /// A backend over a scripted kernel and a scripted NM (never the host).
     fn backend(kernel: MockNetlink, nm: Mock) -> LinuxNetworkBackend<Mock> {
         LinuxNetworkBackend::with_client_and_netlink(nm, Box::new(kernel))
+    }
+
+    /// A backend over a scripted kernel, a scripted NM and a scripted kernel
+    /// writer — the MTU-write tests use this so no path reaches the host.
+    fn backend_with_writer(
+        kernel: MockNetlink,
+        nm: Mock,
+        writer: Box<dyn NetlinkWriter>,
+    ) -> LinuxNetworkBackend<Mock> {
+        LinuxNetworkBackend::with_client_netlink_and_writer(nm, Box::new(kernel), writer)
+    }
+
+    /// A shareable handle on a [`MockNetlinkWriter`], so a test can build the
+    /// backend and still inspect what the writer recorded. The production
+    /// writer is never shared: the backend owns its socket.
+    struct SharedWriter(alloc::sync::Arc<MockNetlinkWriter>);
+
+    impl NetlinkWriter for SharedWriter {
+        fn set_link_mtu(&self, index: u32, mtu: u32) -> Result<()> {
+            self.0.set_link_mtu(index, mtu)
+        }
+    }
+
+    /// A scripted kernel whose routing table carries a default route, a /24
+    /// subnet route and a link-local route.
+    fn kernel_with_routes(links: Vec<KernelLink>) -> MockNetlink {
+        let mut snapshot = snapshot(links);
+        snapshot.routes = alloc::vec![
+            KernelRoute {
+                index: 2,
+                destination: "0.0.0.0/0".to_string(),
+                gateway: "192.168.18.1".to_string(),
+                table: 254,
+                metric: 600,
+            },
+            KernelRoute {
+                index: 2,
+                destination: "10.0.0.0/24".to_string(),
+                gateway: String::new(),
+                table: 254,
+                metric: 100,
+            },
+            KernelRoute {
+                index: 3,
+                destination: "::/0".to_string(),
+                gateway: "fe80::1".to_string(),
+                table: 254,
+                metric: 1024,
+            },
+        ];
+        MockNetlink::with_snapshot(snapshot)
     }
 
     /// The common fixture: one healthy ethernet, one healthy wifi, loopback, and
@@ -2780,6 +3309,16 @@ mod tests {
     #[test]
     fn availability_real_rows_have_a_backing_test() {
         const IMPLEMENTED_TESTS: &[&str] = &[
+            "set_interface_mtu_writes_the_kernel_link_attribute",
+            "set_interface_mtu_carries_a_writer_fault_over_all_20_codes",
+            "forget_wifi_network_deletes_the_nm_profile",
+            "list_known_wifi_networks_reads_nm_profiles",
+            "get_routes_serves_the_kernel_table",
+            "set_routes_is_refused_with_a_reason",
+            "host_proxy_reads_the_environment_block",
+            "get_proxy_config_reads_the_documented_host_file",
+            "set_proxy_config_is_refused_with_a_reason",
+            "the_route_pass_verbs_carry_a_seam_fault_over_all_20_codes",
             "get_interfaces_enumerates_the_kernel_link_table",
             "get_status_four_states_distinct_with_explicit_sources",
             "rfkill_blocked_radio_is_radio_off_from_the_kernel",
@@ -2873,6 +3412,361 @@ mod tests {
     /// hermetic suite never touches the network, and run explicitly with
     /// `cargo test -- --ignored` when a bus is present. If NetworkManager is
     /// absent it fails loudly (never silently skipped).
+    // ── The seven route-pass methods (`@76`–`@82`) ──────────────────────────
+
+    /// `setInterfaceMtu @76` writes the kernel link attribute for the interface
+    /// the caller named — and nothing else. The mapping is the whole claim:
+    /// the right ifindex, the right MTU, through the kernel write seam.
+    #[test]
+    fn set_interface_mtu_writes_the_kernel_link_attribute() {
+        let writer = alloc::sync::Arc::new(MockNetlinkWriter::new());
+        let b = backend_with_writer(
+            kernel(alloc::vec![ethernet_link("enp0s31f6", 2, true), wifi_link("wlp0s20f3", 3)]),
+            Mock::default(),
+            Box::new(SharedWriter(writer.clone())),
+        );
+        b.set_interface_mtu(id_of("enp0s31f6"), 9000).unwrap();
+        // The write reached the kernel seam with the kernel's own ifindex: the
+        // name the caller used is not what crosses.
+        assert_eq!(*writer.writes.lock().unwrap(), alloc::vec![(2, 9000)]);
+        // An unknown interface is notFound, never a write onto ifindex 0.
+        assert_eq!(
+            b.set_interface_mtu(id_of("nosuchdev"), 1500).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        // A zero MTU is invalidArgument, not a kernel round trip.
+        assert_eq!(
+            b.set_interface_mtu(id_of("enp0s31f6"), 0).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        // Only the two valid calls reached the writer.
+        assert_eq!(writer.writes.lock().unwrap().len(), 1);
+    }
+
+    /// A fault on the kernel write seam reaches the caller unchanged: error
+    /// injection stays total over the write path too, across all 20 codes.
+    #[test]
+    fn set_interface_mtu_carries_a_writer_fault_over_all_20_codes() {
+        for code in ErrorCode::ALL {
+            let writer = alloc::sync::Arc::new(MockNetlinkWriter::new());
+            writer.fail_with(Error::new(code));
+            let b = backend_with_writer(
+                kernel(alloc::vec![ethernet_link("enp0s31f6", 2, true)]),
+                Mock::default(),
+                Box::new(SharedWriter(writer)),
+            );
+            assert_eq!(
+                b.set_interface_mtu(id_of("enp0s31f6"), 9000).unwrap_err().code,
+                code,
+                "set_interface_mtu carried {code:?}"
+            );
+        }
+    }
+
+    /// `forgetWifiNetwork @77` deletes the NM profile for the SSID the caller
+    /// named, and an SSID the host does not remember is `notFound` — never a
+    /// vacuous success that tells the caller a network was forgotten.
+    #[test]
+    fn forget_wifi_network_deletes_the_nm_profile() {
+        let b = backend(kernel(alloc::vec![]), Mock {
+            profiles: alloc::vec![KnownWifiNetwork {
+                ssid: "hem".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        b.forget_wifi_network("hem").unwrap();
+        assert_eq!(*b.client.deletes.borrow(), alloc::vec!["hem".to_string()]);
+        // An empty SSID is a caller error, not a delete of "the first one".
+        assert_eq!(
+            b.forget_wifi_network("").unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        // An unknown SSID is notFound, and no delete was attempted.
+        assert_eq!(
+            b.forget_wifi_network("nosuchnet").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(b.client.deletes.borrow().len(), 1);
+        // A seam fault propagates unchanged.
+        b.client.fault.replace(Some(Error::permission_denied()));
+        assert_eq!(
+            b.forget_wifi_network("hem").unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+    }
+
+    /// `listKnownWifiNetworks @78` is one counted seam call (the profile set is
+    /// NM's, so no kernel path owns it), sorted by SSID, paginated under the
+    /// contract rule, and carrying no credential.
+    #[test]
+    fn list_known_wifi_networks_reads_nm_profiles() {
+        let b = backend(kernel(alloc::vec![]), Mock {
+            profiles: alloc::vec![
+                KnownWifiNetwork {
+                    ssid: "hem".to_string(),
+                    auto_connect: true,
+                    last_connected: 1_700_000_000_000_000_000,
+                    security: "wpa3".to_string(),
+                },
+                KnownWifiNetwork {
+                    ssid: "aboard".to_string(),
+                    auto_connect: false,
+                    last_connected: 0,
+                    security: "open".to_string(),
+                },
+            ],
+            ..Default::default()
+        });
+        let page = b.list_known_wifi_networks(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].ssid, "aboard", "sorted by SSID");
+        assert_eq!(page.items[1].ssid, "hem");
+        assert_eq!(page.items[1].last_connected, 1_700_000_000_000_000_000);
+        // limit 0 means one, on this list too.
+        let one = b.list_known_wifi_networks(Pagination { offset: 0, limit: 0 }).unwrap();
+        assert_eq!(one.items.len(), 1);
+        assert_eq!(one.total, 2);
+        // Exactly one counted seam call per enumeration, and a second
+        // enumeration is a second call (the profile set is NM's, not cached).
+        assert_eq!(b.nm_fallback_calls(), 2, "one counted call per enumeration");
+        // No credential field exists on the type, so none can be reported.
+        let printed = alloc::format!("{:?}", page.items[0]);
+        for forbidden in ["credential", "password", "passphrase", "secret", "psk"] {
+            assert!(!printed.contains(forbidden), "{forbidden} must not appear");
+        }
+    }
+
+    /// `getRoutes @79` serves the kernel's routing table with no daemon hop:
+    /// a fresh `RTM_GETROUTE` dump, CIDR-spelled destinations, and the contract
+    /// interface id derived the same way `getStatus(id)` derives it.
+    #[test]
+    fn get_routes_serves_the_kernel_table() {
+        let b = backend(
+            kernel_with_routes(alloc::vec![
+                ethernet_link("enp0s31f6", 2, true),
+                wifi_link("wlp0s20f3", 3),
+            ]),
+            Mock::default(),
+        );
+        let page = b.get_routes(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, 3);
+        let default = page.items.iter().find(|r| r.destination_cidr == "0.0.0.0/0").unwrap();
+        assert_eq!(default.gateway, "192.168.18.1");
+        assert_eq!(default.metric, 600);
+        assert_eq!(default.interface_id, id_of("enp0s31f6"));
+        let v6 = page.items.iter().find(|r| r.destination_cidr == "::/0").unwrap();
+        assert_eq!(v6.interface_id, id_of("wlp0s20f3"));
+        let onlink = page.items.iter().find(|r| r.destination_cidr == "10.0.0.0/24").unwrap();
+        assert!(onlink.gateway.is_empty(), "an on-link route has no gateway");
+        // Routes are a kernel fact: no NM seam call answered them.
+        assert_eq!(b.nm_fallback_calls(), 0, "the routing table is the kernel's own");
+        // A kernel that cannot answer leaves the previous error visible rather
+        // than an empty table pretending the host has no routes.
+        let k = kernel_with_routes(alloc::vec![ethernet_link("enp0s31f6", 2, true)]);
+        k.fail_with(Error::unavailable("netlink route dump: operation not permitted"));
+        let b = backend(k, Mock::default());
+        let err = b.get_routes(Pagination::default()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Unavailable);
+        assert!(err.message.contains("netlink"), "{}", err.message);
+    }
+
+    /// `setRoutes @80` is refused with a reason, not half-implemented: a
+    /// full-table rewrite has no honest partial form, and the read half is the
+    /// kernel's own table.
+    #[test]
+    fn set_routes_is_refused_with_a_reason() {
+        let b = happy_backend();
+        let err = b
+            .set_routes(id_of("enp0s31f6"), &[RouteInfo::default()])
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotSupported);
+        assert!(err.message.starts_with("no-privilege:"), "{}", err.message);
+        assert!(!err.retryable, "a refusal is not retryable");
+    }
+
+    /// `getProxyConfig @81` reads the host's system-wide proxy block from a
+    /// pam_env-style `KEY=VAL` file: the URL, the bypass list in the host's own
+    /// order and with its duplicates, and an absent file as "no system-wide
+    /// proxy" (not an error, and not a fabricated proxy).
+    #[test]
+    fn host_proxy_reads_the_environment_block() {
+        let dir = std::env::temp_dir().join(format!("smart-lib-proxy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("environment");
+        let content = concat!(
+            "# pam_env syntax\n",
+            "http_proxy=\"http://proxy.corp:3128\"\n",
+            "no_proxy=localhost,127.0.0.1,localhost\n",
+            "https_proxy=http://proxy.corp:3129\n",
+            "UNRELATED=ignored\n",
+        );
+        std::fs::write(&file, content).unwrap();
+        let proxy = read_host_proxy(&file);
+        assert!(proxy.enabled);
+        assert_eq!(proxy.url, "http://proxy.corp:3128", "the first proxy URL wins, verbatim");
+        assert_eq!(
+            proxy.bypass,
+            alloc::vec![
+                ("localhost".to_string(), String::new()),
+                ("127.0.0.1".to_string(), String::new()),
+                ("localhost".to_string(), String::new()),
+            ],
+            "the bypass list keeps the host's order and its duplicates"
+        );
+        // An absent file is an honest empty configuration, never an error and
+        // never a guessed proxy.
+        assert_eq!(read_host_proxy(&dir.join("nosuchfile")), ProxyConfigInfo::default());
+        // A file with no proxy keys at all is also just empty.
+        let none = dir.join("none");
+        std::fs::write(&none, "PATH=/usr/bin\n").unwrap();
+        let empty = read_host_proxy(&none);
+        assert!(!empty.enabled);
+        assert!(empty.url.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default host proxy path is the documented one, and the backend reads
+    /// it (this host's `/etc/environment` is readable by construction).
+    #[test]
+    fn get_proxy_config_reads_the_documented_host_file() {
+        let b = happy_backend();
+        let config = b.get_proxy_config().unwrap();
+        assert_eq!(DEFAULT_PROXY_PATH, "/etc/environment");
+        // Whatever this host carries, the answer is a real read of a real file:
+        // enabled ⇔ a URL is present, and never a fabricated one.
+        assert_eq!(config.enabled, !config.url.is_empty());
+    }
+
+    /// `setProxyConfig @82` is refused: writing the host proxy means writing
+    /// `/etc` or driving a settings daemon, and charter law #8 forbids the
+    /// first while this library is not the second's privilege broker.
+    #[test]
+    fn set_proxy_config_is_refused_with_a_reason() {
+        let b = happy_backend();
+        let err = b
+            .set_proxy_config(&ProxyConfigInfo {
+                enabled: true,
+                url: "http://proxy.corp:3128".to_string(),
+                bypass: Vec::new(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotSupported);
+        assert!(err.message.starts_with("no-privilege:"), "{}", err.message);
+        assert!(!err.retryable);
+    }
+
+    /// Error injection over the two new seam-backed verbs, across all 20 codes:
+    /// a fault on the profile read or the profile delete is carried unchanged.
+    #[test]
+    fn the_route_pass_verbs_carry_a_seam_fault_over_all_20_codes() {
+        for code in ErrorCode::ALL {
+            let mut profiles = alloc::vec![KnownWifiNetwork {
+                ssid: "hem".to_string(),
+                ..Default::default()
+            }];
+            profiles.push(KnownWifiNetwork {
+                ssid: "aboard".to_string(),
+                ..Default::default()
+            });
+            let b = backend(kernel(alloc::vec![]), Mock {
+                profiles,
+                fault: RefCell::new(Some(Error::new(code))),
+                ..Default::default()
+            });
+            assert_eq!(
+                b.list_known_wifi_networks(Pagination::default()).unwrap_err().code,
+                code
+            );
+            assert_eq!(b.forget_wifi_network("hem").unwrap_err().code, code);
+        }
+    }
+
+    /// A read-only live probe of the NetworkManager settings surface: the
+    /// remembered-network set (`listKnownWifiNetworks`) and the host proxy file
+    /// (`getProxyConfig`). Law #8: reads only (`GetSettings` returns no secrets
+    /// and `ListConnections` changes nothing). `#[ignore]`d so the default
+    /// hermetic suite never touches the bus; run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "read-only live probe against the real NetworkManager settings bus; run with `cargo test -- --ignored`"]
+    fn live_reads_known_networks_and_proxy() {
+        // The remembered-network set is NM's own: this is the read that proves
+        // the `a{sa{sv}}` reply is marshalled correctly by the hand-rolled
+        // client (the same class of bug the link-table probe caught).
+        let client = match RealNmClient::new(None, None) {
+            Ok(c) => c,
+            Err(e) => panic!(
+                "cannot reach NetworkManager on the system bus: {e} \
+                 (reads only — nothing changed)"
+            ),
+        };
+        let known = client.known_wifi_networks().expect("listKnownWifiNetworks read");
+        std::println!(
+            "live known networks: {:?}",
+            known
+                .iter()
+                .map(|n| alloc::format!("{}({},auto={})", n.ssid, n.security, n.auto_connect))
+                .collect::<Vec<_>>()
+        );
+        for network in &known {
+            assert!(!network.ssid.is_empty(), "a remembered network has a name");
+            assert!(!network.security.is_empty());
+            // The critical assertion: no credential crossed.
+            let printed = alloc::format!("{network:?}");
+            for forbidden in ["psk", "password", "passphrase", "secret", "credential"] {
+                assert!(!printed.contains(forbidden), "{forbidden} must not appear");
+            }
+        }
+        // Every profile this host remembers, enumerated so the `ao` reply is
+        // proven against the real bus (the empty-list bug this probe caught).
+        let paths = client.list_connections().expect("ListConnections");
+        std::println!("live profiles enumerated: {}", paths.len());
+        assert!(
+            paths.iter().all(|p| p.starts_with("/org/freedesktop/NetworkManager/Settings/")),
+            "every enumerated path is an NM settings path"
+        );
+        // A profile the host does not remember is notFound, never a vacuous ok.
+        match client.forget_wifi_network("smart-lib-probe-network-that-does-not-exist") {
+            Err(e) => assert_eq!(e.code, ErrorCode::NotFound, "an unknown SSID is notFound"),
+            Ok(()) => panic!("forgetting an unknown network must not succeed"),
+        }
+
+        // The host proxy is a file fact; read it the way the backend does.
+        let proxy = read_host_proxy(Path::new(DEFAULT_PROXY_PATH));
+        std::println!(
+            "live proxy: enabled={} url={:?} bypass={:?}",
+            proxy.enabled,
+            proxy.url,
+            proxy.bypass
+        );
+        assert_eq!(proxy.enabled, !proxy.url.is_empty());
+
+        // A backend over the live kernel + live NM answers the whole new
+        // surface read-only, which is exactly what the daemon will serve.
+        let backend = LinuxNetworkBackend::connect().expect("live backend");
+        let page = backend
+            .get_routes(Pagination { offset: 0, limit: u32::MAX })
+            .expect("getRoutes read");
+        assert!(page.total >= 1, "the kernel always has at least the loopback route");
+        assert!(
+            page.items
+                .iter()
+                .any(|r| r.destination_cidr == "0.0.0.0/0" || r.destination_cidr == "::/0"),
+            "the default route must be in the kernel's table"
+        );
+        let known_page = backend
+            .list_known_wifi_networks(Pagination { offset: 0, limit: u32::MAX })
+            .expect("listKnownWifiNetworks read");
+        assert_eq!(known_page.total, known.len() as u64);
+        std::println!(
+            "live: {} routes, {} remembered networks, NM seam calls = {}",
+            page.total,
+            known_page.total,
+            backend.nm_fallback_calls()
+        );
+    }
+
     #[test]
     #[ignore = "read-only live probe against the real NetworkManager and netlink; run with `cargo test -- --ignored` when a system bus is present"]
     fn live_reads_networkmanager() {
@@ -2895,8 +3789,8 @@ mod tests {
                 .store()
                 .routes()
                 .iter()
-                .any(|r| r.destination.is_empty()),
-            "the kernel's default route must be in the store"
+                .any(|r| r.destination == "0.0.0.0/0" || r.destination == "::/0"),
+            "the kernel's default route must be in the store, in the contract's CIDR spelling"
         );
         // The kernel answers first: the link table came from netlink, so the
         // counted NM fallback table was never installed.

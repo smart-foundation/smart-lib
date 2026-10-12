@@ -127,7 +127,7 @@ impl MethodAvailability {
 
 /// The published availability matrix for the network domain on Linux.
 ///
-/// One row per `Network` contract method (`@0`–`@75`), plus the domain's own
+/// One row per `Network` contract method (`@0`–`@82`), plus the domain's own
 /// `cancelSubscription` helper. The `l3_test` ids name the always-on mock-driven
 /// tests in [`crate::platforms::linux::network`] that exercise this backend's
 /// mapping — regenerated from the implementation after the transport
@@ -135,6 +135,29 @@ impl MethodAvailability {
 /// netlink kernel plus the counted NM policy seam. The read-only live probe
 /// (kernel sweeps + NetworkManager properties, `#[ignore]`d) is the separate
 /// founder-runnable check.
+///
+/// ## What each of the seven new rows (`@76`–`@82`) is, and why
+///
+/// The route pass added these methods against real CLI commands; the honest
+/// split on this backend follows the same law #9 rule the rest of the matrix
+/// does — kernel-answerable facts come from netlink, NM policy state comes from
+/// the seam, and a write no kernel path can own is refused with a reason:
+///
+/// | method | status | source / reason |
+/// |---|---|---|
+/// | `setInterfaceMtu @76` | DEGRADED | netlink `RTM_NEWLINK`/`IFLA_MTU` through the mockable `NetlinkWriter`; the mapping is mock-proven, the live proof is founder-run |
+/// | `forgetWifiNetwork @77` | DEGRADED | NM `Settings.Connection.Delete`; a host-mutating verb, mock-proven, founder-run live |
+/// | `listKnownWifiNetworks @78` | REAL | NM `Settings.ListConnections` + `Connection.GetSettings`; one counted seam call, no credential can cross |
+/// | `getRoutes @79` | REAL | netlink `RTM_GETROUTE` dumped fresh per read into the store |
+/// | `setRoutes @80` | UNAVAILABLE | no-privilege: a full route-table rewrite is a `CAP_NET_ADMIN` netlink sequence with no honest half-measure |
+/// | `getProxyConfig @81` | DEGRADED | the host's `/etc/environment` proxy block; a desktop settings daemon's per-session proxy is the half it cannot see |
+/// | `setProxyConfig @82` | UNAVAILABLE | no-privilege: writing the host proxy means writing `/etc` or driving a settings daemon (charter law #8) |
+///
+/// And `FirewallRule.hitCount @13` is carried on the domain type with the
+/// contract's own law — a counter is measured or it is absent — while
+/// `getFirewallRules` stays UNAVAILABLE, because a backend that cannot read the
+/// host's firewall tables must not report an empty rule list with invented
+/// counters.
 pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real("getInterfaces", 0, "l3_linux_network::get_interfaces_enumerates_the_kernel_link_table"),
     MethodAvailability::real("getStatus", 1, "l3_linux_network::get_status_four_states_distinct_with_explicit_sources"),
@@ -194,7 +217,7 @@ pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::unavailable("ping", 54, ReasonClass::NoBackend, "ICMP/UDP probe not implemented (ping_group_range allows ICMP)"),
     MethodAvailability::unavailable("traceroute", 55, ReasonClass::NoBackend, "traceroute (raw/UDP tricks) not implemented"),
     MethodAvailability::unavailable("setFirewallRules", 56, ReasonClass::NoPrivilege, "firewall programming needs CAP_NET_ADMIN (iptables/nftables)"),
-    MethodAvailability::unavailable("getFirewallRules", 57, ReasonClass::NoBackend, "firewall rule readout (iptables/nftables) not implemented"),
+    MethodAvailability::unavailable("getFirewallRules", 57, ReasonClass::NoBackend, "firewall rule readout (iptables/nftables) not implemented — the host's firewall tables cannot be read by this backend, so no rules are reported rather than an empty list; FirewallRule.hitCount @13 is carried on the type under the contract's own law (a counter is measured or it is absent) for the backend that can read them"),
     MethodAvailability::unavailable("getTimeSync", 58, ReasonClass::NoBackend, "NTP/PTP status readout not implemented"),
     MethodAvailability::unavailable("getSatelliteConfig", 59, ReasonClass::NotApplicable, "no satellite modem present on this host"),
     MethodAvailability::unavailable("setHotspotClientFilter", 60, ReasonClass::NoBackend, "hotspot client filtering not implemented"),
@@ -213,6 +236,14 @@ pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real("isNetworkingEnabled", 73, "l3_linux_network::is_networking_enabled_reads_the_policy_sweep_once"),
     MethodAvailability::degraded("setRadioEnabled", 74, "l3_linux_network::set_radio_wifi_calls_wireless_enabled", "implemented over NM WirelessEnabled; a host-mutating verb no kernel path can own, so the mock proves the mapping and the founder runs the live proof (NM polkit-gated; polkitd absent on this box)"),
     MethodAvailability::real("listRadioStates", 75, "l3_linux_network::radio_hard_and_soft_are_not_conflated_with_policy"),
+    // ── The route-pass additions (`@76`–`@82`) ──────────────────────────────
+    MethodAvailability::degraded("setInterfaceMtu", 76, "l3_linux_network::set_interface_mtu_writes_the_kernel_link_attribute", "the MTU attribute is the kernel's own: implemented over netlink RTM_NEWLINK/IFLA_MTU behind the mockable NetlinkWriter, so the mock proves the mapping and the founder runs the live proof (CAP_NET_ADMIN-gated; the read half, getInterfaces.mtU, is the store's IFLA_MTU)"),
+    MethodAvailability::degraded("forgetWifiNetwork", 77, "l3_linux_network::forget_wifi_network_deletes_the_nm_profile", "implemented over NM Settings.Connection.Delete; a host-mutating verb no kernel path can own, so the mock proves the mapping and the founder runs the live proof (NM polkit-gated; polkitd absent on this box)"),
+    MethodAvailability::real("listKnownWifiNetworks", 78, "l3_linux_network::list_known_wifi_networks_reads_nm_profiles"),
+    MethodAvailability::real("getRoutes", 79, "l3_linux_network::get_routes_serves_the_kernel_table"),
+    MethodAvailability::unavailable("setRoutes", 80, ReasonClass::NoPrivilege, "a route-table rewrite is a netlink RTM_NEWROUTE/RTM_DELROUTE sequence (CAP_NET_ADMIN) with no honest half-measure; the read half, getRoutes, is the kernel's own table"),
+    MethodAvailability::degraded("getProxyConfig", 81, "l3_linux_network::host_proxy_reads_the_environment_block", "reads the host's system-wide /etc/environment proxy block; a desktop settings daemon's per-session proxy is the other half of a desktop host's proxy state and is not read — the two together are the host's truth"),
+    MethodAvailability::unavailable("setProxyConfig", 82, ReasonClass::NoPrivilege, "the host proxy is written by the system administrator (/etc) or a desktop settings daemon; smart-lib never writes /etc (charter law #8)"),
 ];
 
 /// The Linux platform token for this matrix.
@@ -250,4 +281,11 @@ pub fn claimed_l3_tests() -> impl Iterator<Item = (&'static str, &'static str)> 
         .iter()
         .filter(|r| r.l3_test.is_some())
         .map(|r| (r.name, r.l3_test.unwrap()))
+}
+
+/// The row for one contract method name, or `None` when the matrix has no such
+/// method. The service harness and the CLI both resolve rows by name; a name no
+/// row answers is a caller bug, not an empty answer.
+pub fn method_availability_for(name: &str) -> Option<&'static MethodAvailability> {
+    NETWORK_AVAILABILITY.iter().find(|r| r.name == name)
 }

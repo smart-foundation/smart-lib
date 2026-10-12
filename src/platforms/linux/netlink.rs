@@ -49,14 +49,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use netlink_packet_core::{
-    ErrorMessage, NetlinkBuffer, NetlinkMessage, NetlinkPayload, NLM_F_DUMP, NLM_F_REQUEST,
-    NLMSG_ALIGNTO, Parseable,
+    ErrorMessage, NetlinkBuffer, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_DUMP,
+    NLM_F_REQUEST, NLMSG_ALIGNTO, Parseable,
 };
 use netlink_packet_route::{
     address::{AddressAttribute, AddressMessage},
     link::{LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage, State},
     route::{RouteAddress, RouteAttribute, RouteMessage},
-    RouteNetlinkMessage,
+    AddressFamily, RouteNetlinkMessage,
 };
 use netlink_sys::{protocols::NETLINK_ROUTE, Socket, SocketAddr};
 
@@ -269,8 +269,9 @@ pub struct KernelAddress {
 pub struct KernelRoute {
     /// The output interface's ifindex (`RTA_OIF`).
     pub index: u32,
-    /// The destination network in CIDR-free text form; empty for a default
-    /// route (no `RTA_DESTINATION`).
+    /// The destination network in CIDR text form ("10.0.0.0/8"); the default
+    /// route renders "0.0.0.0/0" — the kernel's own spelling of "no
+    /// destination", which is prefix length 0 and an absent `RTA_DESTINATION`.
     pub destination: String,
     /// The gateway text form; empty for on-link routes.
     pub gateway: String,
@@ -343,6 +344,12 @@ pub trait NetlinkReader {
     /// the kernel overran its notification queue — `ENOBUFS`); the caller must
     /// re-prime from [`NetlinkReader::snapshot`], never trust a partial view.
     fn drain_events(&self, max: usize) -> Result<Vec<KernelEvent>>;
+
+    /// The kernel's routing table as it stands NOW: a fresh `RTM_GETROUTE`
+    /// dump. Routes are not event-fed (the module doc explains why), so a
+    /// route read is a kernel dump — no daemon hop, and always current rather
+    /// than a table that went stale while the link table stayed fresh.
+    fn routes(&self) -> Result<Vec<KernelRoute>>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -564,6 +571,12 @@ impl NetlinkReader for RealNetlinkReader {
         })
     }
 
+    fn routes(&self) -> Result<Vec<KernelRoute>> {
+        let replies = self.dump(RouteNetlinkMessage::GetRoute(RouteMessage::default()))?;
+        let (_, _, routes) = fold_dump_replies(Vec::new(), Vec::new(), replies);
+        Ok(routes)
+    }
+
     fn next_event(&self) -> Result<KernelEvent> {
         loop {
             if let Some(event) = self.take_pending() {
@@ -636,6 +649,115 @@ impl RealNetlinkReader {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// The kernel WRITE seam (one verb: set a link's MTU).
+//
+// This is the second half of the kernel-first story, and it is deliberately
+// tiny. `setInterfaceMtu @76` is the one contract verb whose home is
+// unambiguous: the attribute lives on the link, the kernel reads it back as
+// `IFLA_MTU`, and NetworkManager has no MTU setter of its own — it writes the
+// same netlink attribute after a settings-connection update that would be a
+// whole second surface. So the write goes to the kernel, through the same
+// maintained crate ecosystem as every read, behind the same mockable-seam
+// shape.
+//
+// Law #8 governs its use exactly as it governs the NM control verbs: nothing
+// in build or test runs it (the production constructor is only reached from
+// the daemon or the founder's probe), the mock proves the mapping, and the
+// live proof is founder-run.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Everything the network backend needs to *write* to the kernel.
+pub trait NetlinkWriter {
+    /// Set one link's MTU (`RTM_NEWLINK` carrying `IFLA_MTU`). A host-mutating
+    /// verb: the production implementation really does change the host.
+    fn set_link_mtu(&self, index: u32, mtu: u32) -> Result<()>;
+}
+
+/// The production [`NetlinkWriter`]: one netlink socket, one `RTM_NEWLINK`
+/// transaction per call.
+pub struct RealNetlinkWriter {
+    socket: Option<Socket>,
+    open_error: Option<String>,
+    seq: AtomicU32,
+}
+
+impl RealNetlinkWriter {
+    /// Open the write socket. A socket that cannot be opened is not fatal:
+    /// every call answers `unavailable` with the reason, and the caller can
+    /// report the gap instead of pretending the write landed.
+    pub fn new() -> Self {
+        match Socket::new(NETLINK_ROUTE) {
+            Ok(socket) => RealNetlinkWriter {
+                socket: Some(socket),
+                open_error: None,
+                seq: AtomicU32::new(1),
+            },
+            Err(e) => RealNetlinkWriter {
+                socket: None,
+                open_error: Some(format!("netlink write socket: {e}")),
+                seq: AtomicU32::new(1),
+            },
+        }
+    }
+
+    /// Send one message with `NLM_F_ACK` and wait for the kernel's answer. An
+    /// `NLMSG_ERROR` with no code is an ACK (success); a non-zero code is the
+    /// kernel's own refusal, mapped verbatim.
+    fn transact(&self, request: RouteNetlinkMessage) -> Result<()> {
+        let Some(socket) = self.socket.as_ref() else {
+            return Err(Error::unavailable(
+                self.open_error
+                    .clone()
+                    .unwrap_or_else(|| "netlink write socket unavailable".to_string()),
+            ));
+        };
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let mut message = NetlinkMessage::from(request);
+        message.header.sequence_number = seq;
+        message.header.port_number = 0;
+        message.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        message.finalize();
+        let mut wire = alloc::vec![0u8; message.buffer_len()];
+        message.serialize(&mut wire);
+        socket
+            .send_to(&wire, &SocketAddr::new(0, 0), 0)
+            .map_err(|e| Error::failed(format!("netlink write send: {e}")))?;
+        loop {
+            let (bytes, _from) = socket
+                .recv_from_full()
+                .map_err(|e| Error::failed(format!("netlink write recv: {e}")))?;
+            for parsed in parse_datagram(&bytes)? {
+                if parsed.header.sequence_number != seq {
+                    continue; // a stale reply to an earlier transaction
+                }
+                match parsed.payload {
+                    // The ACK: an NLMSG_ERROR with no code is the kernel
+                    // saying "accepted", not an error.
+                    NetlinkPayload::Error(ref err) if err.code.is_none() => return Ok(()),
+                    NetlinkPayload::Error(ref err) => return Err(map_nlmsgerr(err)),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+impl Default for RealNetlinkWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NetlinkWriter for RealNetlinkWriter {
+    fn set_link_mtu(&self, index: u32, mtu: u32) -> Result<()> {
+        let mut link = LinkMessage::default();
+        link.header.index = index;
+        link.attributes = alloc::vec![LinkAttribute::Mtu(mtu)];
+        self.transact(RouteNetlinkMessage::NewLink(link))
+    }
+}
+
 /// Return the rfkill entries discovered on the host (public, for the read-only
 /// live proof and for callers that want the raw radio-block view).
 pub fn read_rfkill_readonly() -> Result<Vec<RfkillState>> {
@@ -702,6 +824,11 @@ impl NetlinkReader for MockNetlink {
         Ok(self.snapshot.clone())
     }
 
+    fn routes(&self) -> Result<Vec<KernelRoute>> {
+        self.check()?;
+        Ok(self.snapshot.routes.clone())
+    }
+
     fn next_event(&self) -> Result<KernelEvent> {
         self.check()?;
         let mut events = self.events.lock().unwrap();
@@ -729,12 +856,57 @@ impl NetlinkReader for std::sync::Arc<MockNetlink> {
         (**self).snapshot()
     }
 
+    fn routes(&self) -> Result<Vec<KernelRoute>> {
+        (**self).routes()
+    }
+
     fn next_event(&self) -> Result<KernelEvent> {
         (**self).next_event()
     }
 
     fn drain_events(&self, max: usize) -> Result<Vec<KernelEvent>> {
         (**self).drain_events(max)
+    }
+}
+
+/// A scripted kernel write seam (tests only): records the MTU writes a backend
+/// asks for, injects channel faults, and — like every mock here — never
+/// touches the host (law #8).
+#[cfg(test)]
+pub(crate) struct MockNetlinkWriter {
+    pub(crate) writes: Mutex<Vec<(u32, u32)>>,
+    pub(crate) fault: Mutex<Option<Error>>,
+}
+
+#[cfg(test)]
+impl MockNetlinkWriter {
+    /// A writer with nothing recorded yet.
+    pub(crate) fn new() -> Self {
+        MockNetlinkWriter {
+            writes: Mutex::new(Vec::new()),
+            fault: Mutex::new(None),
+        }
+    }
+
+    /// Inject a write fault (the socket died, the kernel refused).
+    pub(crate) fn fail_with(&self, error: Error) {
+        *self.fault.lock().unwrap() = Some(error);
+    }
+
+    fn check(&self) -> Result<()> {
+        match self.fault.lock().unwrap().as_ref() {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl NetlinkWriter for MockNetlinkWriter {
+    fn set_link_mtu(&self, index: u32, mtu: u32) -> Result<()> {
+        self.check()?;
+        self.writes.lock().unwrap().push((index, mtu));
+        Ok(())
     }
 }
 
@@ -825,7 +997,11 @@ pub fn parse_address_message(msg: &AddressMessage) -> KernelAddress {
     address
 }
 
-/// Parse one `RouteMessage` into the store's route record.
+/// Parse one `RouteMessage` into the store's route record. The destination is
+/// rendered in the contract's CIDR spelling: the address the kernel named plus
+/// the prefix length from the message header. A default route — no
+/// `RTA_DESTINATION`, prefix length 0 — renders "0.0.0.0/0" (or "::/0"), which
+/// is the kernel's own truth, not a convention invented here.
 pub fn parse_route_message(msg: &RouteMessage) -> KernelRoute {
     let mut route = KernelRoute {
         index: 0,
@@ -842,6 +1018,15 @@ pub fn parse_route_message(msg: &RouteMessage) -> KernelRoute {
             RouteAttribute::Priority(metric) => route.metric = *metric,
             _ => {}
         }
+    }
+    if !route.destination.is_empty() {
+        route.destination = format!("{}/{}", route.destination, msg.header.destination_prefix_length);
+    } else if msg.header.destination_prefix_length == 0 {
+        // No destination attribute: the default route of this address family.
+        route.destination = match msg.header.address_family {
+            AddressFamily::Inet6 => "::/0".to_string(),
+            _ => "0.0.0.0/0".to_string(),
+        };
     }
     route
 }
@@ -1078,6 +1263,7 @@ pub fn parse_rfkill_events(buf: &[u8]) -> Vec<RfkillState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ErrorCode;
     use netlink_packet_core::DefaultNla;
     use netlink_packet_route::address::{AddressAttribute, AddressMessage};
     use netlink_packet_route::link::{
@@ -1482,6 +1668,114 @@ mod tests {
         // A channel fault on the drain is the caller's re-prime signal.
         mock.fail_with(Error::temporary("mock netlink: channel fault"));
         assert!(mock.drain_events(4).is_err());
+    }
+
+    /// The kernel's routing table renders in the contract's CIDR spelling: the
+    /// address the kernel named plus the prefix length from the message header.
+    /// A default route — no `RTA_DESTINATION`, prefix length 0 — renders
+    /// "0.0.0.0/0", which is the kernel's own truth rather than a convention
+    /// invented at this layer.
+    #[test]
+    fn routes_render_in_the_contract_cidr_spelling() {
+        // A /24 subnet route through a gateway.
+        let mut subnet = RouteMessage::default();
+        subnet.header.address_family = AddressFamily::Inet;
+        subnet.header.destination_prefix_length = 24;
+        subnet.header.table = 254;
+        subnet.attributes = alloc::vec![
+            RouteAttribute::Destination(RouteAddress::Inet(std::net::Ipv4Addr::new(10, 0, 0, 0))),
+            RouteAttribute::Gateway(RouteAddress::Inet(std::net::Ipv4Addr::new(192, 168, 18, 1))),
+            RouteAttribute::Oif(2),
+            RouteAttribute::Priority(100),
+        ];
+        let route = parse_route_message(&subnet);
+        assert_eq!(route.destination, "10.0.0.0/24");
+        assert_eq!(route.gateway, "192.168.18.1");
+        assert_eq!(route.metric, 100);
+        assert_eq!(route.index, 2);
+        assert_eq!(route.table, 254);
+
+        // The default route: no destination attribute, prefix length 0.
+        let mut default = RouteMessage::default();
+        default.header.address_family = AddressFamily::Inet;
+        default.header.destination_prefix_length = 0;
+        default.header.table = 254;
+        default.attributes = alloc::vec![
+            RouteAttribute::Gateway(RouteAddress::Inet(std::net::Ipv4Addr::new(192, 168, 18, 1))),
+            RouteAttribute::Oif(2),
+        ];
+        let route = parse_route_message(&default);
+        assert_eq!(route.destination, "0.0.0.0/0", "the default route is the kernel's own spelling");
+        assert_eq!(route.gateway, "192.168.18.1");
+
+        // An IPv6 default route spells "::/0", never a v4 guess.
+        let mut default6 = RouteMessage::default();
+        default6.header.address_family = AddressFamily::Inet6;
+        default6.header.destination_prefix_length = 0;
+        let route = parse_route_message(&default6);
+        assert_eq!(route.destination, "::/0");
+        assert!(route.gateway.is_empty(), "an on-link route has no gateway");
+
+        // Through the production wire path too (the crate's own serializer).
+        let wire = serialize(RouteNetlinkMessage::NewRoute(subnet));
+        let inner = match NetlinkMessage::<RouteNetlinkMessage>::deserialize(&wire).unwrap().payload {
+            NetlinkPayload::InnerMessage(m) => m,
+            other => panic!("expected an inner message, got {other:?}"),
+        };
+        match inner {
+            RouteNetlinkMessage::NewRoute(route) => {
+                assert_eq!(parse_route_message(&route).destination, "10.0.0.0/24")
+            }
+            other => panic!("expected NewRoute, got {other:?}"),
+        }
+    }
+
+    /// The MTU write request is a real `RTM_NEWLINK` carrying `IFLA_MTU` on the
+    /// right ifindex — built by the production serializer and parsed back by the
+    /// same crates, so a request that the kernel would reject is caught here
+    /// rather than on the founder's host.
+    #[test]
+    fn the_mtu_write_request_is_a_real_rtm_newlink() {
+        let mut link = LinkMessage::default();
+        link.header.index = 3;
+        link.attributes = alloc::vec![LinkAttribute::Mtu(9000)];
+        let request = RouteNetlinkMessage::NewLink(link);
+        // The flags the production `transact` sets, built here explicitly so
+        // the assertion below tests the writer's real request shape.
+        let mut message = NetlinkMessage::from(request);
+        message.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        message.finalize();
+        let mut wire = alloc::vec![0u8; message.buffer_len()];
+        message.serialize(&mut wire);
+        let parsed = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&wire).unwrap();
+        assert!(parsed.header.flags & NLM_F_ACK != 0, "a write asks the kernel to ACK");
+        assert!(parsed.header.flags & NLM_F_REQUEST != 0);
+        match parsed.payload {
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)) => {
+                assert_eq!(link.header.index, 3);
+                assert!(
+                    link.attributes.contains(&LinkAttribute::Mtu(9000)),
+                    "the request must carry IFLA_MTU, not a whole link re-declaration"
+                );
+                assert_eq!(link.attributes.len(), 1, "and only that attribute");
+            }
+            other => panic!("expected NewLink, got {other:?}"),
+        }
+    }
+
+    /// The scripted write seam records what a backend asked for, and a fault on
+    /// it reaches the caller unchanged (error injection stays total over the
+    /// write path too).
+    #[test]
+    fn the_mock_writer_records_and_can_fault() {
+        let writer = MockNetlinkWriter::new();
+        writer.set_link_mtu(3, 9000).unwrap();
+        writer.set_link_mtu(2, 1500).unwrap();
+        assert_eq!(*writer.writes.lock().unwrap(), alloc::vec![(3, 9000), (2, 1500)]);
+        for code in ErrorCode::ALL {
+            writer.fail_with(Error::new(code));
+            assert_eq!(writer.set_link_mtu(3, 1500).unwrap_err().code, code);
+        }
     }
 
     /// A read-only live probe of the kernel's link table over a real netlink    /// socket. Law #8: reads only (RTM_GETLINK/GETADDR/GETROUTE dumps +

@@ -517,7 +517,17 @@ fn write_modules(
 /// placeholder to a `#[path]` declaration the moment its owner writes the file
 /// (or, for `platforms`, the moment an `src/platforms/<os>.rs` appears).
 fn wave_modules(manifest_dir: &Path) -> Vec<codegen::modules::WaveModule> {
-    let specs: [(&str, &'static [&'static str]); 4] = [
+    let specs: [(&str, &'static [&'static str]); 5] = [
+        (
+            "serve",
+            &[
+                "Placeholder: `src/serve/**` is the service-harness wave's file.",
+                "Write `src/serve/mod.rs` (or `src/serve.rs`) and it becomes this module",
+                "automatically. The harness turns any domain backend into a capnp",
+                "service over the four `Channel` transports; network is the first",
+                "served domain, not a special case.",
+            ],
+        ),
         (
             "core",
             &[

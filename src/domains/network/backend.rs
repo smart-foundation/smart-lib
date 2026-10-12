@@ -34,10 +34,11 @@ use super::types::{
     AddressAssignmentInfo, AddressAssignmentOptionsEcho, AddressAssignmentOutcome,
     BandwidthSlotInfo, CaptivePortalInfo, CellularConfigInfo, ConnectConfig, ConnStatus,
     DnsServerInfo, DtnBundleInfo, FirewallRuleInfo, HotspotConfigEcho, HotspotStatusInfo,
-    InterfaceCounters, InterfaceSnapshot, IpAddress, Ipv6ConfigInfo, NanPeerInfo, NicProviderHandle,
-    Pagination, Page, QosRuleInfo, RadioState, SatelliteConfigEcho, SliceConfigEcho, SliceId,
-    SliceInfo, SubscriptionId, TelemetryInfo, TimeSyncInfo, TopologyLinkInfo, TopologyNodeInfo,
-    TracerouteHopInfo, VpnConnectionInfo, VpnProfileInfo, WifiNetwork, WifiNanConfigEcho,
+    InterfaceCounters, InterfaceSnapshot, IpAddress, Ipv6ConfigInfo, KnownWifiNetwork, NanPeerInfo,
+    NicProviderHandle, Pagination, Page, ProxyConfigInfo, QosRuleInfo, RadioState, RouteInfo,
+    SatelliteConfigEcho, SliceConfigEcho, SliceId, SliceInfo, SubscriptionId, TelemetryInfo,
+    TimeSyncInfo, TopologyLinkInfo, TopologyNodeInfo, TracerouteHopInfo, VpnConnectionInfo,
+    VpnProfileInfo, WifiNetwork, WifiNanConfigEcho,
 };
 
 /// A protocol-compliant network backend: one method per contract method, with
@@ -614,6 +615,83 @@ pub trait NetworkBackend {
     fn nic_provider(&self) -> Result<NicProviderHandle> {
         Err(Error::not_supported(
             "no-backend: NIC driver provider surface (netlink/ethtool/DPDK) not implemented",
+        ))
+    }
+
+    // ── Configuration the command surface proved missing (`@76`–`@82`) ───────
+    //
+    // The seven methods the route pass added to the contract. Every one of them
+    // has an honest answer on this backend, and the availability matrix names
+    // which kind: REAL (kernel- or policy-answered, test-backed), DEGRADED
+    // (a host-mutating verb whose mapping the mock proves and whose live proof
+    // is founder-run), or UNAVAILABLE with a reasonClass and a reason.
+
+    /// `setInterfaceMtu @76` — set one interface's MTU. Host-mutating: the
+    /// kernel owns the attribute and writes it with `CAP_NET_ADMIN`. The read
+    /// half (`getInterfaces`' `mtU`) is the store's `IFLA_MTU`, a kernel fact.
+    fn set_interface_mtu(&self, _interface: NetworkInterfaceId, _mtu: u32) -> Result<()> {
+        Err(Error::not_supported(
+            "no-privilege: an MTU write is a netlink RTM_NEWLINK/IFLA_MTU or a NetworkManager \
+             setting write (CAP_NET_ADMIN / polkit-gated); the read half is the kernel's own \
+             IFLA_MTU in the state store",
+        ))
+    }
+
+    /// `forgetWifiNetwork @77` — drop one remembered network. Host-mutating:
+    /// the remembered set is NetworkManager's connection profiles, and a
+    /// delete on it is polkit-gated. Carries no credential: forgetting a
+    /// network removes the secret reference with the profile, it never
+    /// returns one.
+    fn forget_wifi_network(&self, _ssid: &str) -> Result<()> {
+        Err(Error::not_supported(
+            "no-privilege: forgetting a network deletes a NetworkManager connection profile \
+             (polkit-gated)",
+        ))
+    }
+
+    /// `listKnownWifiNetworks @78` — the remembered-set read. NM policy state:
+    /// the kernel does not own connection profiles, so this is one counted
+    /// policy read, not a per-profile daemon crawl.
+    fn list_known_wifi_networks(&self, _page: Pagination) -> Result<Page<KnownWifiNetwork>> {
+        Err(Error::not_supported(
+            "no-backend: NetworkManager connection-profile readout (Settings.ListConnections + \
+             Connection.GetSettings) not wired",
+        ))
+    }
+
+    /// `getRoutes @79` — the kernel's routing table. A kernel-answerable fact:
+    /// `RTM_GETROUTE` reaches the store, so a read costs no daemon hop.
+    fn get_routes(&self, _page: Pagination) -> Result<Page<RouteInfo>> {
+        Err(Error::not_supported(
+            "no-backend: routing-table readout (netlink RTM_GETROUTE) not wired into this backend",
+        ))
+    }
+
+    /// `setRoutes @80` — replace one interface's routes. A full-table rewrite
+    /// is a host-mutating `CAP_NET_ADMIN` verb; the read half (`getRoutes`) is
+    /// the kernel's own table.
+    fn set_routes(&self, _interface: NetworkInterfaceId, _routes: &[RouteInfo]) -> Result<()> {
+        Err(Error::not_supported(
+            "no-privilege: a route-table rewrite is a netlink RTM_NEWROUTE/RTM_DELROUTE sequence \
+             (CAP_NET_ADMIN); not implemented — the read half, getRoutes, is the kernel's own table",
+        ))
+    }
+
+    /// `getProxyConfig @81` — the host's own proxy. A file-level host fact the
+    /// daemon does not own; see `platforms::linux` for the exact source.
+    fn get_proxy_config(&self) -> Result<ProxyConfigInfo> {
+        Err(Error::not_supported(
+            "no-backend: host proxy readout (the /etc proxy block) not wired into this backend",
+        ))
+    }
+
+    /// `setProxyConfig @82` — write the host's own proxy. Host-mutating and,
+    /// on this platform, a root write to `/etc` (or a desktop settings
+    /// daemon's business): smart-lib does not write `/etc` (charter law #8).
+    fn set_proxy_config(&self, _config: &ProxyConfigInfo) -> Result<()> {
+        Err(Error::not_supported(
+            "no-privilege: the host proxy is written by the system administrator (/etc) or a \
+             desktop settings daemon; smart-lib never writes /etc (charter law #8)",
         ))
     }
 

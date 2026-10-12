@@ -30,6 +30,18 @@ resolver = "2"
 name = "smart_lib"
 path = "src/lib.rs"
 
+# The daemon serves the network contract, so it is built only when its
+# features are on (charter law #2: you pay only for what you enable).
+# Without this line the example's `#![cfg]` gate strips `main` and the
+# non-default feature sets fail to compile the example target.
+[[example]]
+name = "smart-service"
+required-features = ["domain-network", "std"]
+
+[[example]]
+name = "network_probe"
+required-features = ["domain-network", "std"]
+
 [features]
 # The default set is deliberately NOT "everything": charter law #2 exists to stop
 # the old all-domains-at-once build. An application enables the domains it uses;

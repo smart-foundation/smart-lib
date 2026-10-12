@@ -3,7 +3,8 @@
 //! consistency, the trait's honest-Unavailable defaults, and total error
 //! propagation through a scripted backend. All hermetic — no host I/O.
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::core::ids::NetworkInterfaceId;
@@ -17,8 +18,9 @@ use super::availability::{
 };
 use super::backend::NetworkBackend;
 use super::types::{
-    ConnStatus, HostState, HostStateSource, InterfaceCounters, InterfaceSnapshot, Pagination, Page,
-    RadioState, SubscriptionId,
+    ConnStatus, FirewallRuleInfo, HostState, HostStateSource, InterfaceCounters,
+    InterfaceSnapshot, KnownWifiNetwork, Pagination, Page, ProxyConfigInfo, RadioState, RouteInfo,
+    SubscriptionId,
 };
 
 /// A scripted backend: enough to satisfy the trait, with an injectable error on
@@ -112,6 +114,36 @@ impl NetworkBackend for Scripted {
         Ok(false)
     }
     fn set_data_roaming_enabled(&self, _enabled: bool) -> crate::core::Result<()> {
+        Ok(())
+    }
+    // The seven route-pass methods, scripted so the domain-level tests can
+    // exercise their shapes (and their honest defaults, which the trait keeps).
+    fn set_interface_mtu(&self, _interface: NetworkInterfaceId, _mtu: u32) -> crate::core::Result<()> {
+        Ok(())
+    }
+    fn forget_wifi_network(&self, _ssid: &str) -> crate::core::Result<()> {
+        Ok(())
+    }
+    fn list_known_wifi_networks(
+        &self,
+        _page: Pagination,
+    ) -> crate::core::Result<Page<KnownWifiNetwork>> {
+        Ok(Page::default())
+    }
+    fn get_routes(&self, _page: Pagination) -> crate::core::Result<Page<RouteInfo>> {
+        Ok(Page::default())
+    }
+    fn set_routes(
+        &self,
+        _interface: NetworkInterfaceId,
+        _routes: &[RouteInfo],
+    ) -> crate::core::Result<()> {
+        Ok(())
+    }
+    fn get_proxy_config(&self) -> crate::core::Result<ProxyConfigInfo> {
+        Ok(ProxyConfigInfo::default())
+    }
+    fn set_proxy_config(&self, _config: &ProxyConfigInfo) -> crate::core::Result<()> {
         Ok(())
     }
 }
@@ -275,4 +307,200 @@ fn error_injection_is_total_over_all_20_codes() {
     }
     backend.inject = None;
     assert!(backend.get_status(NetworkInterfaceId::new(1)).is_ok());
+}
+
+// ── The seven route-pass types (`@76`–`@82`) ──────────────────────────────
+
+/// Round-trip every one of the new value types through a real serialized capnp
+/// message: the contract's own structs are the wire, so `write_to` →
+/// serialize → `from_reader` must be the identity for every field.
+#[test]
+fn the_route_pass_types_round_trip_through_the_wire() {
+    // KnownWifiNetwork — and the assertion that it carries no credential.
+    let known = KnownWifiNetwork {
+        ssid: "hem".to_string(),
+        auto_connect: true,
+        last_connected: 1_700_000_000_000_000_000,
+        security: "wpa3".to_string(),
+    };
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut builder =
+            message.init_root::<network_capnp::known_wifi_network::Builder<'_>>();
+        known.write_to(&mut builder);
+    }
+    let mut buf = Vec::new();
+    capnp::serialize::write_message(&mut buf, &message).expect("serialize");
+    let reader = capnp::serialize::read_message(&mut &buf[..], capnp::message::ReaderOptions::new())
+        .expect("deserialize");
+    let wire = reader
+        .get_root::<network_capnp::known_wifi_network::Reader<'_>>()
+        .expect("root");
+    assert_eq!(KnownWifiNetwork::from_reader(&wire), known);
+    // The generated struct's field set is the proof: a credential is not one of
+    // them, so no secret can cross this surface (the contract's own shape).
+    let fields = [
+        "ssid",
+        "autoConnect",
+        "lastConnected",
+        "security",
+        "metadata",
+    ];
+    for field in fields {
+        assert!(
+            format!("{:?}", wire).contains(field) || field == "metadata",
+            "KnownWifiNetwork carries {field}"
+        );
+    }
+    for forbidden in ["credential", "password", "passphrase", "secret", "psk"] {
+        assert!(
+            !format!("{:?}", wire).contains(forbidden),
+            "KnownWifiNetwork must not carry {forbidden}"
+        );
+    }
+
+    // Route, including the default route's CIDR spelling.
+    let route = RouteInfo {
+        destination_cidr: "0.0.0.0/0".to_string(),
+        gateway: "192.168.18.1".to_string(),
+        metric: 600,
+        interface_id: NetworkInterfaceId::new(0xdead_beef),
+    };
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut builder = message.init_root::<network_capnp::route::Builder<'_>>();
+        route.write_to(&mut builder);
+    }
+    let mut buf = Vec::new();
+    capnp::serialize::write_message(&mut buf, &message).expect("serialize");
+    let reader = capnp::serialize::read_message(&mut &buf[..], capnp::message::ReaderOptions::new())
+        .expect("deserialize");
+    let wire = reader.get_root::<network_capnp::route::Reader<'_>>().expect("root");
+    assert_eq!(RouteInfo::from_reader(&wire), route);
+
+    // ProxyConfig, with the bypass list preserving order and duplicates.
+    let proxy = ProxyConfigInfo {
+        enabled: true,
+        url: "http://proxy.corp:3128".to_string(),
+        bypass: alloc::vec![
+            ("localhost".to_string(), String::new()),
+            ("127.0.0.1".to_string(), String::new()),
+            ("localhost".to_string(), String::new()),
+        ],
+    };
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut builder = message.init_root::<network_capnp::proxy_config::Builder<'_>>();
+        proxy.write_to(&mut builder);
+    }
+    let mut buf = Vec::new();
+    capnp::serialize::write_message(&mut buf, &message).expect("serialize");
+    let reader = capnp::serialize::read_message(&mut &buf[..], capnp::message::ReaderOptions::new())
+        .expect("deserialize");
+    let wire = reader
+        .get_root::<network_capnp::proxy_config::Reader<'_>>()
+        .expect("root");
+    assert_eq!(ProxyConfigInfo::from_reader(&wire), proxy);
+
+    // FirewallRule, the field the route pass added: hitCount travels.
+    let rule = FirewallRuleInfo {
+        name: "allow-ssh".to_string(),
+        enabled: true,
+        protocol: "tcp".to_string(),
+        action: "accept".to_string(),
+        hit_count: 4_242,
+    };
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut builder = message.init_root::<network_capnp::firewall_rule::Builder<'_>>();
+        rule.write_to(&mut builder);
+    }
+    let mut buf = Vec::new();
+    capnp::serialize::write_message(&mut buf, &message).expect("serialize");
+    let reader = capnp::serialize::read_message(&mut &buf[..], capnp::message::ReaderOptions::new())
+        .expect("deserialize");
+    let wire = reader
+        .get_root::<network_capnp::firewall_rule::Reader<'_>>()
+        .expect("root");
+    assert_eq!(FirewallRuleInfo::from_reader(&wire), rule);
+    assert_eq!(wire.get_hit_count(), 4_242, "hitCount must survive the wire");
+}
+
+/// The firewall action mapping is total over the contract's own enum, and an
+/// unknown token lands on `custom` — the enum's open member — rather than a
+/// guessed action.
+#[test]
+fn firewall_action_mapping_is_total_and_unknown_tolerant() {
+    use super::availability::method_availability_for;
+    use super::types::{firewall_action_from_token, firewall_action_token};
+    use crate::schema::network_capnp::FirewallAction;
+
+    for token in ["accept", "drop", "reject", "log"] {
+        let action = firewall_action_from_token(token);
+        assert_eq!(firewall_action_token(action), token);
+    }
+    assert_eq!(
+        firewall_action_from_token("a-2046-action"),
+        FirewallAction::Custom
+    );
+    assert_eq!(firewall_action_token(FirewallAction::Custom), "custom");
+
+    // Every row in the matrix is reachable by name: the harness and the CLI
+    // both look rows up that way, so a name that no row answers is a bug.
+    for row in NETWORK_AVAILABILITY {
+        assert!(
+            method_availability_for(row.name).is_some(),
+            "{} has no row",
+            row.name
+        );
+    }
+    assert!(method_availability_for("noSuchMethod").is_none());
+}
+
+/// The seven route-pass rows are exactly the statuses the implementation
+/// backs: the kernel/policy reads are REAL, the two writes a kernel path can
+/// own are DEGRADED with an l3_test, and the two writes nothing here can own
+/// are UNAVAILABLE with a reason class. Nothing in the seven is a stub.
+#[test]
+fn the_route_pass_rows_are_honest_about_what_they_are() {
+    let row = |name: &str| NETWORK_AVAILABILITY.iter().find(|r| r.name == name).unwrap();
+    for real in ["listKnownWifiNetworks", "getRoutes"] {
+        let r = row(real);
+        assert_eq!(r.status, AvailStatus::Real, "{real}");
+        assert!(r.reason.is_empty(), "a REAL row carries no reason");
+        assert!(r.l3_test.is_some(), "{real} must name its backing test");
+    }
+    for degraded in ["setInterfaceMtu", "forgetWifiNetwork", "getProxyConfig"] {
+        let r = row(degraded);
+        assert_eq!(r.status, AvailStatus::Degraded, "{degraded}");
+        assert!(!r.reason.is_empty(), "{degraded} names what is degraded");
+        assert!(r.l3_test.is_some(), "{degraded} must name its backing test");
+    }
+    for unavailable in ["setRoutes", "setProxyConfig"] {
+        let r = row(unavailable);
+        assert_eq!(r.status, AvailStatus::Unavailable, "{unavailable}");
+        assert_eq!(r.reason_class, Some(ReasonClass::NoPrivilege), "{unavailable}");
+        assert!(!r.reason.is_empty(), "{unavailable} names why");
+    }
+    // hitCount is carried on the type, and the firewall read stays honest.
+    let firewall = row("getFirewallRules");
+    assert_eq!(firewall.status, AvailStatus::Unavailable);
+    assert!(
+        firewall.reason.contains("hitCount"),
+        "the firewall row must state the hitCount law: {}",
+        firewall.reason
+    );
+    // The matrix now covers every contract ordinal of the network family.
+    let ordinals: Vec<u16> = NETWORK_AVAILABILITY
+        .iter()
+        .map(|r| r.ordinal)
+        .filter(|o| *o != 0xFFFF)
+        .collect();
+    assert_eq!(ordinals.len(), 83, "one row per contract method @0–@82");
+    for expected in 0u16..=82 {
+        assert!(
+            ordinals.contains(&expected),
+            "ordinal @{expected} has no availability row"
+        );
+    }
 }
