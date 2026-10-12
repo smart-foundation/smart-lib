@@ -203,6 +203,17 @@ impl HostStateSource {
             HostStateSource::NmPolicy => "nm-policy",
         }
     }
+
+    /// Where a `HostState` decided its verdict, as a pure function of the state
+    /// (used when a status is read back off the contract wire, which carries the
+    /// token but not the source): the two states only the kernel can decide are
+    /// kernel-sourced, everything else was decided by NetworkManager policy.
+    pub const fn of(state: HostState) -> Self {
+        match state {
+            HostState::CarrierDown | HostState::NoFirmware => HostStateSource::Kernel,
+            _ => HostStateSource::NmPolicy,
+        }
+    }
 }
 
 /// Per-interface connection status, the honest subset this milestone reports
@@ -224,6 +235,13 @@ pub struct ConnStatus {
     pub behind_captive: bool,
     /// WHY the interface is or is not usable — the four-state surface.
     pub host_state: HostState,
+    /// WHERE that verdict came from — the transport hierarchy (law #9) made
+    /// auditable on the answer itself: `carrier-down` / `no-firmware` are the
+    /// kernel's own facts (netlink); `networking-disabled` / `radio-off` /
+    /// `unmanaged` are NetworkManager policy (the counted D-Bus fallback). The
+    /// contract wire carries the `hostState` token only, so this is the local
+    /// enrichment that survives the round-trip via [`HostStateSource::of`].
+    pub host_state_source: HostStateSource,
     /// WiFi SSID when connected and the link is WiFi; empty otherwise.
     pub ssid: String,
 }
@@ -269,6 +287,7 @@ impl ConnStatus {
             metered: reader.get_metered(),
             behind_captive: reader.get_behind_captive(),
             host_state: HostState::from_reader(reader),
+            host_state_source: HostStateSource::of(HostState::from_reader(reader)),
             ssid,
         }
     }

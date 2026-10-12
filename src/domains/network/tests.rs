@@ -17,8 +17,8 @@ use super::availability::{
 };
 use super::backend::NetworkBackend;
 use super::types::{
-    ConnStatus, HostState, InterfaceCounters, InterfaceSnapshot, Pagination, Page, RadioState,
-    SubscriptionId,
+    ConnStatus, HostState, HostStateSource, InterfaceCounters, InterfaceSnapshot, Pagination, Page,
+    RadioState, SubscriptionId,
 };
 
 /// A scripted backend: enough to satisfy the trait, with an injectable error on
@@ -54,6 +54,7 @@ impl NetworkBackend for Scripted {
                 metered: false,
                 behind_captive: false,
                 host_state: HostState::Managed,
+                host_state_source: HostStateSource::of(HostState::Managed),
                 ssid: String::new(),
             }),
         }
@@ -150,6 +151,7 @@ fn host_state_round_trips_through_the_wire() {
             metered: false,
             behind_captive: false,
             host_state: state,
+            host_state_source: HostStateSource::of(state),
             ssid: String::from("hem"),
         };
         let mut message = capnp::message::Builder::new_default();

@@ -8,6 +8,20 @@
 //! `listUnavailable`: every non-`REAL` row here is answered at runtime by the
 //! method returning `notSupported` whose message begins with the row's
 //! `reasonClass` (see [`super::backend`]).
+//!
+//! ## The transport behind each row (charter law #9)
+//!
+//! The kernel-authoritative reads — `getInterfaces`, `getStatus`,
+//! `subscribeStatus`/`pullStatus`, `getCounters`, `subscribeCounters`/
+//! `pullCounters` — are served from netlink, event-fed into the Linux backend's
+//! state store (`crate::platforms::linux::netlink`), so a read costs no daemon
+//! hop. `isDataRoamingEnabled` also becomes a kernel fact: the wwan net device
+//! the kernel registers says whether a cellular modem exists at all. NM remains
+//! the home of the policy reads (`isNetworkingEnabled`, `isMobileDataEnabled`,
+//! `listRadioStates`) — one counted fallback sweep, cached against the store's
+//! topology revision — and of every control verb. The D-Bus device enumeration
+//! is no longer a read path at all: it only synthesises the link table when the
+//! kernel cannot answer, and every such fallback is counted.
 
 /// The compiled schema file ID, read from `network.capnp`'s `@0x…` line. The
 /// matrix can never describe a contract the build did not compile.
@@ -113,17 +127,19 @@ impl MethodAvailability {
 
 /// The published availability matrix for the network domain on Linux.
 ///
-/// One row per `Network` contract method (`@0`–`@75`), plus the domain's two
-/// own-subscription helpers (`cancelSubscription`, and `subscribe/pull` are
-/// already contract rows). The `l3_test` ids name the always-on mock-driven
+/// One row per `Network` contract method (`@0`–`@75`), plus the domain's own
+/// `cancelSubscription` helper. The `l3_test` ids name the always-on mock-driven
 /// tests in [`crate::platforms::linux::network`] that exercise this backend's
-/// mapping; the read-only live probe that reads real NetworkManager state over
-/// D-Bus is a separate, `#[ignore]`d, founder-runnable check.
+/// mapping — regenerated from the implementation after the transport
+/// correction, so every REAL row now names a test that drives a scripted
+/// netlink kernel plus the counted NM policy seam. The read-only live probe
+/// (kernel sweeps + NetworkManager properties, `#[ignore]`d) is the separate
+/// founder-runnable check.
 pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
-    MethodAvailability::real("getInterfaces", 0, "l3_linux_network::get_interfaces_and_radio_states"),
-    MethodAvailability::real("getStatus", 1, "l3_linux_network::get_status_four_states_distinct"),
+    MethodAvailability::real("getInterfaces", 0, "l3_linux_network::get_interfaces_enumerates_the_kernel_link_table"),
+    MethodAvailability::real("getStatus", 1, "l3_linux_network::get_status_four_states_distinct_with_explicit_sources"),
     MethodAvailability::real("subscribeStatus", 2, "l3_linux_network::status_subscription_bounded_pull"),
-    MethodAvailability::real("pullStatus", 3, "l3_linux_network::status_subscription_bounded_pull"),
+    MethodAvailability::real("pullStatus", 3, "l3_linux_network::subscription_pulls_count_the_updates_they_collapse"),
     MethodAvailability::real("cancelSubscription", 0xFFFF, "l3_linux_network::cancel_retires_token"), // domain helper (StatusSubscription.cancel @1)
     MethodAvailability::unavailable("connect", 4, ReasonClass::NoPrivilege, "WPA association routes through NetworkManager AddAndActivateConnection (polkit-gated)"),
     MethodAvailability::unavailable("disconnect", 5, ReasonClass::NoPrivilege, "disconnection routes through NetworkManager (polkit-gated)"),
@@ -132,10 +148,10 @@ pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::unavailable("wifiDisconnect", 8, ReasonClass::NoPrivilege, "wifi disconnect routes through NetworkManager (polkit-gated)"),
     MethodAvailability::unavailable("wifiSetAutoConnect", 9, ReasonClass::NoPrivilege, "per-SSID autoconnect is a NetworkManager setting write (polkit-gated)"),
     MethodAvailability::unavailable("wifiSetMacRandomization", 10, ReasonClass::NoPrivilege, "MAC randomization is a NetworkManager setting write (polkit-gated)"),
-    MethodAvailability::degraded("setMobileData", 11, "l3_linux_network::set_radio_cellular_routes_to_mobile_data", "implemented over NM WwanEnabled; host write authority gated by NM polkit (polkitd absent on this box) — founder live proof"),
-    MethodAvailability::real("isMobileDataEnabled", 12, "l3_linux_network::mobile_data_enabled_reads_wwan"),
+    MethodAvailability::degraded("setMobileData", 11, "l3_linux_network::set_radio_cellular_routes_to_mobile_data", "the one control home for the cellular radio token; a host-mutating verb no kernel path can own, so the mock proves the mapping and the founder runs the live proof (NM polkit-gated; polkitd absent on this box)"),
+    MethodAvailability::real("isMobileDataEnabled", 12, "l3_linux_network::mobile_data_enabled_reads_the_policy_sweep"),
     MethodAvailability::unavailable("setDataRoaming", 13, ReasonClass::NotApplicable, "no cellular modem on this host (data roaming is a ModemManager setting; ModemManager absent)"),
-    MethodAvailability::real("isDataRoamingEnabled", 14, "l3_linux_network::data_roaming_enabled_reads_wwan"),
+    MethodAvailability::real("isDataRoamingEnabled", 14, "l3_linux_network::data_roaming_reads_the_kernel_wwan_link"),
     MethodAvailability::unavailable("setVpnProfile", 15, ReasonClass::NoBackend, "VPN profile management (NM settings + VPN plugin) not implemented"),
     MethodAvailability::unavailable("removeVpnProfile", 16, ReasonClass::NoBackend, "VPN profile management (NM settings + VPN plugin) not implemented"),
     MethodAvailability::unavailable("listVpnProfiles", 17, ReasonClass::NoBackend, "VPN profile management (NM settings + VPN plugin) not implemented"),
@@ -156,7 +172,7 @@ pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::unavailable("setDnsServers", 32, ReasonClass::NoPrivilege, "DNS configuration write needs CAP_NET_ADMIN / NM+polkit (polkitd absent)"),
     MethodAvailability::unavailable("setInterfaceQos", 33, ReasonClass::NoPrivilege, "QoS/tc programming needs CAP_NET_ADMIN (nft absent; tc/netem not implemented)"),
     MethodAvailability::unavailable("getInterfaceQos", 34, ReasonClass::NoBackend, "QoS rule readout (tc/netem) not implemented"),
-    MethodAvailability::real("getCounters", 35, "l3_linux_network::get_counters_from_sysfs"),
+    MethodAvailability::real("getCounters", 35, "l3_linux_network::get_counters_serves_the_kernel_stats"),
     MethodAvailability::unavailable("resetCounters", 36, ReasonClass::NoPrivilege, "interface counter reset needs CAP_NET_ADMIN"),
     MethodAvailability::real("subscribeCounters", 37, "l3_linux_network::counter_subscription_bounded_pull"),
     MethodAvailability::real("pullCounters", 38, "l3_linux_network::counter_subscription_bounded_pull"),
@@ -188,15 +204,15 @@ pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::unavailable("receiveDtnBundles", 64, ReasonClass::NoBackend, "DTN store-and-forward agent not present on this host"),
     MethodAvailability::unavailable("getCellularConfig", 65, ReasonClass::NotApplicable, "no cellular modem on this host (ModemManager absent)"),
     MethodAvailability::unavailable("setCellularConfig", 66, ReasonClass::NotApplicable, "no cellular modem on this host (ModemManager absent)"),
-    MethodAvailability::unavailable("getIpv6Config", 67, ReasonClass::NoBackend, "IPv6 configuration readout not implemented"),
+    MethodAvailability::unavailable("getIpv6Config", 67, ReasonClass::NoBackend, "the kernel half (per-link addresses via RTM_GETADDR) is in the state store, but the contract IPv6Config field set (accept_ra, privacy, token) is not assembled; no-degraded-half-answers"),
     MethodAvailability::unavailable("setIpv6Config", 68, ReasonClass::NoPrivilege, "IPv6 configuration write needs NM+polkit / CAP_NET_ADMIN"),
     MethodAvailability::unavailable("wifiNanAdvertise", 69, ReasonClass::NoBackend, "Wi-Fi Aware (NAN) has no public host API"),
     MethodAvailability::unavailable("wifiNanDiscover", 70, ReasonClass::NoBackend, "Wi-Fi Aware (NAN) has no public host API"),
     MethodAvailability::unavailable("nicProvider", 71, ReasonClass::NoBackend, "NIC driver provider surface (netlink/ethtool/DPDK) not implemented"),
-    MethodAvailability::degraded("setNetworking", 72, "l3_linux_network::set_networking_calls_enable", "implemented over NM Enable; host write authority gated by NM polkit (polkitd absent on this box) — founder live proof"),
-    MethodAvailability::real("isNetworkingEnabled", 73, "l3_linux_network::is_networking_enabled_reads_property"),
-    MethodAvailability::degraded("setRadioEnabled", 74, "l3_linux_network::set_radio_wifi_calls_wireless_enabled", "implemented over NM WirelessEnabled; host write authority gated by NM polkit (polkitd absent on this box) — founder live proof"),
-    MethodAvailability::real("listRadioStates", 75, "l3_linux_network::get_interfaces_and_radio_states"),
+    MethodAvailability::degraded("setNetworking", 72, "l3_linux_network::set_networking_calls_enable", "implemented over NM Enable; a host-mutating verb no kernel path can own, so the mock proves the mapping and the founder runs the live proof (NM polkit-gated; polkitd absent on this box)"),
+    MethodAvailability::real("isNetworkingEnabled", 73, "l3_linux_network::is_networking_enabled_reads_the_policy_sweep_once"),
+    MethodAvailability::degraded("setRadioEnabled", 74, "l3_linux_network::set_radio_wifi_calls_wireless_enabled", "implemented over NM WirelessEnabled; a host-mutating verb no kernel path can own, so the mock proves the mapping and the founder runs the live proof (NM polkit-gated; polkitd absent on this box)"),
+    MethodAvailability::real("listRadioStates", 75, "l3_linux_network::radio_hard_and_soft_are_not_conflated_with_policy"),
 ];
 
 /// The Linux platform token for this matrix.

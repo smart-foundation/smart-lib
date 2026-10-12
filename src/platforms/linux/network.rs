@@ -1,33 +1,40 @@
-//! The Linux **NetworkManager** backend for the network domain — the one host
-//! target per `knowledge/02-HOST-CAPABILITIES.md` §2 ("NM D-Bus for privileged /
-//! wifi-connect ops"). It speaks D-Bus over `/run/dbus/system_bus_socket`.
+//! The Linux **network** backend for the network domain — the one host target
+//! per `knowledge/02-HOST-CAPABILITIES.md` §2. It is **kernel-first** (charter
+//! law #9): links, addresses, routes, counters, carrier and radio blocks are
+//! read from the kernel over netlink (`super::netlink`), event-fed into a local
+//! state store, so a read costs no daemon hop. NetworkManager over D-Bus
+//! (`/run/dbus/system_bus_socket`) is the **counted fallback and the control
+//! home**: it owns what the kernel does not (the master switch, radio policy,
+//! per-device management) and the mutating verbs only NM exposes.
 //!
 //! ## Law #8 (the host is read-only)
 //!
-//! Every **read** path here is safe to run live on the founder's box:
-//! `NetworkingEnabled`/`WirelessEnabled`/`WwanEnabled` properties, the device
-//! enumeration and per-device `State`, `/sys/class/net/*/statistics/*` counters,
-//! and `/dev/rfkill`. The **write** paths (`Enable`, `Properties.Set` on
-//! `WirelessEnabled`/`WwanEnabled`) sit behind the [`NmClient`] seam and are only
-//! ever exercised by (`a`) the mock in the tests and (`b`) the founder's
-//! `examples/network_probe.rs` live bring-back. No build, test, or agent turns a
-//! host switch; the read-only `#[ignore]`d test at the bottom can be run by
-//! whoever has the bus.
+//! Every **read** path here is safe to run live on the founder's box: netlink
+//! dumps and event subscriptions, the NM policy properties (`NetworkingEnabled`
+//! / `WirelessEnabled` / `WwanEnabled`), `/sys`, and `/dev/rfkill`. The
+//! **write** paths (`Enable`, `Properties.Set` on `WirelessEnabled`/
+//! `WwanEnabled`) sit behind the [`NmClient`] seam and are only ever exercised by
+//! (`a`) the mock in the tests and (`b`) the founder's `examples/network_probe.rs`
+//! live bring-back. No build, test, or agent turns a host switch; the read-only
+//! `#[ignore]`d test at the bottom can be run by whoever has the bus.
 //!
-//! ## The seam
+//! ## The seams
 //!
-//! [`NmClient`] is the whole NetworkManager surface the backend needs. The
-//! production implementation is [`RealNmClient`] (a ~small hand-rolled D-Bus
-//! client — no `nmcli`/`ip` shellouts, the condemned pattern P5). Tests swap in a
-//! [`MockNmClient`] that scripts the same surface and injects faults, so the
-//! four-state diagnostic and every mutation mapping are proven without touching
-//! the host.
+//! [`NetlinkReader`] is the kernel seam (a real
+//! rtnetlink socket in production, a scripted kernel in tests) feeding
+//! [`NetworkStore`]. [`NmClient`] is what remains of the NetworkManager surface:
+//! ONE policy sweep plus the three control verbs. The production implementation
+//! is [`RealNmClient`] (a small hand-rolled D-Bus client — no `nmcli`/`ip`
+//! shellouts, the condemned pattern P5); tests swap in a `Mock` that scripts the
+//! same seam, records every call and injects faults, so the four-state
+//! diagnostic, the zero-NmClient-calls-on-a-warm-store proof and every mutation
+//! mapping are proven without touching the host.
 //!
-//! ## The iwd/netlink variant
+//! ## The iwd variant
 //!
-//! A second backend (iwd D-Bus, or raw netlink for the read surface) is a
-//! *designed seam*, not built now: [`NmClient`] is the seam it would implement,
-//! and [`crate::domains::network::NetworkBackend`] would delegate identically.
+//! A second backend (iwd D-Bus) is a *designed seam*, not built now:
+//! [`NmClient`] is the seam it would implement, and
+//! [`crate::domains::network::NetworkBackend`] would delegate identically.
 
 // This is a std process (the Linux backend lives in a service/app); the public
 // API and core stay no_std + alloc (charter law #1).
@@ -43,12 +50,16 @@ use crate::core::values::Duration;
 use crate::core::{Error, Result};
 use crate::domains::network::backend::NetworkBackend;
 use crate::domains::network::types::{
-    ConnStatus, HostState, InterfaceCounters, InterfaceSnapshot, Page, Pagination, RadioState,
-    SubscriptionId,
+    ConnStatus, HostState, HostStateSource, InterfaceCounters, InterfaceSnapshot, Page, Pagination,
+    RadioState, SubscriptionId,
+};
+use crate::platforms::linux::netlink::{
+    self, KernelAddress, KernelEvent, KernelLink, KernelRoute, LinkKind, LinkProvenance,
+    NetlinkReader, OperState, RealNetlinkReader, RfkillState,
 };
 
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -608,80 +619,194 @@ pub struct DeviceSnapshot {
     pub driver: String,
 }
 
-/// The kernel rfkill view of one radio, kept apart from NM policy so the two
-/// are never conflated (`RadioState.hardBlocked`/`softBlocked`).
+/// Everything NetworkManager owns that the kernel does not — the answer to the
+/// ONE counted fallback sweep. This is the whole D-Bus surface a read can
+/// touch, and it is fetched as a single seam call, cached against the store's
+/// topology revision (a topology change — a link or address arriving or going
+/// away, or a link's administrative state flipping — re-sweeps).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RfkillState {
-    /// Open token: "wifi", "cellular", "bluetooth".
-    pub name: String,
-    pub hard_blocked: bool,
-    pub soft_blocked: bool,
+pub struct NmPolicy {
+    /// `NetworkingEnabled` — the field that once persisted `false`.
+    pub networking_enabled: bool,
+    /// `WirelessEnabled` — wifi radio policy.
+    pub wireless_enabled: bool,
+    /// `WirelessHardwareEnabled` — the wifi hardware switch, as NM sees it.
+    pub wireless_hardware_enabled: bool,
+    /// `WwanEnabled` — cellular radio / mobile-data policy.
+    pub wwan_enabled: bool,
+    /// `WwanHardwareEnabled` — the cellular hardware switch, as NM sees it.
+    pub wwan_hardware_enabled: bool,
+    /// NM's device view: the `Managed` policy bit per interface, and the facts a
+    /// *fallback* link record needs when the kernel link table cannot answer.
+    pub devices: Vec<DeviceSnapshot>,
 }
 
-/// Everything the network backend needs from NetworkManager. The mutating
-/// surface (host-global enable, radio enable, mobile data) lives here, behind
-/// the seam — so no build or test ever turns a host switch (law #8).
+impl NmPolicy {
+    /// NM's `Managed` for one ifname; `None` when NM does not enumerate it (a
+    /// link NM never saw — a container veth, a bridge) — never a guess.
+    pub fn managed(&self, iface: &str) -> Option<bool> {
+        self.device(iface).map(|d| d.managed)
+    }
+
+    /// NM's device view entry for one ifname.
+    pub fn device(&self, iface: &str) -> Option<&DeviceSnapshot> {
+        self.devices.iter().find(|d| d.iface == iface)
+    }
+
+    /// NM's device view filtered to `Real` devices with a name — the set a
+    /// fallback link table is synthesised from.
+    pub fn real_devices(&self) -> Vec<DeviceSnapshot> {
+        self.devices
+            .iter()
+            .filter(|d| d.real && !d.iface.is_empty())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Everything the network backend needs from NetworkManager. After the
+/// transport correction (law #9) this seam is **policy and control only**:
+///
+/// * [`NmClient::policy`] — the ONE sweep that answers everything the kernel
+///   does not own (the master switch, radio policy, per-device management).
+///   It is the counted fallback: a read that needs policy state issues exactly
+///   one seam call, and every subsequent read is served from the store's
+///   snapshot.
+/// * [`NmClient::counters`] / [`NmClient::rfkill`] — kernel reads behind the
+///   seam (`/sys` statistics, `/dev/rfkill`), used ONLY when netlink could not
+///   answer. Counted like every other seam call.
+/// * the three control verbs — host-mutating, so they stay behind the seam
+///   (law #8: the mock proves the mapping, the founder runs the live proof).
+///
+/// What is deliberately GONE: per-read `networking_enabled` / `wireless_enabled`
+/// / `devices` / property readers. Those were the D-Bus-per-read path the
+/// correction removed — the kernel first answers links, addresses, routes,
+/// counters, carrier and radio blocks now (`platforms::linux::netlink`).
 pub trait NmClient {
-    fn networking_enabled(&self) -> Result<bool>;
-    fn wireless_enabled(&self) -> Result<bool>;
-    fn wireless_hardware_enabled(&self) -> Result<bool>;
-    fn wwan_enabled(&self) -> Result<bool>;
-    fn wwan_hardware_enabled(&self) -> Result<bool>;
+    /// One policy sweep (see [`NmPolicy`]). Errors are total: a fault here is
+    /// the seam's error, carried to the caller unchanged.
+    fn policy(&self) -> Result<NmPolicy>;
 
-    fn set_networking_enabled(&self, enabled: bool) -> Result<()>;
-    fn set_wireless_enabled(&self, enabled: bool) -> Result<()>;
-    fn set_wwan_enabled(&self, enabled: bool) -> Result<()>;
-
-    fn devices(&self) -> Result<Vec<DeviceSnapshot>>;
-    fn rfkill(&self) -> Result<Vec<RfkillState>>;
+    /// Counters for an interface the kernel link table did not report
+    /// (`IFLA_STATS64` absent). A `/sys` read, not a daemon hop — counted all
+    /// the same, because it is a seam call.
     fn counters(&self, iface: &str) -> Result<InterfaceCounters>;
+
+    /// The kernel's rfkill view when the netlink snapshot could not read it.
+    fn rfkill(&self) -> Result<Vec<RfkillState>>;
+
+    /// `org.freedesktop.NetworkManager.Enable(bool)` — the host-global master
+    /// switch. Host-mutating; founder-run live, mock-verified here.
+    fn set_networking_enabled(&self, enabled: bool) -> Result<()>;
+
+    /// `Properties.Set WirelessEnabled` — the wifi radio switch.
+    fn set_wireless_enabled(&self, enabled: bool) -> Result<()>;
+
+    /// `Properties.Set WwanEnabled` — the cellular radio / mobile-data switch.
+    fn set_wwan_enabled(&self, enabled: bool) -> Result<()>;
 }
 
 // ── NM state → open-token mapping (host map §1.2 N1) ──────────────────────
 
-fn kind_token(device_type: u32) -> &'static str {
-    match device_type {
-        1 => "ethernet",
-        2 => "wifi",
-        14 => "cellular",
-        22 => "team",
-        32 => "loopback",
-        _ => "unknown",
-    }
-}
-
-const NM_DEVICE_STATE_UNAVAILABLE: u32 = 20;
+/// NM's `Device.State` for an activated (usable) connection — one of the two NM
+/// state numbers kept after the kernel took over the rest of the read surface.
 const NM_DEVICE_STATE_ACTIVATED: u32 = 100;
 
-fn is_wifi(d: &DeviceSnapshot) -> bool {
-    d.device_type == 2
+/// NM's `Device.State` for a device it cannot use with no named cause — the
+/// state whose honest status token is `unknown`, never `managed`.
+const NM_DEVICE_STATE_UNAVAILABLE: u32 = 20;
+
+/// Whether the kernel reports this radio blocked (`/dev/rfkill`, hard or soft).
+/// A kernel fact, kept apart from NM's policy `enabled` bit.
+fn radio_blocked(rfkill: &[RfkillState], radio: &str) -> bool {
+    rfkill
+        .iter()
+        .any(|r| r.name == radio && (r.hard_blocked || r.soft_blocked))
 }
 
-/// The four-state diagnostic, as a pure function of the host facts. Order is
-/// load-bearing: host-global off outranks every per-device reason, so a switched
-/// off host is `networking-disabled` even when a device also looks unmanaged.
+/// The four-state diagnostic as a pure function of the host facts, returning
+/// BOTH the state and the SOURCE that decided it (law #9 made auditable):
+/// `carrier-down` / `no-firmware` / a kernel-rfkill `radio-off` arrive from
+/// netlink (kernel facts); `networking-disabled` / `radio-off` via NM policy /
+/// `unmanaged` arrive from the counted D-Bus fallback.
+///
+/// The order is load-bearing. First the two NM policy facts that describe the
+/// host rather than the wire — the master switch outranks every per-device
+/// reason, so a switched-off host reads `networking-disabled` even when a device
+/// also looks unmanaged. Then the kernel decides what only it can see: a radio
+/// the kernel itself blocked is `radio-off`, and a link the host asked up whose
+/// hardware never delivered is `no-firmware` (or, on a wire, `carrier-down`).
+/// NM policy then decides the radio bits, the kernel's operstate is the final
+/// witness for `managed`, and anything nothing named is an honest `unknown`.
 ///
 /// This is the incident as a function: `networking-disabled` (the master
-/// switch), `radio-off` (policy on the wifi radio), `no-firmware` (the device
-/// cannot come up), `carrier-down` (nothing on the wire) are four DISTINCT
-/// answers, never collapsed into a bare `connected: false`.
-fn classify_host_state(networking_enabled: bool, wireless_enabled: bool, d: &DeviceSnapshot) -> HostState {
-    if !networking_enabled {
-        HostState::NetworkingDisabled
-    } else if !d.managed {
-        HostState::Unmanaged
-    } else if d.firmware_missing {
-        HostState::NoFirmware
-    } else if is_wifi(d) && !wireless_enabled {
-        HostState::RadioOff
-    } else if d.carrier == Some(false) {
-        HostState::CarrierDown
-    } else if d.state == NM_DEVICE_STATE_UNAVAILABLE {
-        // Unavailable, but none of the named causes above — report the gap.
-        HostState::Unknown
-    } else {
-        HostState::Managed
+/// switch), `radio-off` (policy on the radio), `no-firmware` (the device cannot
+/// come up), `carrier-down` (nothing on the wire) are four DISTINCT answers,
+/// never collapsed into a bare `connected: false` — and each now names the
+/// layer that produced it.
+fn classify_host_state(
+    link: &KernelLink,
+    rfkill: &[RfkillState],
+    policy: &NmPolicy,
+) -> (HostState, HostStateSource) {
+    let device = policy.device(&link.name);
+    let wifi = link.is_wifi();
+    let radio = link.is_radio();
+    // The kernel's own stuck-radio marker: asked up, operstate DOWN, no carrier
+    // (see `KernelLink::stalled`). NM refutes it when it enumerates the device
+    // and reports no firmware fault — a radio that is merely not associated
+    // looks identical from netlink alone, and NM already knows the difference.
+    let kernel_stalled = radio && link.stalled();
+    let firmware_missing = match device {
+        Some(d) => d.firmware_missing,
+        None => kernel_stalled,
+    };
+
+    // 1. The host-global master switch (NM policy) outranks everything.
+    if !policy.networking_enabled {
+        return (HostState::NetworkingDisabled, HostStateSource::NmPolicy);
     }
+    // 2. NM does not drive this device (policy).
+    if let Some(false) = policy.managed(&link.name) {
+        return (HostState::Unmanaged, HostStateSource::NmPolicy);
+    }
+    // 3. A radio the kernel itself blocked is radio-off, and the kernel is the
+    //    source (the rfkill bit, never NM's policy `enabled`). It also explains
+    //    a link that never came up, so it outranks the firmware verdict.
+    let kernel_radio_blocked =
+        (wifi && radio_blocked(rfkill, "wifi")) || (link.is_cellular() && radio_blocked(rfkill, "cellular"));
+    if kernel_radio_blocked {
+        return (HostState::RadioOff, HostStateSource::Kernel);
+    }
+    // 4. The device cannot come up: the kernel's stuck-radio marker when NM
+    //    cannot answer, or NM's probe-derived verdict when it can. Both name a
+    //    kernel-visible condition.
+    if firmware_missing {
+        let source = if kernel_stalled { HostStateSource::Kernel } else { HostStateSource::NmPolicy };
+        return (HostState::NoFirmware, source);
+    }
+    // 5. Radio policy (NM): the radio is on for the host but NM has it off.
+    if wifi && !policy.wireless_enabled {
+        return (HostState::RadioOff, HostStateSource::NmPolicy);
+    }
+    // 6. Nothing on the wire — a non-radio link, administratively up, with
+    //    IFLA_CARRIER == 0. On a radio, carrier means "associated", not
+    //    "plugged", so it is deliberately not read as carrier-down here.
+    if !radio && link.up && link.carrier == Some(false) {
+        return (HostState::CarrierDown, HostStateSource::Kernel);
+    }
+    // 7. Running, or NM reports the device available with no named cause.
+    if link.is_running() || device.is_some_and(|d| d.state != NM_DEVICE_STATE_UNAVAILABLE) {
+        return (HostState::Managed, HostStateSource::Kernel);
+    }
+    // 8. Nothing above named a cause: report the gap, never a fabricated
+    //    `managed`. The witness is whichever layer last spoke.
+    let source = if device.is_some() {
+        HostStateSource::NmPolicy
+    } else {
+        HostStateSource::Kernel
+    };
+    (HostState::Unknown, source)
 }
 
 /// A stable interface id derived from the OS ifname (FNV-1a/64). NOT a host
@@ -699,84 +824,444 @@ fn iface_id(name: &str) -> NetworkInterfaceId {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// The Linux backend over the seam.
+// The event-fed kernel state store (charter law #9: kernel first).
 // ═══════════════════════════════════════════════════════════════════════
 
-/// The Linux NetworkManager [`NetworkBackend`], generic over any [`NmClient`].
-/// Defaults to [`RealNmClient`] so `LinuxNetworkBackend::default()` talks to the
-/// live system bus.
-pub struct LinuxNetworkBackend<C: NmClient = RealNmClient> {
-    client: C,
-    next_token: AtomicU32,
-    live: Mutex<alloc::collections::BTreeMap<u64, NetworkInterfaceId>>,
+/// The most kernel events one read drains. Bounded, so an event flood can never
+/// make a read unbounded; what arrives afterwards is picked up by the next read
+/// (the store keeps the LATEST state per link, so nothing is lost — only the
+/// intermediate revisions a subscription pull collapses, and those are counted).
+const MAX_DRAIN_EVENTS: usize = 64;
+
+/// One link / address / route / rfkill table, fed by netlink events and read
+/// with no daemon hop. A read brings it current (a bounded, non-blocking event
+/// drain plus a prime dump when the table has never been filled) and then serves
+/// from memory — the kernel's facts, held once.
+pub struct NetworkStore {
+    /// The kernel seam (the real rtnetlink reader in production, a scripted
+    /// mock in tests).
+    reader: Box<dyn NetlinkReader>,
+    state: Mutex<StoreState>,
+    /// Bumped once per applied event that changed the table — the revision a
+    /// subscription pull measures its collapsed updates against.
+    revision: AtomicU64,
 }
 
-impl<C: NmClient> LinuxNetworkBackend<C> {
-    /// Build a backend over an explicit seam (tests inject a mock here).
-    pub fn with_client(client: C) -> Self {
-        LinuxNetworkBackend {
-            client,
-            next_token: AtomicU32::new(1),
-            live: Mutex::new(alloc::collections::BTreeMap::new()),
+/// The mutable table, behind one lock: one read, one lock, no daemon hop.
+struct StoreState {
+    /// A kernel sweep has answered at least once (or the fallback installed).
+    primed: bool,
+    /// NM's device view is installed as the fallback link table.
+    fallback_installed: bool,
+    /// Why the kernel seam could not answer, if it could not — reported on every
+    /// accessor path, never silently empty facts.
+    kernel_error: Option<String>,
+    links: Vec<KernelLink>,
+    addresses: Vec<KernelAddress>,
+    routes: Vec<KernelRoute>,
+    rfkill: Vec<RfkillState>,
+    /// Bumped when the link set, a link's administrative state, or the address
+    /// set changed — the signal that NM's policy view may have gone stale.
+    topology_revision: u64,
+}
+
+impl StoreState {
+    /// Apply one kernel event; `true` when the table changed. A link appearing
+    /// or disappearing, a link's administrative flag flipping, or an address
+    /// appearing or going away also bumps `topology_revision` — that is what
+    /// invalidates the cached NM policy sweep, so a topology change re-sweeps.
+    fn apply(&mut self, event: &KernelEvent) -> bool {
+        match event {
+            KernelEvent::Link(link) => match self.links.iter_mut().find(|l| l.index == link.index) {
+                Some(existing) => {
+                    let topology = existing.name != link.name
+                        || existing.kind != link.kind
+                        || existing.info_kind != link.info_kind
+                        || existing.up != link.up;
+                    let changed = topology || *existing != *link;
+                    *existing = link.clone();
+                    if topology {
+                        self.topology_revision += 1;
+                    }
+                    changed
+                }
+                None => {
+                    self.links.push(link.clone());
+                    self.links.sort_by(|a, b| a.name.cmp(&b.name));
+                    self.topology_revision += 1;
+                    true
+                }
+            },
+            KernelEvent::LinkGone(index) => {
+                let before = self.links.len();
+                self.links.retain(|l| l.index != *index);
+                let changed = self.links.len() != before;
+                if changed {
+                    self.topology_revision += 1;
+                }
+                changed
+            }
+            KernelEvent::Address(address) => {
+                if self.addresses.iter().any(|a| a == address) {
+                    false
+                } else {
+                    self.addresses.push(address.clone());
+                    self.topology_revision += 1;
+                    true
+                }
+            }
+            KernelEvent::AddressGone(address) => {
+                let before = self.addresses.len();
+                self.addresses.retain(|a| a != address);
+                let changed = self.addresses.len() != before;
+                if changed {
+                    self.topology_revision += 1;
+                }
+                changed
+            }
+        }
+    }
+}
+
+impl NetworkStore {
+    /// A store over an explicit kernel seam (tests script a mock kernel).
+    pub fn with_reader(reader: Box<dyn NetlinkReader>) -> Self {
+        NetworkStore {
+            reader,
+            state: Mutex::new(StoreState {
+                primed: false,
+                fallback_installed: false,
+                kernel_error: None,
+                links: Vec::new(),
+                addresses: Vec::new(),
+                routes: Vec::new(),
+                rfkill: Vec::new(),
+                topology_revision: 0,
+            }),
+            revision: AtomicU64::new(0),
         }
     }
 
-    /// The set of `Real`, truthful devices we enumerate (skip p2p/generic).
-    fn real_devices(&self) -> Result<Vec<DeviceSnapshot>> {
-        let mut devices: Vec<DeviceSnapshot> = self
-            .client
-            .devices()?
-            .into_iter()
-            .filter(|d| d.real && !d.iface.is_empty())
-            .collect();
-        devices.sort_by(|a, b| a.iface.cmp(&b.iface));
-        Ok(devices)
+    /// The production store: the real rtnetlink reader over a live netlink
+    /// socket (read-only; law #8).
+    pub fn kernel_first() -> Self {
+        Self::with_reader(Box::new(RealNetlinkReader::new()))
     }
 
-    fn find_device(&self, id: NetworkInterfaceId) -> Result<DeviceSnapshot> {
-        self.real_devices()?
-            .into_iter()
-            .find(|d| iface_id(&d.iface) == id)
+    /// Bring the store current and serve from memory. This never blocks (the
+    /// drain is non-blocking) and never polls (there is no timer — the kernel
+    /// pushes and the read applies).
+    fn refresh(&self) {
+        let mut state = self.state.lock().unwrap();
+        match self.reader.drain_events(MAX_DRAIN_EVENTS) {
+            Ok(events) => {
+                // The channel is alive. If the table is NM's synthesised
+                // fallback (the kernel could not answer earlier), the kernel can
+                // answer now: un-prime so the re-prime below replaces the
+                // daemon's link view with the kernel's own.
+                if state.fallback_installed {
+                    state.primed = false;
+                }
+                let mut changed = 0usize;
+                for event in &events {
+                    if state.apply(event) {
+                        changed += 1;
+                    }
+                }
+                if changed > 0 {
+                    self.revision.fetch_add(changed as u64, Ordering::Relaxed);
+                }
+            }
+            Err(e) => {
+                // The channel is untrustworthy (socket died / ENOBUFS overrun):
+                // un-prime so the re-prime below rebuilds the table from a full
+                // dump. The reason is kept and reported, never swallowed.
+                state.primed = false;
+                state.kernel_error = Some(e.to_string());
+            }
+        }
+        if !state.primed {
+            self.prime_from_kernel(&mut state);
+        }
+    }
+
+    /// One full kernel sweep: the store's initial fill, and the recovery path
+    /// after a channel fault or an event overrun.
+    fn prime_from_kernel(&self, state: &mut StoreState) {
+        match self.reader.snapshot() {
+            Ok(snapshot) => {
+                state.links = snapshot.links;
+                state.links.sort_by(|a, b| a.name.cmp(&b.name));
+                state.addresses = snapshot.addresses;
+                state.routes = snapshot.routes;
+                state.rfkill = snapshot.rfkill;
+                state.primed = true;
+                state.fallback_installed = false;
+                state.kernel_error = None;
+            }
+            Err(e) => {
+                state.primed = false;
+                state.kernel_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Install NM's device view as the link table — the counted fallback, used
+    /// ONLY when the kernel link table cannot answer at all. Every record
+    /// carries [`LinkProvenance::NmFallback`], so a consumer can see the daemon
+    /// speaking instead of the kernel.
+    fn install_nm_fallback(&self, devices: &[DeviceSnapshot]) {
+        let mut state = self.state.lock().unwrap();
+        if state.fallback_installed {
+            return;
+        }
+        state.links = devices.iter().map(fallback_link).collect();
+        state.links.sort_by(|a, b| a.name.cmp(&b.name));
+        state.fallback_installed = true;
+        state.primed = true;
+    }
+
+    /// Every link the store holds, sorted by ifname (the stable enumeration).
+    pub fn links(&self) -> Vec<KernelLink> {
+        self.state.lock().unwrap().links.clone()
+    }
+
+    pub fn link_by_id(&self, id: NetworkInterfaceId) -> Option<KernelLink> {
+        self.state
+            .lock()
+            .unwrap()
+            .links
+            .iter()
+            .find(|l| iface_id(&l.name) == id)
+            .cloned()
+    }
+
+    /// The kernel's radio-block view (`/dev/rfkill` via the netlink snapshot).
+    pub fn rfkill(&self) -> Vec<RfkillState> {
+        self.state.lock().unwrap().rfkill.clone()
+    }
+
+    /// `IFLA_STATS64` for one ifname, as the kernel last reported it; `None`
+    /// when the kernel reported no counters for it (never a zeroed counter).
+    pub fn counters_by_name(&self, name: &str) -> Option<InterfaceCounters> {
+        self.state.lock().unwrap().links.iter().find(|l| l.name == name).and_then(|l| l.stats)
+    }
+
+    /// The store revision: one per applied, state-changing kernel event.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+
+    /// The topology revision the cached NM policy sweep is valid for.
+    pub fn topology_revision(&self) -> u64 {
+        self.state.lock().unwrap().topology_revision
+    }
+
+    pub fn primed(&self) -> bool {
+        self.state.lock().unwrap().primed
+    }
+
+    pub fn fallback_installed(&self) -> bool {
+        self.state.lock().unwrap().fallback_installed
+    }
+
+    /// Every route the kernel reported, as the last sweep saw it. Routes are NOT
+    /// event-fed (the kernel's routing-table change storms are not status), so
+    /// this is the dump's view and re-primes with the table.
+    pub fn routes(&self) -> Vec<KernelRoute> {
+        self.state.lock().unwrap().routes.clone()
+    }
+
+    /// Why the kernel seam could not answer, if it could not.
+    pub fn kernel_error(&self) -> Option<String> {
+        self.state.lock().unwrap().kernel_error.clone()
+    }
+
+    /// Where the link record for `name` came from (kernel netlink, or the
+    /// counted NM fallback).
+    pub fn provenance(&self, name: &str) -> Option<LinkProvenance> {
+        self.state.lock().unwrap().links.iter().find(|l| l.name == name).map(|l| l.provenance)
+    }
+}
+
+/// Synthesise a kernel-shaped link record from NM's device view. Used ONLY on
+/// the fallback path (the kernel link table cannot answer): NM's `FirmwareMissing`
+/// is expressed in the kernel's shape (administratively up, operstate DOWN, no
+/// carrier) so the same four-state function decides, and every field that is not
+/// a kernel fact stays at the record's neutral value. `provenance` says which
+/// layer is speaking.
+fn fallback_link(device: &DeviceSnapshot) -> KernelLink {
+    let activated = device.state == NM_DEVICE_STATE_ACTIVATED;
+    KernelLink {
+        // NM has no ifindex to give; 0 is "unknown", never a fabricated index.
+        index: 0,
+        name: device.iface.clone(),
+        kind: LinkKind::from_nm_device_type(device.device_type),
+        // NM's `DeviceType` 14 (modem) is the wwan net device the kernel already
+        // names with `IFLA_LINKINFO kind "wwan"`.
+        info_kind: if device.device_type == 14 { "wwan".to_string() } else { String::new() },
+        up: activated || device.managed,
+        carrier: if device.firmware_missing { Some(false) } else { device.carrier },
+        oper_state: if activated { OperState::Up } else { OperState::Down },
+        mtu: device.mtu,
+        hardware_address: device.hw_address.clone(),
+        // No IFLA_STATS64 reached us: the /sys counters behind the seam answer.
+        stats: None,
+        provenance: LinkProvenance::NmFallback,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// The Linux backend: kernel-first store, policy + control seam.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// One live subscription: the interface it watches and the store revision it
+/// last delivered (so a bounded pull can count what it collapsed).
+#[derive(Clone, Copy, Debug)]
+struct Subscription {
+    iface: NetworkInterfaceId,
+    last_revision: u64,
+}
+
+/// The Linux network [`NetworkBackend`]. Kernel-authoritative reads — links,
+/// addresses, routes, counters, carrier, radio blocks — are served from the
+/// event-fed [`NetworkStore`]; [`NmClient`] is the counted policy + control
+/// fallback (charter law #9: kernel first, daemon for policy, contract for
+/// consumers).
+pub struct LinuxNetworkBackend<C: NmClient = RealNmClient> {
+    client: C,
+    store: NetworkStore,
+    next_token: AtomicU32,
+    live: Mutex<alloc::collections::BTreeMap<u64, Subscription>>,
+    /// The NM policy sweep, cached against the store's topology revision:
+    /// `None` until the first read that needs policy state.
+    policy: Mutex<Option<(u64, NmPolicy)>>,
+    /// Every NmClient call issued on a read's behalf — the counted fallback.
+    fallback_calls: AtomicU64,
+    /// Store revisions a bounded pull collapsed — counted, never silent.
+    dropped_updates: AtomicU64,
+}
+
+impl<C: NmClient> LinuxNetworkBackend<C> {
+    /// Build a backend over an explicit seam and the production kernel reader
+    /// (what the founder's probe binary uses).
+    pub fn with_client(client: C) -> Self {
+        Self::with_client_and_netlink(client, Box::new(RealNetlinkReader::new()))
+    }
+
+    /// Build a backend over an explicit kernel seam (tests script the kernel
+    /// here; the host is never touched — law #8).
+    pub fn with_client_and_netlink(client: C, reader: Box<dyn NetlinkReader>) -> Self {
+        LinuxNetworkBackend {
+            client,
+            store: NetworkStore::with_reader(reader),
+            next_token: AtomicU32::new(1),
+            live: Mutex::new(alloc::collections::BTreeMap::new()),
+            policy: Mutex::new(None),
+            fallback_calls: AtomicU64::new(0),
+            dropped_updates: AtomicU64::new(0),
+        }
+    }
+
+    // ── The transport-hierarchy accounting (law #9 made measurable) ─────────
+
+    /// Every NmClient call this backend issued on a read's behalf. On a warm
+    /// store this is zero; on a cold store it is exactly one per read op.
+    pub fn nm_fallback_calls(&self) -> u64 {
+        self.fallback_calls.load(Ordering::Relaxed)
+    }
+
+    /// Store revisions a bounded subscription pull collapsed (the intermediate
+    /// states a caller did not see because it pulled less often than the kernel
+    /// spoke).
+    pub fn dropped_updates(&self) -> u64 {
+        self.dropped_updates.load(Ordering::Relaxed)
+    }
+
+    /// The store's revision: one per applied, state-changing kernel event.
+    pub fn store_revision(&self) -> u64 {
+        self.store.revision()
+    }
+
+    /// Why the kernel seam could not answer, if it could not (the fallback then
+    /// answers instead, visibly).
+    pub fn kernel_error(&self) -> Option<String> {
+        self.store.kernel_error()
+    }
+
+    /// The kernel-first store (read-only access to the link/address tables).
+    pub fn store(&self) -> &NetworkStore {
+        &self.store
+    }
+
+    /// Force a fresh NM policy sweep. The cached snapshot is invalidated by a
+    /// topology change (a link or address arriving or going away); this is the
+    /// explicit form for a caller that knows policy moved and the topology did
+    /// not. One counted seam call.
+    pub fn refresh_policy(&self) -> Result<()> {
+        *self.policy.lock().unwrap() = None;
+        self.ensure_policy().map(|_| ())
+    }
+
+    // ── Read-path internals ─────────────────────────────────────────────────
+
+    /// Bring the kernel store current. When the kernel cannot answer at all
+    /// (netlink unavailable / overrun), install NM's device view as the fallback
+    /// link table — ONE counted seam call, once per backend.
+    fn ensure_kernel_state(&self) -> Result<()> {
+        self.store.refresh();
+        if self.store.primed() || self.store.fallback_installed() {
+            return Ok(());
+        }
+        let policy = self.ensure_policy()?;
+        self.store.install_nm_fallback(&policy.real_devices());
+        Ok(())
+    }
+
+    /// The NM policy snapshot, or the ONE counted fallback sweep that fetches
+    /// it. Cached against the store's topology revision: a warm store makes
+    /// zero seam calls, and a topology change re-sweeps exactly once.
+    fn ensure_policy(&self) -> Result<NmPolicy> {
+        let topology = self.store.topology_revision();
+        if let Some((cached_at, policy)) = self.policy.lock().unwrap().as_ref() {
+            if *cached_at == topology {
+                return Ok(policy.clone());
+            }
+        }
+        self.fallback_calls.fetch_add(1, Ordering::Relaxed);
+        let policy = self.client.policy()?;
+        *self.policy.lock().unwrap() = Some((topology, policy.clone()));
+        Ok(policy)
+    }
+
+    fn find_link(&self, id: NetworkInterfaceId) -> Result<KernelLink> {
+        self.store
+            .link_by_id(id)
             .ok_or_else(|| Error::not_found().with_context(format!("interface id {id:?}")))
     }
 
-    fn mint(&self, iface: NetworkInterfaceId) -> SubscriptionId {
-        let token = self.next_token.fetch_add(1, Ordering::Relaxed) as u64;
-        self.live.lock().unwrap().insert(token, iface);
-        SubscriptionId(token)
-    }
-
-    fn iface_of(&self, sub: SubscriptionId) -> Result<NetworkInterfaceId> {
-        self.live
-            .lock()
-            .unwrap()
-            .get(&sub.0)
-            .copied()
-            .ok_or_else(|| {
-                Error::not_found().with_context(format!("subscription {} not live or already cancelled", sub.0))
-            })
-    }
-
-    fn status_of(&self, d: &DeviceSnapshot) -> Result<ConnStatus> {
-        let networking_enabled = self.client.networking_enabled()?;
-        let wireless_enabled = if is_wifi(d) {
-            self.client.wireless_enabled().unwrap_or(false)
-        } else {
-            false
-        };
-        let connected = d.state == NM_DEVICE_STATE_ACTIVATED;
+    /// Build the contract status for one link record. The kernel answers the
+    /// link facts; NM policy is fetched (one counted call) to classify, and the
+    /// state's SOURCE is carried alongside it.
+    fn status_of(&self, link: &KernelLink) -> Result<ConnStatus> {
+        let rfkill = self.store.rfkill();
+        let policy = self.ensure_policy()?;
+        let (host_state, host_state_source) = classify_host_state(link, &rfkill, &policy);
         Ok(ConnStatus {
-            connected,
-            interface: iface_id(&d.iface),
-            kind: kind_token(d.device_type).to_string(),
-            // Signal/speed are not read from NM here; 0 means "not measured",
-            // which is honest (never a fabricated 0 dBm).
+            connected: link.is_running(),
+            interface: iface_id(&link.name),
+            kind: link.kind_token().to_string(),
+            // Signal strength / speed / quality are nl80211 facts this milestone
+            // does not read: 0 means "not measured", never a fabricated value.
             strength_dbm: 0,
             speed_bps: 0,
             quality: 0,
             metered: false,
             behind_captive: false,
-            host_state: classify_host_state(networking_enabled, wireless_enabled, d),
+            host_state,
+            host_state_source,
+            // The SSID lives in NM's connection profile / nl80211 — not read
+            // here; empty, never invented.
             ssid: String::new(),
         })
     }
@@ -793,12 +1278,59 @@ impl<C: NmClient> LinuxNetworkBackend<C> {
             soft_blocked: rf_soft,
         }
     }
+
+    /// The radio-block view for `listRadioStates`: the kernel's rfkill as the
+    /// netlink snapshot reported it, or — only when netlink could not answer at
+    /// all — the char device behind the seam (counted like every seam call).
+    fn rfkill_view(&self) -> Result<Vec<RfkillState>> {
+        let from_store = self.store.rfkill();
+        if !from_store.is_empty() || !self.store.fallback_installed() {
+            return Ok(from_store);
+        }
+        self.fallback_calls.fetch_add(1, Ordering::Relaxed);
+        self.client.rfkill()
+    }
+
+    fn mint(&self, iface: NetworkInterfaceId) -> SubscriptionId {
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed) as u64;
+        self.live.lock().unwrap().insert(
+            token,
+            Subscription { iface, last_revision: self.store.revision() },
+        );
+        SubscriptionId(token)
+    }
+
+    fn subscription(&self, sub: SubscriptionId) -> Result<Subscription> {
+        self.live
+            .lock()
+            .unwrap()
+            .get(&sub.0)
+            .copied()
+            .ok_or_else(|| {
+                Error::not_found().with_context(format!("subscription {} not live or already cancelled", sub.0))
+            })
+    }
+
+    /// Deliver the store's current revision to one subscription, counting the
+    /// revisions it collapsed on the way (never silent).
+    fn advance(&self, sub: SubscriptionId, current: u64) {
+        let mut live = self.live.lock().unwrap();
+        let Some(entry) = live.get_mut(&sub.0) else { return };
+        if current > entry.last_revision {
+            let collapsed = current - entry.last_revision - 1;
+            if collapsed > 0 {
+                self.dropped_updates.fetch_add(collapsed, Ordering::Relaxed);
+            }
+        }
+        entry.last_revision = current;
+    }
 }
 
 impl LinuxNetworkBackend<RealNmClient> {
-    /// Connect to the live NetworkManager on this host (reads AND writes reach
-    /// the bus; the writes are the founder's live-proof vehicle, never run here
-    /// during build/test).
+    /// Connect to the live NetworkManager on this host, with the kernel-first
+    /// store over a live netlink socket. The WRITES reach the bus and are the
+    /// founder's live-proof vehicle; nothing in build or test turns a host
+    /// switch (law #8).
     pub fn connect() -> Result<Self> {
         let client = RealNmClient::new(None, None)?;
         Ok(LinuxNetworkBackend::with_client(client))
@@ -807,39 +1339,51 @@ impl LinuxNetworkBackend<RealNmClient> {
 
 impl<C: NmClient> NetworkBackend for LinuxNetworkBackend<C> {
     fn get_interfaces(&self, page: Pagination) -> Result<Page<InterfaceSnapshot>> {
-        let devices = self.real_devices()?;
-        let total = devices.len() as u64;
-        let items: Vec<InterfaceSnapshot> = devices
-            .into_iter()
-            .map(|d| InterfaceSnapshot {
-                id: iface_id(&d.iface),
-                name: d.iface.clone(),
-                kind: kind_token(d.device_type).to_string(),
-                hardware_address: crate::domains::network::types::MacAddress(d.hw_address),
-                up: d.state == NM_DEVICE_STATE_ACTIVATED || d.managed,
-                connected: d.state == NM_DEVICE_STATE_ACTIVATED,
-                mtu: d.mtu,
-                managed: d.managed,
+        self.ensure_kernel_state()?;
+        // `managed` is the one policy bit a link record carries: the counted
+        // sweep fills it (zero calls once the policy snapshot is current).
+        let policy = self.ensure_policy()?;
+        let links = self.store.links();
+        let total = links.len() as u64;
+        let items: Vec<InterfaceSnapshot> = links
+            .iter()
+            .map(|link| InterfaceSnapshot {
+                id: iface_id(&link.name),
+                name: link.name.clone(),
+                kind: link.kind_token().to_string(),
+                hardware_address: crate::domains::network::types::MacAddress(link.hardware_address.clone()),
+                up: link.up,
+                connected: link.is_running(),
+                mtu: link.mtu,
+                // NM's `Managed`; a link NM never enumerates reports false — the
+                // honest gap, never a guess dressed as a kernel fact.
+                managed: policy.managed(&link.name).unwrap_or(false),
             })
             .collect();
         Ok(paginate(items, total, page))
     }
 
     fn get_status(&self, interface: NetworkInterfaceId) -> Result<ConnStatus> {
-        let d = self.find_device(interface)?;
-        self.status_of(&d)
+        self.ensure_kernel_state()?;
+        let link = self.find_link(interface)?;
+        self.status_of(&link)
     }
 
     fn subscribe_status(&self, interface: NetworkInterfaceId) -> Result<SubscriptionId> {
         // Validating the interface keeps the token honest (no phantom pulls).
-        self.find_device(interface)?;
+        self.ensure_kernel_state()?;
+        self.find_link(interface)?;
         Ok(self.mint(interface))
     }
 
     fn pull_status(&self, subscription: SubscriptionId) -> Result<ConnStatus> {
-        let iface = self.iface_of(subscription)?;
-        let d = self.find_device(iface)?;
-        self.status_of(&d)
+        let sub = self.subscription(subscription)?;
+        self.ensure_kernel_state()?;
+        let link = self.find_link(sub.iface)?;
+        // The store holds the latest state per link: every revision since the
+        // last delivered one is collapsed into this pull. Counted, never silent.
+        self.advance(subscription, self.store.revision());
+        self.status_of(&link)
     }
 
     fn cancel_subscription(&self, subscription: SubscriptionId) -> Result<()> {
@@ -852,23 +1396,40 @@ impl<C: NmClient> NetworkBackend for LinuxNetworkBackend<C> {
     }
 
     fn get_counters(&self, interface: NetworkInterfaceId, _window: Duration) -> Result<InterfaceCounters> {
-        let d = self.find_device(interface)?;
-        self.client.counters(&d.iface)
+        self.ensure_kernel_state()?;
+        let link = self.find_link(interface)?;
+        if let Some(counters) = self.store.counters_by_name(&link.name) {
+            return Ok(counters);
+        }
+        // The kernel link table reported no IFLA_STATS64 for this link: the /sys
+        // counters behind the seam are the fallback (a kernel read, not a daemon
+        // hop — counted all the same).
+        self.fallback_calls.fetch_add(1, Ordering::Relaxed);
+        self.client.counters(&link.name)
     }
 
     fn subscribe_counters(&self, interface: NetworkInterfaceId) -> Result<SubscriptionId> {
-        self.find_device(interface)?;
+        self.ensure_kernel_state()?;
+        self.find_link(interface)?;
         Ok(self.mint(interface))
     }
 
     fn pull_counters(&self, subscription: SubscriptionId) -> Result<InterfaceCounters> {
-        let iface = self.iface_of(subscription)?;
-        let d = self.find_device(iface)?;
-        self.client.counters(&d.iface)
+        let sub = self.subscription(subscription)?;
+        self.ensure_kernel_state()?;
+        let link = self.find_link(sub.iface)?;
+        self.advance(subscription, self.store.revision());
+        if let Some(counters) = self.store.counters_by_name(&link.name) {
+            return Ok(counters);
+        }
+        self.fallback_calls.fetch_add(1, Ordering::Relaxed);
+        self.client.counters(&link.name)
     }
 
     fn is_networking_enabled(&self) -> Result<bool> {
-        self.client.networking_enabled()
+        // The master switch is NM policy: the kernel does not own it. One
+        // counted sweep (cached against the topology revision), zero once warm.
+        Ok(self.ensure_policy()?.networking_enabled)
     }
 
     fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
@@ -892,23 +1453,23 @@ impl<C: NmClient> NetworkBackend for LinuxNetworkBackend<C> {
     }
 
     fn list_radio_states(&self, page: Pagination) -> Result<Page<RadioState>> {
-        let wireless_enabled = self.client.wireless_enabled()?;
-        let wireless_hw = self.client.wireless_hardware_enabled()?;
-        let wwan_enabled = self.client.wwan_enabled()?;
-        let wwan_hw = self.client.wwan_hardware_enabled()?;
-        let rf = self.client.rfkill().unwrap_or_default();
+        // The radio-block view is a kernel fact: bring the store current first
+        // (and, if netlink cannot answer, install the counted fallback table).
+        self.ensure_kernel_state()?;
+        let policy = self.ensure_policy()?;
+        let rf = self.rfkill_view()?;
         let rf_wifi = rf.iter().find(|r| r.name == "wifi");
         let rf_cell = rf.iter().find(|r| r.name == "cellular");
         let radios = [
-            self.radio("wifi", wireless_enabled, wireless_hw, rf_wifi),
-            self.radio("cellular", wwan_enabled, wwan_hw, rf_cell),
+            self.radio("wifi", policy.wireless_enabled, policy.wireless_hardware_enabled, rf_wifi),
+            self.radio("cellular", policy.wwan_enabled, policy.wwan_hardware_enabled, rf_cell),
         ];
         let total = radios.len() as u64;
         Ok(paginate(radios.to_vec(), total, page))
     }
 
     fn is_mobile_data_enabled(&self) -> Result<bool> {
-        self.client.wwan_enabled()
+        Ok(self.ensure_policy()?.wwan_enabled)
     }
 
     fn set_mobile_data_enabled(&self, enabled: bool) -> Result<()> {
@@ -916,10 +1477,11 @@ impl<C: NmClient> NetworkBackend for LinuxNetworkBackend<C> {
     }
 
     fn is_data_roaming_enabled(&self) -> Result<bool> {
-        // Absence of a cellular modem is a *measurement*: roaming is not enabled
-        // because there is no data path to roam. A present modem would need
-        // ModemManager, which is absent — reported, not fabricated.
-        let has_wwan = self.real_devices()?.iter().any(|d| d.device_type == 14);
+        self.ensure_kernel_state()?;
+        // A cellular modem is a KERNEL fact now: the wwan subsystem registers
+        // the wwan net device (`IFLA_LINKINFO` kind "wwan"), so the store
+        // answers with no daemon hop.
+        let has_wwan = self.store.links().iter().any(|l| l.is_cellular());
         if has_wwan {
             Err(Error::unavailable(
                 "data roaming is a ModemManager setting; ModemManager absent on this host",
@@ -1134,7 +1696,8 @@ impl RealNmClient {
         Ok(read_counters_from_sysfs(&self.sysfs_root, iface))
     }
 
-    /// Parse the kernel rfkill device (a stream of 8-byte events, no header).
+    /// Read the kernel rfkill device (a stream of 8-byte events, no header) and
+    /// parse it through the netlink module's one rfkill vocabulary.
     fn read_rfkill(&self) -> Result<Vec<RfkillState>> {
         use std::io::Read;
         let mut buf = [0u8; 8 * 128];
@@ -1142,43 +1705,44 @@ impl RealNmClient {
             Ok(mut f) => f.read(&mut buf).unwrap_or(0),
             Err(_) => 0,
         };
-        Ok(parse_rfkill_events(&buf[..n]))
+        Ok(netlink::parse_rfkill_events(&buf[..n]))
     }
 }
 
 impl NmClient for RealNmClient {
-    fn networking_enabled(&self) -> Result<bool> {
-        self.prop_bool("NetworkingEnabled")
+    /// The ONE counted fallback sweep: the manager policy bits plus NM's device
+    /// view. Several D-Bus round trips on the wire, but exactly one seam call —
+    /// the unit the fallback is counted in — and it happens only when the kernel
+    /// could not answer or the topology changed since the last sweep.
+    fn policy(&self) -> Result<NmPolicy> {
+        Ok(NmPolicy {
+            networking_enabled: self.prop_bool("NetworkingEnabled")?,
+            wireless_enabled: self.prop_bool("WirelessEnabled")?,
+            wireless_hardware_enabled: self.prop_bool("WirelessHardwareEnabled")?,
+            wwan_enabled: self.prop_bool("WwanEnabled")?,
+            wwan_hardware_enabled: self.prop_bool("WwanHardwareEnabled")?,
+            devices: self.devices()?,
+        })
     }
-    fn wireless_enabled(&self) -> Result<bool> {
-        self.prop_bool("WirelessEnabled")
+
+    fn counters(&self, iface: &str) -> Result<InterfaceCounters> {
+        self.read_counters(iface)
     }
-    fn wireless_hardware_enabled(&self) -> Result<bool> {
-        self.prop_bool("WirelessHardwareEnabled")
-    }
-    fn wwan_enabled(&self) -> Result<bool> {
-        self.prop_bool("WwanEnabled")
-    }
-    fn wwan_hardware_enabled(&self) -> Result<bool> {
-        self.prop_bool("WwanHardwareEnabled")
-    }
-    fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
-        self.enable(enabled)
-    }
-    fn set_wireless_enabled(&self, enabled: bool) -> Result<()> {
-        self.set_manager_bool("WirelessEnabled", enabled)
-    }
-    fn set_wwan_enabled(&self, enabled: bool) -> Result<()> {
-        self.set_manager_bool("WwanEnabled", enabled)
-    }
-    fn devices(&self) -> Result<Vec<DeviceSnapshot>> {
-        self.devices()
-    }
+
     fn rfkill(&self) -> Result<Vec<RfkillState>> {
         self.read_rfkill()
     }
-    fn counters(&self, iface: &str) -> Result<InterfaceCounters> {
-        self.read_counters(iface)
+
+    fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
+        self.enable(enabled)
+    }
+
+    fn set_wireless_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_manager_bool("WirelessEnabled", enabled)
+    }
+
+    fn set_wwan_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_manager_bool("WwanEnabled", enabled)
     }
 }
 
@@ -1208,54 +1772,6 @@ fn read_counters_from_sysfs(root: &Path, iface: &str) -> InterfaceCounters {
     }
 }
 
-/// Parse a batch of kernel `struct rfkill_event` records (8 bytes each:
-/// `{ u32 idx; u8 type; u8 op; u8 soft; u8 hard; }`) into per-radio states,
-/// keeping `hard` and `soft` separate from one another. Types mapped: 1=wifi,
-/// 2=bluetooth, 5=cellular; others dropped (no honest name).
-pub fn parse_rfkill_events(buf: &[u8]) -> Vec<RfkillState> {
-    #[derive(Default)]
-    struct Acc {
-        name: &'static str,
-        hard: bool,
-        soft: bool,
-    }
-    let name_for = |t: u8| -> &'static str {
-        match t {
-            1 => "wifi",
-            2 => "bluetooth",
-            5 => "cellular",
-            _ => "unknown",
-        }
-    };
-    let mut map: alloc::collections::BTreeMap<u8, Acc> = alloc::collections::BTreeMap::new();
-    let mut off = 0usize;
-    while off + 8 <= buf.len() {
-        let kind = buf[off + 4];
-        let soft = buf[off + 6] != 0;
-        let hard = buf[off + 7] != 0;
-        let e = map.entry(kind).or_default();
-        e.name = name_for(kind);
-        e.hard = hard;
-        e.soft = soft;
-        off += 8;
-    }
-    map.into_values()
-        .filter(|a| a.name != "unknown")
-        .map(|a| RfkillState {
-            name: a.name.to_string(),
-            hard_blocked: a.hard,
-            soft_blocked: a.soft,
-        })
-        .collect()
-}
-
-/// Return the rfkill entries discovered on the host (public, for the live read
-/// proof and for callers that want the raw radio-block view).
-pub fn read_rfkill_readonly() -> Result<Vec<RfkillState>> {
-    let client = RealNmClient::new(None, None)?;
-    client.read_rfkill()
-}
-
 /// Whether a NetworkManager system-bus session can be opened and authenticated
 /// (used by the read-only live proof to decide `REAL` honestly at runtime).
 pub fn system_bus_available() -> bool {
@@ -1273,23 +1789,159 @@ mod tests {
     use super::*;
     use crate::core::ErrorCode;
     use crate::domains::network::availability::{claimed_l3_tests, AvailStatus, NETWORK_AVAILABILITY};
+    use crate::platforms::linux::netlink::{KernelSnapshot, MockNetlink};
     use alloc::collections::BTreeSet;
     use std::cell::RefCell;
-    /// A scripted NetworkManager behind the seam. Scalar fields carry the NM
-    /// state; `writes` records every host-mutating call (so a mapping test can
-    /// assert the right NM call would be made); `fault` injects a `core::Error`
-    /// on any seam method (error injection over all 20 codes).
+    use std::sync::Arc;
+
+    // ── The scripted kernel (netlink vocabulary) ────────────────────────────
+
+    /// A healthy ethernet link as the kernel reports it: administratively up,
+    /// carrier present, operstate UP, counters attached.
+    fn ethernet_link(name: &str, index: u32, carrier: bool) -> KernelLink {
+        KernelLink {
+            index,
+            name: name.to_string(),
+            kind: LinkKind::Ethernet,
+            info_kind: String::new(),
+            up: true,
+            carrier: Some(carrier),
+            oper_state: OperState::Up,
+            mtu: 1500,
+            hardware_address: "08:8F:C3:E1:21:71".to_string(),
+            stats: Some(InterfaceCounters {
+                bytes_in: 11_223_344,
+                bytes_out: 55_667_788,
+                packets_in: 90_001,
+                packets_out: 90_002,
+                errors_in: 1,
+                errors_out: 2,
+                drops_in: 3,
+                drops_out: 4,
+                sampled_at: 1,
+            }),
+            provenance: LinkProvenance::Kernel,
+        }
+    }
+
+    /// A healthy wifi link: administratively up, operstate UP, carrier on — the
+    /// shape this host's wlp0s20f3 reports when associated.
+    fn wifi_link(name: &str, index: u32) -> KernelLink {
+        KernelLink {
+            index,
+            name: name.to_string(),
+            kind: LinkKind::Wifi,
+            info_kind: String::new(),
+            up: true,
+            carrier: Some(true),
+            oper_state: OperState::Up,
+            mtu: 1500,
+            hardware_address: "98:59:7A:E4:A0:F2".to_string(),
+            stats: None,
+            provenance: LinkProvenance::Kernel,
+        }
+    }
+
+    /// A wifi link the host asked up whose hardware never came up — the kernel's
+    /// no-firmware shape (`stalled()`: admin up, operstate DOWN, no carrier).
+    fn wifi_stalled_link(name: &str, index: u32) -> KernelLink {
+        KernelLink {
+            carrier: Some(false),
+            oper_state: OperState::Down,
+            ..wifi_link(name, index)
+        }
+    }
+
+    /// The same link with a fresh counter sample (a state change: the kernel
+    /// really did report new numbers, and the store holds the latest).
+    fn resampled(link: &KernelLink, bytes_in: u64) -> KernelLink {
+        let mut moved = link.clone();
+        if let Some(stats) = moved.stats.as_mut() {
+            stats.bytes_in = bytes_in;
+            stats.sampled_at += 1;
+        }
+        moved
+    }
+
+    /// A wifi link NM administratively took down when the radio went off.
+    fn wifi_radio_off_link(name: &str, index: u32) -> KernelLink {
+        KernelLink {
+            up: false,
+            carrier: None,
+            oper_state: OperState::Down,
+            ..wifi_link(name, index)
+        }
+    }
+
+    /// The wwan net device the kernel registers for a cellular modem.
+    fn wwan_link(name: &str, index: u32) -> KernelLink {
+        KernelLink {
+            index,
+            name: name.to_string(),
+            kind: LinkKind::Other,
+            info_kind: "wwan".to_string(),
+            up: true,
+            carrier: Some(true),
+            oper_state: OperState::Up,
+            mtu: 1500,
+            hardware_address: String::new(),
+            stats: None,
+            provenance: LinkProvenance::Kernel,
+        }
+    }
+
+    /// Loopback, the link every kernel link table has.
+    fn loopback_link() -> KernelLink {
+        KernelLink {
+            index: 1,
+            name: "lo".to_string(),
+            kind: LinkKind::Loopback,
+            info_kind: String::new(),
+            up: true,
+            carrier: None,
+            oper_state: OperState::Up,
+            mtu: 65_536,
+            hardware_address: "00:00:00:00:00:00".to_string(),
+            stats: None,
+            provenance: LinkProvenance::Kernel,
+        }
+    }
+
+    fn snapshot(links: Vec<KernelLink>) -> KernelSnapshot {
+        KernelSnapshot {
+            links,
+            addresses: Vec::new(),
+            routes: Vec::new(),
+            rfkill: Vec::new(),
+        }
+    }
+
+    fn kernel(links: Vec<KernelLink>) -> MockNetlink {
+        MockNetlink::with_snapshot(snapshot(links))
+    }
+
+    /// A scripted kernel whose rfkill view carries the given radio blocks (the
+    /// kernel's own radio-block source — never NM policy).
+    fn kernel_with_rfkill(links: Vec<KernelLink>, rfkill: Vec<RfkillState>) -> MockNetlink {
+        let mut snap = snapshot(links);
+        snap.rfkill = rfkill;
+        MockNetlink::with_snapshot(snap)
+    }
+
+    // ── The scripted NetworkManager (policy + control seam) ─────────────────
+
+    /// A scripted NM behind the shrunk seam. `calls` records every seam call a
+    /// read issued (so the counting mock can assert zero / exactly one), and
+    /// `writes` records every host-mutating verb (so a mapping test can assert
+    /// the right NM call would be made). `fault` injects a `core::Error` on any
+    /// seam method (error injection over all 20 codes).
     #[derive(Default)]
     struct Mock {
-        networking_enabled: bool,
-        wireless_enabled: bool,
-        wireless_hw: bool,
-        wwan_enabled: bool,
-        wwan_hw: bool,
-        devices: Vec<DeviceSnapshot>,
-        rfkill: Vec<RfkillState>,
+        policy: NmPolicy,
         counters: InterfaceCounters,
+        rfkill: Vec<RfkillState>,
         writes: RefCell<Vec<String>>,
+        calls: RefCell<Vec<String>>,
         fault: RefCell<Option<Error>>,
     }
 
@@ -1301,441 +1953,800 @@ mod tests {
                 Ok(())
             }
         }
+
         fn record(&self, call: String) {
-            self.writes.borrow_mut().push(call);
+            self.calls.borrow_mut().push(call);
         }
+
         fn written(&self, needle: &str) -> bool {
             self.writes.borrow().iter().any(|w| w == needle)
         }
     }
 
+    /// An NM policy with the manager bits set and no device view (`managed` is
+    /// then "NM does not enumerate it", which is not "unmanaged").
+    fn policy(networking_enabled: bool, wireless_enabled: bool) -> NmPolicy {
+        NmPolicy {
+            networking_enabled,
+            wireless_enabled,
+            wireless_hardware_enabled: true,
+            wwan_enabled: false,
+            wwan_hardware_enabled: true,
+            devices: Vec::new(),
+        }
+    }
+
     impl NmClient for Mock {
-        fn networking_enabled(&self) -> Result<bool> {
+        fn policy(&self) -> Result<NmPolicy> {
             self.check()?;
-            Ok(self.networking_enabled)
+            self.record("policy".to_string());
+            Ok(self.policy.clone())
         }
-        fn wireless_enabled(&self) -> Result<bool> {
+
+        fn counters(&self, iface: &str) -> Result<InterfaceCounters> {
             self.check()?;
-            Ok(self.wireless_enabled)
-        }
-        fn wireless_hardware_enabled(&self) -> Result<bool> {
-            self.check()?;
-            Ok(self.wireless_hw)
-        }
-        fn wwan_enabled(&self) -> Result<bool> {
-            self.check()?;
-            Ok(self.wwan_enabled)
-        }
-        fn wwan_hardware_enabled(&self) -> Result<bool> {
-            self.check()?;
-            Ok(self.wwan_hw)
-        }
-        fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
-            self.check()?;
-            self.record(format!("Enable({enabled})"));
-            Ok(())
-        }
-        fn set_wireless_enabled(&self, enabled: bool) -> Result<()> {
-            self.check()?;
-            self.record(format!("WirelessEnabled({enabled})"));
-            Ok(())
-        }
-        fn set_wwan_enabled(&self, enabled: bool) -> Result<()> {
-            self.check()?;
-            self.record(format!("WwanEnabled({enabled})"));
-            Ok(())
-        }
-        fn devices(&self) -> Result<Vec<DeviceSnapshot>> {
-            self.check()?;
-            Ok(self.devices.clone())
-        }
-        fn rfkill(&self) -> Result<Vec<RfkillState>> {
-            self.check()?;
-            Ok(self.rfkill.clone())
-        }
-        fn counters(&self, _iface: &str) -> Result<InterfaceCounters> {
-            self.check()?;
+            self.record(format!("counters({iface})"));
             Ok(self.counters)
         }
-    }
 
-    fn wifi(iface: &str, state: u32) -> DeviceSnapshot {
-        DeviceSnapshot {
-            path: format!("/org/freedesktop/NetworkManager/Devices/{iface}"),
-            iface: iface.to_string(),
-            device_type: 2,
-            state,
-            firmware_missing: false,
-            managed: true,
-            carrier: None,
-            real: true,
-            hw_address: "AA:BB:CC:DD:EE:FF".to_string(),
-            mtu: 1500,
-            driver: "iwlwifi".to_string(),
+        fn rfkill(&self) -> Result<Vec<RfkillState>> {
+            self.check()?;
+            self.record("rfkill".to_string());
+            Ok(self.rfkill.clone())
+        }
+
+        fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
+            self.check()?;
+            self.writes.borrow_mut().push(format!("Enable({enabled})"));
+            Ok(())
+        }
+
+        fn set_wireless_enabled(&self, enabled: bool) -> Result<()> {
+            self.check()?;
+            self.writes.borrow_mut().push(format!("WirelessEnabled({enabled})"));
+            Ok(())
+        }
+
+        fn set_wwan_enabled(&self, enabled: bool) -> Result<()> {
+            self.check()?;
+            self.writes.borrow_mut().push(format!("WwanEnabled({enabled})"));
+            Ok(())
         }
     }
 
-    fn ethernet(iface: &str, carrier: bool, state: u32) -> DeviceSnapshot {
-        DeviceSnapshot {
-            device_type: 1,
-            carrier: Some(carrier),
-            ..wifi(iface, state)
-        }
+    /// A backend over a scripted kernel and a scripted NM (never the host).
+    fn backend(kernel: MockNetlink, nm: Mock) -> LinuxNetworkBackend<Mock> {
+        LinuxNetworkBackend::with_client_and_netlink(nm, Box::new(kernel))
+    }
+
+    /// The common fixture: one healthy ethernet, one healthy wifi, loopback, and
+    /// an NM policy that has both radios on.
+    fn happy_backend() -> LinuxNetworkBackend<Mock> {
+        backend(
+            kernel(alloc::vec![
+                loopback_link(),
+                ethernet_link("enp0s31f6", 2, true),
+                wifi_link("wlp0s20f3", 3),
+            ]),
+            Mock {
+                policy: policy(true, true),
+                ..Default::default()
+            },
+        )
     }
 
     fn id_of(iface: &str) -> NetworkInterfaceId {
         iface_id(iface)
     }
 
-    // ── The four-state diagnostic (the incident as a regression test) ────────
+    // ── The four-state diagnostic with explicit sources (the incident) ───────
 
+    /// The incident's four failure modes are four DISTINCT statuses, and each
+    /// names the layer that produced it: `carrier-down` / `no-firmware` come
+    /// from netlink (kernel facts), `networking-disabled` / `radio-off` come
+    /// from NetworkManager policy (the counted fallback).
     #[test]
-    fn get_status_four_states_distinct() {
-        // (1) networking-disabled: the master switch outranks everything.
-        let nd = Mock {
-            networking_enabled: false,
-            devices: alloc::vec![wifi("wlan0", 100)],
-            wireless_enabled: true,
-            ..Default::default()
-        };
-        // (2) radio-off: policy off the wifi radio, networking up.
-        let ro = Mock {
-            networking_enabled: true,
-            wireless_enabled: false,
-            devices: alloc::vec![DeviceSnapshot {
-                state: 30,
-                ..wifi("wlan0", 30)
-            }],
-            ..Default::default()
-        };
-        // (3) no-firmware: the device cannot come up, radio on.
-        let nf = Mock {
-            networking_enabled: true,
-            wireless_enabled: true,
-            devices: alloc::vec![DeviceSnapshot {
-                firmware_missing: true,
-                state: 20,
-                ..wifi("wlan0", 20)
-            }],
-            ..Default::default()
-        };
-        // (4) carrier-down: an unplugged ethernet cable, everything else fine.
-        let cd = Mock {
-            networking_enabled: true,
-            devices: alloc::vec![ethernet("enp0s31f6", false, 20)],
-            ..Default::default()
-        };
+    fn get_status_four_states_distinct_with_explicit_sources() {
+        // (1) networking-disabled: the master switch outranks everything, even
+        //     a link the kernel reports perfectly healthy.
+        let nd = backend(
+            kernel(alloc::vec![ethernet_link("enp0s31f6", 2, true)]),
+            Mock {
+                policy: policy(false, true),
+                ..Default::default()
+            },
+        );
+        // (2) radio-off: NM policy off the wifi radio; the kernel shows the link
+        //     administratively down, which is the policy's shadow, not a cause.
+        let ro = backend(
+            kernel(alloc::vec![wifi_radio_off_link("wlp0s20f3", 3)]),
+            Mock {
+                policy: policy(true, false),
+                ..Default::default()
+            },
+        );
+        // (3) no-firmware: asked up, operstate DOWN, no carrier, no radio block.
+        let nf = backend(
+            kernel(alloc::vec![wifi_stalled_link("wlp0s20f3", 3)]),
+            Mock {
+                policy: policy(true, true),
+                ..Default::default()
+            },
+        );
+        // (4) carrier-down: an unplugged cable, the host asking the link up.
+        let cd = backend(
+            kernel(alloc::vec![ethernet_link("enp0s31f6", 2, false)]),
+            Mock {
+                policy: policy(true, true),
+                ..Default::default()
+            },
+        );
 
-        let states = [
-            LinuxNetworkBackend::with_client(nd).get_status(id_of("wlan0")).unwrap().host_state,
-            LinuxNetworkBackend::with_client(ro).get_status(id_of("wlan0")).unwrap().host_state,
-            LinuxNetworkBackend::with_client(nf).get_status(id_of("wlan0")).unwrap().host_state,
-            LinuxNetworkBackend::with_client(cd).get_status(id_of("enp0s31f6")).unwrap().host_state,
-        ];
+        let states: Vec<(HostState, HostStateSource)> = [
+            (nd.get_status(id_of("enp0s31f6")).unwrap(),),
+            (ro.get_status(id_of("wlp0s20f3")).unwrap(),),
+            (nf.get_status(id_of("wlp0s20f3")).unwrap(),),
+            (cd.get_status(id_of("enp0s31f6")).unwrap(),),
+        ]
+        .into_iter()
+        .map(|(s,)| (s.host_state, s.host_state_source))
+        .collect();
+
         assert_eq!(
             states,
-            [HostState::NetworkingDisabled, HostState::RadioOff, HostState::NoFirmware, HostState::CarrierDown],
-            "the incident's four failure modes must be four distinct statuses"
+            [
+                (HostState::NetworkingDisabled, HostStateSource::NmPolicy),
+                (HostState::RadioOff, HostStateSource::NmPolicy),
+                (HostState::NoFirmware, HostStateSource::Kernel),
+                (HostState::CarrierDown, HostStateSource::Kernel),
+            ],
+            "the incident's four failure modes must be four distinct statuses, each with its source"
         );
-        // A fifth value proves they are not accidentally equal.
-        let mut distinct: BTreeSet<HostState> = BTreeSet::new();
-        for s in states {
-            distinct.insert(s);
-        }
+        // A fifth value proves they are not accidentally equal, and the two
+        // sources are both really produced (kernel facts AND policy facts).
+        let distinct: BTreeSet<HostState> = states.iter().map(|(s, _)| *s).collect();
         assert_eq!(distinct.len(), 4);
+        assert_eq!(
+            states.iter().filter(|(_, src)| *src == HostStateSource::Kernel).count(),
+            2,
+            "carrier-down and no-firmware are kernel facts (netlink)"
+        );
+        assert_eq!(
+            states.iter().filter(|(_, src)| *src == HostStateSource::NmPolicy).count(),
+            2,
+            "networking-disabled and radio-off are NM policy (the counted fallback)"
+        );
     }
 
-    /// A healthy activated wifi reads `managed` — the fifth value the diagnostic
+    /// A rfkill-blocked radio is `radio-off` with the KERNEL as its source: the
+    /// rfkill bit is a kernel fact, never conflated with NM's policy `enabled`.
+    #[test]
+    fn rfkill_blocked_radio_is_radio_off_from_the_kernel() {
+        let b = backend(
+            kernel_with_rfkill(
+                alloc::vec![wifi_link("wlp0s20f3", 3)],
+                alloc::vec![RfkillState {
+                    name: "wifi".to_string(),
+                    hard_blocked: false,
+                    soft_blocked: true,
+                }],
+            ),
+            Mock {
+                policy: policy(true, true),
+                ..Default::default()
+            },
+        );
+        let status = b.get_status(id_of("wlp0s20f3")).unwrap();
+        assert_eq!(status.host_state, HostState::RadioOff);
+        assert_eq!(status.host_state_source, HostStateSource::Kernel);
+        // A blocked radio is not "missing firmware": the kernel held it.
+        let stalled = backend(
+            kernel_with_rfkill(
+                alloc::vec![wifi_stalled_link("wlp0s20f3", 3)],
+                alloc::vec![RfkillState {
+                    name: "wifi".to_string(),
+                    hard_blocked: true,
+                    soft_blocked: false,
+                }],
+            ),
+            Mock {
+                policy: policy(true, true),
+                ..Default::default()
+            },
+        );
+        let blocked = stalled.get_status(id_of("wlp0s20f3")).unwrap();
+        assert_eq!(blocked.host_state, HostState::RadioOff, "a hard-blocked radio is radio-off, not no-firmware");
+    }
+
+    /// A healthy activated link reads `managed` — the fifth value the diagnostic
     /// must be able to tell apart from all four failures.
     #[test]
     fn connected_managed_device_reads_managed() {
-        let m = Mock {
-            networking_enabled: true,
-            wireless_enabled: true,
-            devices: alloc::vec![wifi("wlan0", 100)],
-            ..Default::default()
-        };
-        let status = LinuxNetworkBackend::with_client(m).get_status(id_of("wlan0")).unwrap();
+        let b = happy_backend();
+        let status = b.get_status(id_of("wlp0s20f3")).unwrap();
         assert_eq!(status.host_state, HostState::Managed);
-        assert!(status.connected);
+        assert!(status.connected, "operstate UP is the kernel's connection fact");
+        assert_eq!(status.kind, "wifi");
+        // Not measured, never fabricated: nl80211 signal facts are not read.
+        assert_eq!(status.strength_dbm, 0);
+        assert!(status.ssid.is_empty());
     }
 
-    // ── Host-global networking + radio writes (mock only; law #8) ────────────
-
+    /// A link NM does not drive reads `unmanaged` (policy), not `carrier-down`.
     #[test]
-    fn set_networking_calls_enable() {
-        let m = Mock::default();
-        let backend = LinuxNetworkBackend::with_client(m);
-        backend.set_networking_enabled(false).unwrap();
-        backend.set_networking_enabled(true).unwrap();
-        assert!(backend.client.written("Enable(false)"), "setNetworking(false) must reach NM Enable(false)");
-        assert!(backend.client.written("Enable(true)"), "setNetworking(true) must reach NM Enable(true)");
+    fn unmanaged_device_is_its_own_state() {
+        let mut p = policy(true, true);
+        p.devices = alloc::vec![DeviceSnapshot {
+            iface: "enp0s31f6".to_string(),
+            device_type: 1,
+            managed: false,
+            real: true,
+            ..Default::default()
+        }];
+        let b = backend(kernel(alloc::vec![ethernet_link("enp0s31f6", 2, false)]), Mock {
+            policy: p,
+            ..Default::default()
+        });
+        let status = b.get_status(id_of("enp0s31f6")).unwrap();
+        assert_eq!(status.host_state, HostState::Unmanaged);
+        assert_eq!(status.host_state_source, HostStateSource::NmPolicy);
     }
 
+    /// A link that is not running with no named cause is an honest `unknown`,
+    /// never a fabricated `managed`.
     #[test]
-    fn set_radio_wifi_calls_wireless_enabled() {
-        let m = Mock::default();
-        let backend = LinuxNetworkBackend::with_client(m);
-        backend.set_radio_enabled("wifi", false).unwrap();
-        backend.set_radio_enabled("wifi", true).unwrap();
-        assert!(backend.client.written("WirelessEnabled(false)"));
-        assert!(backend.client.written("WirelessEnabled(true)"));
+    fn a_silent_link_with_no_named_cause_is_unknown() {
+        let mut link = ethernet_link("enp0s31f6", 2, true);
+        link.up = false;
+        link.oper_state = OperState::Down;
+        let b = backend(kernel(alloc::vec![link]), Mock {
+            policy: policy(true, true),
+            ..Default::default()
+        });
+        let status = b.get_status(id_of("enp0s31f6")).unwrap();
+        assert_eq!(status.host_state, HostState::Unknown);
+        assert!(!status.connected);
     }
 
+    // ── The transport-hierarchy proof (law #9: kernel first) ─────────────────
+
+    /// The acceptance assertion: a WARM store issues ZERO NmClient calls on the
+    /// read path — every kernel-authoritative read is served from the store.
+    /// (Run with `--nocapture` for the printed per-op table.)
     #[test]
-    fn set_radio_cellular_routes_to_mobile_data() {
-        // "cellular" and setMobileData share one home: NM WwanEnabled.
-        let m = Mock::default();
-        let backend = LinuxNetworkBackend::with_client(m);
-        backend.set_radio_enabled("cellular", true).unwrap();
-        backend.set_mobile_data_enabled(false).unwrap();
-        assert!(backend.client.written("WwanEnabled(true)"), "setRadioEnabled(cellular) must reach WwanEnabled(true)");
-        assert!(backend.client.written("WwanEnabled(false)"), "setMobileData(false) must reach WwanEnabled(false)");
+    fn warm_store_reads_issue_zero_nm_calls() {
+        let b = happy_backend();
+        // Warm the store: the first read primes the policy snapshot.
+        assert_eq!(b.nm_fallback_calls(), 0, "nothing has been read yet");
+        let _ = b.get_status(id_of("wlp0s20f3")).unwrap();
+        let after_first = b.nm_fallback_calls();
+        assert_eq!(after_first, 1, "the cold read issues exactly one counted fallback");
+
+        // Every subsequent read op on the warm store issues zero NmClient calls.
+        let ops = [
+            ("getStatus", b.get_status(id_of("wlp0s20f3")).is_ok()),
+            ("getInterfaces", b.get_interfaces(Pagination::default()).is_ok()),
+            (
+                "pullStatus",
+                b.pull_status(b.subscribe_status(id_of("wlp0s20f3")).unwrap()).is_ok(),
+            ),
+            (
+                "pullCounters",
+                b.pull_counters(b.subscribe_counters(id_of("enp0s31f6")).unwrap()).is_ok(),
+            ),
+            ("isNetworkingEnabled", b.is_networking_enabled().is_ok()),
+            ("listRadioStates", b.list_radio_states(Pagination::default()).is_ok()),
+            ("isMobileDataEnabled", b.is_mobile_data_enabled().is_ok()),
+        ];
+        for (name, ok) in ops {
+            assert!(ok, "{name}");
+        }
+        assert_eq!(
+            b.nm_fallback_calls(),
+            after_first,
+            "a warm store makes zero further NmClient calls: the kernel answers"
+        );
+
+        // The kernel facts themselves are the store's, provably: the link table
+        // came from the netlink mock, not from NM's device view.
+        assert!(b.store().provenance("wlp0s20f3") == Some(LinkProvenance::Kernel));
+        assert!(b.kernel_error().is_none());
     }
 
+    /// The seam-count table the report cites: per read op, NmClient calls on a
+    /// COLD store (the first read) versus a WARM one (the next). Printed so the
+    /// founder can read the before/after without a debugger.
     #[test]
-    fn set_radio_rejects_unknown_token_and_owns_bluetooth() {
-        let m = Mock::default();
-        let backend = LinuxNetworkBackend::with_client(m);
-        let empty = backend.set_radio_enabled("", true).unwrap_err();
-        assert_eq!(empty.code, ErrorCode::InvalidArgument);
-        let bt = backend.set_radio_enabled("bluetooth", true).unwrap_err();
-        assert_eq!(bt.code, ErrorCode::NotSupported);
-        let future = backend.set_radio_enabled("a-2046-radio", true).unwrap_err();
-        assert_eq!(future.code, ErrorCode::NotSupported);
-        // None of the refused writes touched the host.
-        assert!(backend.client.writes.borrow().is_empty());
+    fn cold_store_reads_issue_exactly_one_counted_fallback() {
+        // (read op, cold count, warm count)
+        let mut rows: Vec<(&str, u64, u64)> = Vec::new();
+
+        // getStatus: needs the master switch + radio policy ⇒ one cold call.
+        let b = happy_backend();
+        let _ = b.get_status(id_of("enp0s31f6")).unwrap();
+        let cold = b.nm_fallback_calls();
+        let _ = b.get_status(id_of("enp0s31f6")).unwrap();
+        rows.push(("getStatus", cold, b.nm_fallback_calls() - cold));
+
+        // getInterfaces: needs NM's `managed` bit ⇒ one cold call.
+        let b = happy_backend();
+        let _ = b.get_interfaces(Pagination::default()).unwrap();
+        let cold = b.nm_fallback_calls();
+        let _ = b.get_interfaces(Pagination::default()).unwrap();
+        rows.push(("getInterfaces", cold, b.nm_fallback_calls() - cold));
+
+        // getCounters: the kernel's own IFLA_STATS64 ⇒ zero, cold or warm.
+        let b = happy_backend();
+        let _ = b.get_counters(id_of("enp0s31f6"), Duration::from_nanos(1_000_000_000)).unwrap();
+        let cold = b.nm_fallback_calls();
+        let _ = b.get_counters(id_of("enp0s31f6"), Duration::from_nanos(1_000_000_000)).unwrap();
+        rows.push(("getCounters", cold, b.nm_fallback_calls() - cold));
+
+        // isNetworkingEnabled: NM policy ⇒ one cold call.
+        let b = happy_backend();
+        let _ = b.is_networking_enabled().unwrap();
+        let cold = b.nm_fallback_calls();
+        let _ = b.is_networking_enabled().unwrap();
+        rows.push(("isNetworkingEnabled", cold, b.nm_fallback_calls() - cold));
+
+        // listRadioStates: policy + kernel rfkill ⇒ one cold call.
+        let b = happy_backend();
+        let _ = b.list_radio_states(Pagination::default()).unwrap();
+        let cold = b.nm_fallback_calls();
+        let _ = b.list_radio_states(Pagination::default()).unwrap();
+        rows.push(("listRadioStates", cold, b.nm_fallback_calls() - cold));
+
+        // A kernel-fact read that never needs policy at all: the counters of a
+        // link carrying IFLA_STATS64 are served with zero seam calls, cold or warm.
+        std::println!("read op                  cold  warm");
+        for (name, cold, warm) in &rows {
+            std::println!("{name:<24} {cold:>4}  {warm:>4}");
+        }
+        assert_eq!(rows[0], ("getStatus", 1, 0), "cold getStatus issues exactly one counted fallback");
+        assert_eq!(rows[1], ("getInterfaces", 1, 0), "cold getInterfaces issues exactly one counted fallback");
+        assert_eq!(rows[2], ("getCounters", 0, 0), "kernel counters never reach the seam");
+        assert_eq!(rows[3], ("isNetworkingEnabled", 1, 0));
+        assert_eq!(rows[4], ("listRadioStates", 1, 0));
+    }
+
+    /// Netlink events feed the store: one read drains them, the revision rises,
+    /// and the served status is the LATEST fact, not a stale one.
+    #[test]
+    fn kernel_events_feed_the_store() {
+        let k = Arc::new(kernel(alloc::vec![ethernet_link("enp0s31f6", 2, true)]));
+        let b = LinuxNetworkBackend::with_client_and_netlink(
+            Mock {
+                policy: policy(true, true),
+                ..Default::default()
+            },
+            Box::new(k.clone()),
+        );
+        assert!(b.get_status(id_of("enp0s31f6")).unwrap().connected);
+        let revision = b.store_revision();
+
+        // No event arrived: nothing changed, and no daemon hop was made either.
+        b.get_status(id_of("enp0s31f6")).unwrap();
+        assert_eq!(b.store_revision(), revision);
+        assert_eq!(b.nm_fallback_calls(), 1, "still only the first cold sweep");
+
+        // The kernel says the carrier went away: one event, one applied change.
+        k.queue_event(KernelEvent::Link(ethernet_link("enp0s31f6", 2, false)));
+        let status = b.get_status(id_of("enp0s31f6")).unwrap();
+        assert_eq!(status.host_state, HostState::CarrierDown, "the event reached the store");
+        assert_eq!(b.store_revision(), revision + 1, "one state-changing event, one revision");
+        // The link went away entirely: the store forgets it, the read is notFound.
+        k.queue_event(KernelEvent::LinkGone(2));
+        assert_eq!(b.get_status(id_of("enp0s31f6")).unwrap_err().code, ErrorCode::NotFound);
+        assert_eq!(b.get_interfaces(Pagination::default()).unwrap().total, 0);
     }
 
     // ── Reads -----------------------------------------------------------------
 
+    /// `getInterfaces` enumerates the kernel link table (every netdev the kernel
+    /// knows), with the kernel's own kind, MTU and hardware address.
     #[test]
-    fn is_networking_enabled_reads_property() {
-        let m = Mock {
-            networking_enabled: true,
-            ..Default::default()
-        };
-        assert!(LinuxNetworkBackend::with_client(m).is_networking_enabled().unwrap());
-        let off = Mock {
-            networking_enabled: false,
-            ..Default::default()
-        };
-        assert!(!LinuxNetworkBackend::with_client(off).is_networking_enabled().unwrap());
+    fn get_interfaces_enumerates_the_kernel_link_table() {
+        let b = happy_backend();
+        let page = b.get_interfaces(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, 3);
+        let names: Vec<&str> = page.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["enp0s31f6", "lo", "wlp0s20f3"], "sorted by ifname");
+        let lo = page.items.iter().find(|i| i.name == "lo").unwrap();
+        assert_eq!(lo.kind, "loopback");
+        assert_eq!(lo.mtu, 65_536);
+        assert!(lo.up && lo.connected);
+        // `managed` is NM policy: a device NM does not enumerate reports false,
+        // never a guess dressed as a kernel fact.
+        assert!(!lo.managed);
     }
 
+    /// A `wwan` link reports the "cellular" token derived from the kernel's
+    /// `IFLA_LINKINFO`, so `isDataRoamingEnabled` sees the modem without a
+    /// daemon hop.
     #[test]
-    fn mobile_data_enabled_reads_wwan() {
-        let m = Mock {
-            wwan_enabled: true,
-            ..Default::default()
-        };
-        assert!(LinuxNetworkBackend::with_client(m).is_mobile_data_enabled().unwrap());
-    }
-
-    #[test]
-    fn data_roaming_enabled_reads_wwan() {
-        // No cellular modem (ModemManager absent) ⇒ roaming is measurably off.
-        let m = Mock {
-            devices: alloc::vec![wifi("wlan0", 100)],
-            ..Default::default()
-        };
-        assert!(!LinuxNetworkBackend::with_client(m).is_data_roaming_enabled().unwrap());
-        // A present modem with no roaming access is an honest Unavailable, not false.
-        let with_wwan = Mock {
-            devices: alloc::vec![DeviceSnapshot {
-                device_type: 14,
-                ..wifi("wwan0", 100)
-            }],
-            ..Default::default()
-        };
-        let err = LinuxNetworkBackend::with_client(with_wwan).is_data_roaming_enabled().unwrap_err();
+    fn data_roaming_reads_the_kernel_wwan_link() {
+        let with_modem = backend(kernel(alloc::vec![wwan_link("wwan0", 4)]), Mock::default());
+        let err = with_modem.is_data_roaming_enabled().unwrap_err();
         assert_eq!(err.code, ErrorCode::Unavailable);
+        assert!(err.message.contains("ModemManager"));
+        let without = happy_backend();
+        assert!(!without.is_data_roaming_enabled().unwrap(), "no modem ⇒ measured-absent false");
     }
 
     #[test]
-    fn get_interfaces_and_radio_states() {
-        let m = Mock {
-            networking_enabled: true,
-            wireless_enabled: true,
-            wireless_hw: true,
-            wwan_enabled: false,
-            wwan_hw: true,
-            devices: alloc::vec![
-                wifi("wlan0", 100),
-                ethernet("enp0s31f6", false, 20),
-                DeviceSnapshot {
-                    iface: "p2p-dev-wlan0".to_string(),
-                    real: false,
-                    ..wifi("p2p-dev-wlan0", 30)
-                },
-            ],
-            ..Default::default()
-        };
-        let backend = LinuxNetworkBackend::with_client(m);
-        // getInterfaces filters pseudo-devices (p2p) and paginates.
-        let page = backend.get_interfaces(Pagination { offset: 0, limit: u32::MAX }).unwrap();
-        assert_eq!(page.total, 2, "the p2p pseudo-device is not Real and is filtered");
-        assert_eq!(page.items.len(), 2);
-        assert_eq!(page.items[0].name, "enp0s31f6"); // sorted by name
-        // listRadioStates reports wifi and cellular with their NM policy.
-        let radios = backend.list_radio_states(Pagination { offset: 0, limit: u32::MAX }).unwrap();
-        assert_eq!(radios.total, 2);
-        let wifi_radio = radios.items.iter().find(|r| r.name == "wifi").unwrap();
-        assert!(wifi_radio.enabled);
-        assert!(!wifi_radio.hard_blocked);
-        assert!(!wifi_radio.soft_blocked);
+    fn get_counters_serves_the_kernel_stats() {
+        let b = happy_backend();
+        let counters = b.get_counters(id_of("enp0s31f6"), Duration::from_nanos(1_000_000_000)).unwrap();
+        assert_eq!(counters.bytes_in, 11_223_344);
+        assert_eq!(counters.packets_out, 90_002);
+        assert_eq!(counters.drops_out, 4);
+        assert_eq!(counters.sampled_at, 1);
+        assert_eq!(b.nm_fallback_calls(), 0, "the kernel's own counters, no seam call");
     }
 
-    /// `hardBlocked` / `softBlocked` come from rfkill and are NEVER conflated
-    /// with the policy `enabled` bit (the schema's explicit warning).
+    /// A link whose IFLA_STATS64 the kernel did not report falls back to the
+    /// seam's /sys counters — counted, never silent.
+    #[test]
+    fn counters_fall_back_to_the_seam_when_the_kernel_reports_none() {
+        let b = backend(kernel(alloc::vec![wifi_link("wlp0s20f3", 3)]), Mock {
+            policy: policy(true, true),
+            counters: InterfaceCounters {
+                bytes_in: 777,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let counters = b.get_counters(id_of("wlp0s20f3"), Duration::from_nanos(1_000_000_000)).unwrap();
+        assert_eq!(counters.bytes_in, 777, "the /sys fallback answered");
+        assert_eq!(b.nm_fallback_calls(), 1, "exactly one counted counters fallback (counters need no policy)");
+    }
+
+    /// When netlink cannot answer at all, the link table is synthesised from
+    /// NM's device view — the counted fallback, marked `NmFallback` so a
+    /// consumer can see the daemon speaking.
+    #[test]
+    fn netlink_unavailable_falls_back_to_the_nm_device_view() {
+        let k = kernel(alloc::vec![ethernet_link("enp0s31f6", 2, true)]);
+        k.fail_with(Error::unavailable("netlink dump socket: operation not permitted"));
+        let mut p = policy(true, true);
+        p.devices = alloc::vec![DeviceSnapshot {
+            iface: "enp0s31f6".to_string(),
+            device_type: 1,
+            state: NM_DEVICE_STATE_ACTIVATED,
+            firmware_missing: false,
+            managed: true,
+            carrier: Some(true),
+            real: true,
+            hw_address: "08:8F:C3:E1:21:71".to_string(),
+            mtu: 1500,
+            ..Default::default()
+        }];
+        let b = backend(k, Mock {
+            policy: p,
+            ..Default::default()
+        });
+        let page = b.get_interfaces(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, 1, "NM's device view became the link table");
+        assert_eq!(page.items[0].name, "enp0s31f6");
+        assert_eq!(page.items[0].kind, "ethernet");
+        assert_eq!(b.store().provenance("enp0s31f6"), Some(LinkProvenance::NmFallback));
+        assert_eq!(b.nm_fallback_calls(), 1, "exactly one counted fallback, cold");
+        // The reason the kernel could not answer is reported, not swallowed.
+        assert!(b.kernel_error().is_some(), "the netlink failure is visible");
+        // Warm reads on the fallback table still make zero further calls.
+        let _ = b.get_status(id_of("enp0s31f6")).unwrap();
+        assert_eq!(b.nm_fallback_calls(), 1);
+    }
+
+    /// When netlink comes back, the kernel's link table replaces the NM-synthesised
+    /// fallback one (and never mixes with it): the fallback is a measured gap, not
+    /// a permanent second source.
+    #[test]
+    fn a_returning_kernel_replaces_the_fallback_link_table() {
+        let k = Arc::new(kernel(alloc::vec![ethernet_link("enp0s31f6", 2, true)]));
+        let b = LinuxNetworkBackend::with_client_and_netlink(
+            Mock {
+                policy: NmPolicy {
+                    networking_enabled: true,
+                    wireless_enabled: true,
+                    devices: alloc::vec![DeviceSnapshot {
+                        iface: "nm-only".to_string(),
+                        device_type: 1,
+                        state: NM_DEVICE_STATE_ACTIVATED,
+                        managed: true,
+                        carrier: Some(true),
+                        real: true,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Box::new(k.clone()),
+        );
+        // Netlink is dead: NM's device view becomes the link table.
+        k.fail_with(Error::unavailable("netlink event socket unavailable"));
+        let page = b.get_interfaces(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].name, "nm-only");
+        assert_eq!(b.store().provenance("nm-only"), Some(LinkProvenance::NmFallback));
+        // The kernel answers again: the fallback table is replaced wholesale.
+        k.clear_failure();
+        let page = b.get_interfaces(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].name, "enp0s31f6", "the kernel's table wins the moment it can answer");
+        assert_eq!(b.store().provenance("enp0s31f6"), Some(LinkProvenance::Kernel));
+        assert!(!b.store().fallback_installed());
+    }
+
+    /// `hardBlocked` / `softBlocked` come from the kernel's rfkill and are NEVER
+    /// conflated with the policy `enabled` bit (the schema's explicit warning).
     #[test]
     fn radio_hard_and_soft_are_not_conflated_with_policy() {
-        // Policy ON (enabled) but soft-blocked by rfkill: enabled stays true,
+        // Policy ON but soft-blocked by the kernel's rfkill: enabled stays true,
         // soft_blocked true, hard_blocked false.
-        let m = Mock {
-            wireless_enabled: true,
-            wireless_hw: true,
-            rfkill: alloc::vec![RfkillState {
-                name: "wifi".to_string(),
-                hard_blocked: false,
-                soft_blocked: true,
-            }],
+        let b = backend(
+            kernel_with_rfkill(
+                alloc::vec![],
+                alloc::vec![RfkillState {
+                    name: "wifi".to_string(),
+                    hard_blocked: false,
+                    soft_blocked: true,
+                }],
+            ),
+            Mock {
+            policy: NmPolicy {
+                wireless_enabled: true,
+                wireless_hardware_enabled: true,
+                ..policy(true, true)
+            },
             ..Default::default()
-        };
-        let radios = LinuxNetworkBackend::with_client(m)
-            .list_radio_states(Pagination { offset: 0, limit: u32::MAX })
-            .unwrap();
+        });
+        let radios = b.list_radio_states(Pagination { offset: 0, limit: u32::MAX }).unwrap();
         let r = radios.items.iter().find(|r| r.name == "wifi").unwrap();
         assert!(r.enabled, "policy enabled is reported verbatim");
         assert!(!r.hard_blocked);
         assert!(r.soft_blocked, "the rfkill soft bit is reported, not folded into enabled");
-        // Hardware switch off: hard blocked, independent of policy.
-        let m2 = Mock {
-            wireless_enabled: false,
-            wireless_hw: false,
-            rfkill: alloc::vec![RfkillState {
-                name: "wifi".to_string(),
-                hard_blocked: true,
-                soft_blocked: false,
-            }],
+        // Hardware switch off (NM says so): hard blocked, independent of policy.
+        let b2 = backend(kernel(alloc::vec![]), Mock {
+            policy: NmPolicy {
+                wireless_enabled: false,
+                wireless_hardware_enabled: false,
+                ..policy(true, false)
+            },
             ..Default::default()
-        };
-        let radios2 = LinuxNetworkBackend::with_client(m2)
+        });
+        let r2 = b2
             .list_radio_states(Pagination { offset: 0, limit: u32::MAX })
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|r| r.name == "wifi")
             .unwrap();
-        let r2 = radios2.items.iter().find(|r| r.name == "wifi").unwrap();
         assert!(r2.hard_blocked);
     }
 
     #[test]
     fn pagination_limit_zero_means_one() {
-        let mut devices = alloc::vec![wifi("wlan0", 100), ethernet("eth1", true, 100), ethernet("eth2", true, 100)];
-        devices[1].iface = "eth1".to_string();
-        let m = Mock {
-            devices,
-            ..Default::default()
-        };
-        let one = LinuxNetworkBackend::with_client(m).get_interfaces(Pagination { offset: 0, limit: 0 }).unwrap();
+        let b = backend(
+            kernel(alloc::vec![
+                ethernet_link("eth1", 10, true),
+                ethernet_link("eth2", 11, true),
+                wifi_link("wlan0", 12),
+            ]),
+            Mock::default(),
+        );
+        let one = b.get_interfaces(Pagination { offset: 0, limit: 0 }).unwrap();
         assert_eq!(one.items.len(), 1, "limit 0 means one, not all");
         assert_eq!(one.total, 3, "total is the stable full count");
-        let two = LinuxNetworkBackend::with_client(Mock { devices: alloc::vec![wifi("wlan0",100), ethernet("eth1", true, 100), ethernet("eth2",true,100)], ..Default::default() })
-            .get_interfaces(Pagination { offset: 2, limit: u32::MAX })
-            .unwrap();
+        let two = b.get_interfaces(Pagination { offset: 2, limit: u32::MAX }).unwrap();
         assert_eq!(two.items.len(), 1, "offset 2 of 3 returns the last");
     }
 
+    // ── Subscriptions: bounded batches, counted drops ───────────────────────
+
     #[test]
     fn status_subscription_bounded_pull() {
-        let m = Mock {
-            networking_enabled: true,
-            wireless_enabled: true,
-            devices: alloc::vec![wifi("wlan0", 100)],
-            ..Default::default()
-        };
-        let backend = LinuxNetworkBackend::with_client(m);
-        let sub = backend.subscribe_status(id_of("wlan0")).unwrap();
+        let b = happy_backend();
+        let sub = b.subscribe_status(id_of("wlp0s20f3")).unwrap();
         // The caller drives the bound: pull exactly three, no unbounded push.
         let mut seen = 0;
         for _ in 0..3 {
-            let status = backend.pull_status(sub).unwrap();
+            let status = b.pull_status(sub).unwrap();
             assert_eq!(status.host_state, HostState::Managed);
             seen += 1;
         }
         assert_eq!(seen, 3, "bounded pull ran exactly the caller's bound");
+        // Nothing was dropped: the kernel said nothing new between the pulls.
+        assert_eq!(b.dropped_updates(), 0);
         // Cancelling retires the token; a later pull is notFound, not a silent success.
-        backend.cancel_subscription(sub).unwrap();
-        let after = backend.pull_status(sub).unwrap_err();
+        b.cancel_subscription(sub).unwrap();
+        let after = b.pull_status(sub).unwrap_err();
         assert_eq!(after.code, ErrorCode::NotFound);
+    }
+
+    /// A pull that arrives after the kernel spoke more than once serves the
+    /// LATEST state and COUNTS the revisions it collapsed — never silent.
+    #[test]
+    fn subscription_pulls_count_the_updates_they_collapse() {
+        let k = Arc::new(kernel(alloc::vec![ethernet_link("enp0s31f6", 2, true)]));
+        let b = LinuxNetworkBackend::with_client_and_netlink(
+            Mock {
+                policy: policy(true, true),
+                ..Default::default()
+            },
+            Box::new(k.clone()),
+        );
+        let sub = b.subscribe_status(id_of("enp0s31f6")).unwrap();
+        // Three kernel events land while the caller is not pulling.
+        let base = ethernet_link("enp0s31f6", 2, true);
+        k.queue_event(KernelEvent::Link(resampled(&base, 11_223_345)));
+        k.queue_event(KernelEvent::Link(resampled(&base, 11_223_346)));
+        k.queue_event(KernelEvent::Link(ethernet_link("enp0s31f6", 2, false)));
+        // One bounded pull: the latest fact, with the two collapsed revisions
+        // counted rather than silently dropped.
+        let status = b.pull_status(sub).unwrap();
+        assert_eq!(status.host_state, HostState::CarrierDown, "the pull serves the LATEST fact");
+        assert_eq!(b.dropped_updates(), 2, "the two intermediate revisions are counted, not silent");
+        // A pull with nothing new drops nothing.
+        b.pull_status(sub).unwrap();
+        assert_eq!(b.dropped_updates(), 2);
     }
 
     #[test]
     fn counter_subscription_bounded_pull() {
-        let m = Mock {
-            devices: alloc::vec![ethernet("eth1", true, 100)],
-            counters: InterfaceCounters {
-                bytes_in: 1_000,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let backend = LinuxNetworkBackend::with_client(m);
-        let sub = backend.subscribe_counters(id_of("eth1")).unwrap();
+        let b = happy_backend();
+        let sub = b.subscribe_counters(id_of("enp0s31f6")).unwrap();
         let mut last = 0u64;
         for _ in 0..5 {
-            last = backend.pull_counters(sub).unwrap().bytes_in;
+            last = b.pull_counters(sub).unwrap().bytes_in;
         }
-        assert_eq!(last, 1_000);
-        backend.cancel_subscription(sub).unwrap();
+        assert_eq!(last, 11_223_344);
+        b.cancel_subscription(sub).unwrap();
     }
 
     #[test]
     fn cancel_retires_token() {
-        let m = Mock {
-            devices: alloc::vec![wifi("wlan0", 100)],
-            ..Default::default()
-        };
-        let backend = LinuxNetworkBackend::with_client(m);
-        let sub = backend.subscribe_status(id_of("wlan0")).unwrap();
-        backend.cancel_subscription(sub).unwrap();
-        assert_eq!(backend.cancel_subscription(sub).unwrap_err().code, ErrorCode::NotFound);
-        assert_eq!(backend.pull_status(sub).unwrap_err().code, ErrorCode::NotFound);
+        let b = happy_backend();
+        let sub = b.subscribe_status(id_of("wlp0s20f3")).unwrap();
+        b.cancel_subscription(sub).unwrap();
+        assert_eq!(b.cancel_subscription(sub).unwrap_err().code, ErrorCode::NotFound);
+        assert_eq!(b.pull_status(sub).unwrap_err().code, ErrorCode::NotFound);
     }
 
     #[test]
     fn get_status_unknown_interface_is_not_found() {
-        let m = Mock {
-            devices: alloc::vec![wifi("wlan0", 100)],
-            ..Default::default()
-        };
+        let b = happy_backend();
         assert_eq!(
-            LinuxNetworkBackend::with_client(m).get_status(id_of("nosuchdev")).unwrap_err().code,
-            ErrorCode::NotFound
+            b.get_status(id_of("nosuchdev")).unwrap_err().code,
+            ErrorCode::NotFound,
+            "an interface the kernel does not know is notFound, never a fabricated status"
         );
     }
 
-    // ── Error injection over all 20 codes (mapping total through the seam) ────
+    // ── Host-global networking + radio reads (NM policy, counted) ───────────
+
+    #[test]
+    fn is_networking_enabled_reads_the_policy_sweep_once() {
+        let on = backend(kernel(alloc::vec![]), Mock {
+            policy: policy(true, true),
+            ..Default::default()
+        });
+        assert!(on.is_networking_enabled().unwrap());
+        let off = backend(kernel(alloc::vec![]), Mock {
+            policy: policy(false, true),
+            ..Default::default()
+        });
+        assert!(!off.is_networking_enabled().unwrap());
+        // Policy is snapshotted, not re-read per call: one counted sweep.
+        assert_eq!(off.nm_fallback_calls(), 1);
+        assert!(!off.is_networking_enabled().unwrap());
+        assert_eq!(off.nm_fallback_calls(), 1, "the warm snapshot made zero further calls");
+        // The explicit form re-sweeps (one more counted call).
+        off.refresh_policy().unwrap();
+        assert_eq!(off.nm_fallback_calls(), 2);
+    }
+
+    #[test]
+    fn mobile_data_enabled_reads_the_policy_sweep() {
+        let b = backend(kernel(alloc::vec![]), Mock {
+            policy: NmPolicy {
+                wwan_enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(b.is_mobile_data_enabled().unwrap());
+    }
+
+    // ── Control verbs (mock only; law #8) ───────────────────────────────────
+
+    #[test]
+    fn set_networking_calls_enable() {
+        let b = backend(kernel(alloc::vec![]), Mock::default());
+        b.set_networking_enabled(false).unwrap();
+        b.set_networking_enabled(true).unwrap();
+        assert!(b.client.written("Enable(false)"), "setNetworking(false) must reach NM Enable(false)");
+        assert!(b.client.written("Enable(true)"), "setNetworking(true) must reach NM Enable(true)");
+        // Control verbs are not reads: no fallback sweep was needed.
+        assert_eq!(b.nm_fallback_calls(), 0);
+    }
+
+    #[test]
+    fn set_radio_wifi_calls_wireless_enabled() {
+        let b = backend(kernel(alloc::vec![]), Mock::default());
+        b.set_radio_enabled("wifi", false).unwrap();
+        b.set_radio_enabled("wifi", true).unwrap();
+        assert!(b.client.written("WirelessEnabled(false)"));
+        assert!(b.client.written("WirelessEnabled(true)"));
+    }
+
+    #[test]
+    fn set_radio_cellular_routes_to_mobile_data() {
+        // "cellular" and setMobileData share one home: NM WwanEnabled.
+        let b = backend(kernel(alloc::vec![]), Mock::default());
+        b.set_radio_enabled("cellular", true).unwrap();
+        b.set_mobile_data_enabled(false).unwrap();
+        assert!(b.client.written("WwanEnabled(true)"), "setRadioEnabled(cellular) must reach WwanEnabled(true)");
+        assert!(b.client.written("WwanEnabled(false)"), "setMobileData(false) must reach WwanEnabled(false)");
+    }
+
+    #[test]
+    fn set_radio_rejects_unknown_token_and_owns_bluetooth() {
+        let b = backend(kernel(alloc::vec![]), Mock::default());
+        let empty = b.set_radio_enabled("", true).unwrap_err();
+        assert_eq!(empty.code, ErrorCode::InvalidArgument);
+        let bt = b.set_radio_enabled("bluetooth", true).unwrap_err();
+        assert_eq!(bt.code, ErrorCode::NotSupported);
+        let future = b.set_radio_enabled("a-2046-radio", true).unwrap_err();
+        assert_eq!(future.code, ErrorCode::NotSupported);
+        // None of the refused writes touched the host.
+        assert!(b.client.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn set_data_roaming_is_not_applicable() {
+        let b = happy_backend();
+        assert_eq!(
+            b.set_data_roaming_enabled(true).unwrap_err().code,
+            ErrorCode::NotSupported,
+            "no cellular modem on this host: a vacuous success would be a lie"
+        );
+    }
+
+    // ── Error injection over all 20 codes (mapping total through the seam) ───
 
     #[test]
     fn error_injection_is_total_over_all_20_codes() {
         for code in ErrorCode::ALL {
-            let m = Mock {
-                networking_enabled: true,
-                wireless_enabled: true,
-                wwan_enabled: true,
-                devices: alloc::vec![wifi("wlan0", 100)],
-                ..Default::default()
-            };
-            let backend = LinuxNetworkBackend::with_client(m);
-            *backend.client.fault.borrow_mut() = Some(Error::new(code));
-            assert_eq!(backend.get_status(id_of("wlan0")).unwrap_err().code, code, "get_status carried {code:?}");
-            assert_eq!(backend.get_interfaces(Pagination::default()).unwrap_err().code, code, "get_interfaces carried {code:?}");
-            assert_eq!(backend.is_networking_enabled().unwrap_err().code, code, "is_networking_enabled carried {code:?}");
-            assert_eq!(backend.list_radio_states(Pagination::default()).unwrap_err().code, code, "list_radio_states carried {code:?}");
-            assert_eq!(backend.set_networking_enabled(true).unwrap_err().code, code, "setNetworking carried {code:?}");
+            let b = happy_backend();
+            *b.client.fault.borrow_mut() = Some(Error::new(code));
+            assert_eq!(b.get_status(id_of("wlp0s20f3")).unwrap_err().code, code, "get_status carried {code:?}");
+            assert_eq!(
+                b.get_interfaces(Pagination::default()).unwrap_err().code,
+                code,
+                "get_interfaces carried {code:?}"
+            );
+            assert_eq!(b.is_networking_enabled().unwrap_err().code, code, "is_networking_enabled carried {code:?}");
+            assert_eq!(
+                b.list_radio_states(Pagination::default()).unwrap_err().code,
+                code,
+                "list_radio_states carried {code:?}"
+            );
+            assert_eq!(
+                b.set_networking_enabled(true).unwrap_err().code,
+                code,
+                "setNetworking carried {code:?}"
+            );
+            assert_eq!(
+                b.set_radio_enabled("wifi", true).unwrap_err().code,
+                code,
+                "setRadioEnabled carried {code:?}"
+            );
         }
     }
 
-    // ── sysfs + rfkill readers (hermetic: real files in a temp dir) ──────────
+    // ── sysfs counters (the fallback reader, hermetic: a real temp dir) ──────
 
     #[test]
     fn get_counters_from_sysfs() {
@@ -1761,22 +2772,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn parse_rfkill_events_splits_hard_and_soft() {
-        // event: idx=u32, type=1(wifi), op=2, soft=1, hard=0
-        let mut wifi = [0u8; 8];
-        wifi[0] = 0; wifi[1] = 0; wifi[2] = 0; wifi[3] = 0; // idx=0
-        wifi[4] = 1; // type wifi
-        wifi[5] = 2; // op change
-        wifi[6] = 1; // soft=1
-        wifi[7] = 0; // hard=0
-        let events = parse_rfkill_events(&wifi);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].name, "wifi");
-        assert!(events[0].soft_blocked);
-        assert!(!events[0].hard_blocked);
-    }
-
     // ── Availability ↔ tests linkage ────────────────────────────────────────
 
     /// Every REAL/DEGRADED row names an `l3_test`; each named suffix is one of
@@ -1785,18 +2780,26 @@ mod tests {
     #[test]
     fn availability_real_rows_have_a_backing_test() {
         const IMPLEMENTED_TESTS: &[&str] = &[
-            "get_interfaces_and_radio_states",
-            "get_status_four_states_distinct",
+            "get_interfaces_enumerates_the_kernel_link_table",
+            "get_status_four_states_distinct_with_explicit_sources",
+            "rfkill_blocked_radio_is_radio_off_from_the_kernel",
+            "connected_managed_device_reads_managed",
             "status_subscription_bounded_pull",
+            "subscription_pulls_count_the_updates_they_collapse",
             "cancel_retires_token",
-            "set_radio_cellular_routes_to_mobile_data",
-            "mobile_data_enabled_reads_wwan",
-            "data_roaming_enabled_reads_wwan",
-            "get_counters_from_sysfs",
+            "get_counters_serves_the_kernel_stats",
+            "counters_fall_back_to_the_seam_when_the_kernel_reports_none",
+            "netlink_unavailable_falls_back_to_the_nm_device_view",
             "counter_subscription_bounded_pull",
-            "is_networking_enabled_reads_property",
+            "is_networking_enabled_reads_the_policy_sweep_once",
+            "data_roaming_reads_the_kernel_wwan_link",
+            "cold_store_reads_issue_exactly_one_counted_fallback",
+            "warm_store_reads_issue_zero_nm_calls",
             "set_networking_calls_enable",
             "set_radio_wifi_calls_wireless_enabled",
+            "set_radio_cellular_routes_to_mobile_data",
+            "mobile_data_enabled_reads_the_policy_sweep",
+            "radio_hard_and_soft_are_not_conflated_with_policy",
         ];
         for (name, l3) in claimed_l3_tests() {
             let suffix = l3.rsplit("::").next().unwrap();
@@ -1806,7 +2809,7 @@ mod tests {
             );
         }
         // The host-global verbs are actually present and (for the reads) == REAL.
-        for verb in ["isNetworkingEnabled", "listRadioStates", "getStatus"] {
+        for verb in ["isNetworkingEnabled", "listRadioStates", "getStatus", "getInterfaces"] {
             let row = NETWORK_AVAILABILITY.iter().find(|r| r.name == verb).unwrap();
             assert_eq!(row.status, AvailStatus::Real, "{verb}");
         }
@@ -1864,13 +2867,14 @@ mod tests {
         }
     }
 
-    /// A read-only live integration test over the real system bus. Law #8: this
-    /// only READS (properties, devices, rfkill) — it never turns a host switch.
-    /// `#[ignore]`d so the default hermetic suite never touches the network, and
-    /// run explicitly with `cargo test -- --ignored` when a bus is present. If
-    /// NetworkManager is absent it fails loudly (never silently skipped).
+    /// A read-only live integration test over the real system bus and the real
+    /// netlink socket. Law #8: this only READS (kernel sweeps, NM properties,
+    /// rfkill) — it never turns a host switch. `#[ignore]`d so the default
+    /// hermetic suite never touches the network, and run explicitly with
+    /// `cargo test -- --ignored` when a bus is present. If NetworkManager is
+    /// absent it fails loudly (never silently skipped).
     #[test]
-    #[ignore = "read-only live probe against the real NetworkManager; run with `cargo test -- --ignored` when a system bus is present"]
+    #[ignore = "read-only live probe against the real NetworkManager and netlink; run with `cargo test -- --ignored` when a system bus is present"]
     fn live_reads_networkmanager() {
         let backend = match LinuxNetworkBackend::connect() {
             Ok(b) => b,
@@ -1884,16 +2888,42 @@ mod tests {
         let page = backend
             .get_interfaces(Pagination { offset: 0, limit: u32::MAX })
             .expect("getInterfaces read");
-        assert!(page.total >= 1, "expected at least the loopback device");
+        // The kernel's routing table is in the store too: the default route is
+        // the kernel's own fact, read from the same dump.
+        assert!(
+            backend
+                .store()
+                .routes()
+                .iter()
+                .any(|r| r.destination.is_empty()),
+            "the kernel's default route must be in the store"
+        );
+        // The kernel answers first: the link table came from netlink, so the
+        // counted NM fallback table was never installed.
+        assert!(
+            backend.store().links().iter().any(|l| l.name == "lo"),
+            "the kernel link table must include loopback"
+        );
+        assert!(
+            !backend.store().fallback_installed(),
+            "netlink answered, so the NM fallback table was never installed"
+        );
+        assert!(page.total >= 1, "expected at least the loopback interface");
         assert!(!page.items.is_empty());
-        // Every enumerated device yields a status whose hostState is one of the
-        // contract's seven tokens (never an invented state).
+        // Every enumerated interface yields a status whose hostState is one of
+        // the contract's seven tokens (never an invented state), each with a
+        // source naming the layer that decided it.
         for iface in &page.items {
             let s = backend.get_status(iface.id).expect("getStatus read");
             assert!(
                 HostState::ALL.contains(&s.host_state),
                 "hostState {:?} must be a contract token",
                 s.host_state
+            );
+            assert!(
+                s.host_state_source.as_token() == "kernel" || s.host_state_source.as_token() == "nm-policy",
+                "source {:?} must be one of the two layers",
+                s.host_state_source
             );
         }
         let radios = backend
@@ -1902,5 +2932,11 @@ mod tests {
         assert!(radios.total >= 1, "wifi + cellular radios are always enumerated");
         // Hard and soft are reported separately (never folded into enabled).
         assert!(radios.items.iter().any(|r| r.name == "wifi"));
+        std::println!(
+            "live: netlink links = {:?}, NM seam calls = {}, store revision = {}",
+            backend.store().links().iter().map(|l| format!("{}({})", l.name, l.kind_token())).collect::<Vec<_>>(),
+            backend.nm_fallback_calls(),
+            backend.store_revision()
+        );
     }
 }

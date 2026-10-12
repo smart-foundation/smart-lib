@@ -49,7 +49,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use netlink_packet_core::{
-    ErrorMessage, NetlinkMessage, NetlinkPayload, NLM_F_DUMP, NLM_F_REQUEST,
+    ErrorMessage, NetlinkBuffer, NetlinkMessage, NetlinkPayload, NLM_F_DUMP, NLM_F_REQUEST,
+    NLMSG_ALIGNTO, Parseable,
 };
 use netlink_packet_route::{
     address::{AddressAttribute, AddressMessage},
@@ -230,6 +231,14 @@ impl KernelLink {
         self.info_kind == "wwan"
     }
 
+    /// A radio link (wifi, or the wwan net device). On a radio the kernel's
+    /// `IFLA_CARRIER` / operstate mean "associated", not "the wire is
+    /// plugged", so the carrier-down and no-firmware verdicts read them
+    /// differently than they read a wired link.
+    pub fn is_radio(&self) -> bool {
+        self.is_wifi() || self.is_cellular()
+    }
+
     /// The open token for this link's technology: the kernel `ARPHRD_*` type,
     /// except that a `wwan` link reports `cellular` — the wwan subsystem's net
     /// device IS the cellular data interface (the same token the NM device view
@@ -311,19 +320,29 @@ pub enum KernelEvent {
 // The mockable kernel seam
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Everything the network backend needs from the kernel. Two methods, mirroring
-/// the two ways the kernel is read: one synchronous sweep (the store's priming
-/// and the answer for anything the store has not been told yet), and the
-/// blocking event stream (which a background pump applies to the store, so a
-/// read never touches the socket).
+/// Everything the network backend needs from the kernel. Three methods, mirroring
+/// the three ways the kernel is read: one synchronous sweep (the store's priming
+/// and the answer for anything the store has not been told yet), the blocking
+/// event stream (for a caller that parks until the kernel has news), and the
+/// non-blocking drain (what the store calls on every read, so a read never waits
+/// on the socket).
 pub trait NetlinkReader {
     /// One synchronous dump sweep: every link, address, route and rfkill entry.
     fn snapshot(&self) -> Result<KernelSnapshot>;
 
-    /// The next kernel event, blocking until one arrives. This is the pump
-    /// thread's call; the store applies the result. Errors are channel-shaped
-    /// (the socket died / netlink is unavailable) and end the pump.
+    /// The next kernel event, blocking until one arrives. Errors are
+    /// channel-shaped (the socket died / netlink is unavailable) and end a
+    /// blocking wait.
     fn next_event(&self) -> Result<KernelEvent>;
+
+    /// Whatever the kernel has already queued, up to `max` events, WITHOUT
+    /// waiting. This is the form the store uses: a read drains what arrived and
+    /// returns immediately, so the read path is neither blocking nor polling.
+    ///
+    /// An `Err` means the event channel is not trustworthy (the socket died, or
+    /// the kernel overran its notification queue — `ENOBUFS`); the caller must
+    /// re-prime from [`NetlinkReader::snapshot`], never trust a partial view.
+    fn drain_events(&self, max: usize) -> Result<Vec<KernelEvent>>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -345,6 +364,16 @@ const RTMGRP_IPV6_IFADDR: u32 = 256;
 /// group has no packet-crate support, so the char device is the read).
 const DEFAULT_RFKILL_PATH: &str = "/dev/rfkill";
 
+/// `ENOBUFS` (`linux/errno.h`): the kernel dropped netlink notifications because
+/// the reader's socket buffer overran. The literal is used because this crate
+/// does not depend on `libc` directly (netlink-sys does); the value is UAPI and
+/// has never moved.
+const ENOBUFS: i32 = 105;
+
+/// The sysfs tree that carries the per-link facts rtnetlink does not: the
+/// wireless marker below.
+const SYSFS_NET_ROOT: &str = "/sys/class/net";
+
 /// The production [`NetlinkReader`]: one socket for dumps, one socket bound to
 /// the link/address multicast groups for events. Opening either socket failing
 /// is not fatal — the reader reports `unavailable` per call and the backend's
@@ -354,11 +383,17 @@ pub struct RealNetlinkReader {
     dump: Option<Socket>,
     /// Event socket: bound to the RTMGRP_* groups, receives kernel events.
     events: Option<Socket>,
+    /// Events already parsed off the socket but not yet consumed. One datagram
+    /// can carry several netlink messages, so a blocking wait that takes the
+    /// first must keep the rest (never silently dropped).
+    pending: Mutex<Vec<KernelEvent>>,
     /// Why `dump`/`events` is absent, if so (reported on each call, never
     /// silently returning empty facts).
     open_error: Option<String>,
     /// The rfkill device to read (overridable for tests).
     rfkill_path: PathBuf,
+    /// The sysfs root that carries the per-link wireless marker.
+    sysfs_root: PathBuf,
     /// Request sequence counter, so a late reply to an old dump is skipped.
     seq: AtomicU32,
 }
@@ -366,11 +401,17 @@ pub struct RealNetlinkReader {
 impl RealNetlinkReader {
     /// Open both sockets and bind the event socket to the link/address groups.
     pub fn new() -> Self {
-        Self::with_rfkill(&PathBuf::from(DEFAULT_RFKILL_PATH))
+        Self::with_roots(&PathBuf::from(DEFAULT_RFKILL_PATH), &PathBuf::from(SYSFS_NET_ROOT))
     }
 
     /// [`RealNetlinkReader::new`] with an explicit rfkill path (tests).
     pub fn with_rfkill(rfkill_path: &std::path::Path) -> Self {
+        Self::with_roots(rfkill_path, &PathBuf::from(SYSFS_NET_ROOT))
+    }
+
+    /// [`RealNetlinkReader::new`] with explicit rfkill and sysfs roots (tests:
+    /// a hermetic sysfs tree can carry the wireless marker).
+    pub fn with_roots(rfkill_path: &std::path::Path, sysfs_root: &std::path::Path) -> Self {
         let dump = match Socket::new(NETLINK_ROUTE) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -384,8 +425,10 @@ impl RealNetlinkReader {
         let mut reader = RealNetlinkReader {
             dump,
             events,
+            pending: Mutex::new(Vec::new()),
             open_error: None,
             rfkill_path: rfkill_path.to_path_buf(),
+            sysfs_root: sysfs_root.to_path_buf(),
             seq: AtomicU32::new(1),
         };
         if let Err(e) = reader.bind_events() {
@@ -399,10 +442,46 @@ impl RealNetlinkReader {
         RealNetlinkReader {
             dump: None,
             events: None,
+            pending: Mutex::new(Vec::new()),
             open_error: Some(reason),
             rfkill_path: rfkill_path.to_path_buf(),
+            sysfs_root: PathBuf::from(SYSFS_NET_ROOT),
             seq: AtomicU32::new(1),
         }
+    }
+
+    /// Apply every per-link kernel fact the wire does not carry.
+    fn enrich_link(&self, link: KernelLink) -> KernelLink {
+        enrich_link(&self.sysfs_root, link)
+    }
+
+    /// Take the next already-parsed event, or `None` when none is pending.
+    fn take_pending(&self) -> Option<KernelEvent> {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            None
+        } else {
+            Some(pending.remove(0))
+        }
+    }
+
+    /// Receive one datagram and fold every event it carries into `pending`,
+    /// returning how many were added.
+    fn receive_events(&self) -> Result<usize> {
+        let Some(socket) = self.events.as_ref() else {
+            return Err(Error::unavailable(
+                self.open_error
+                    .clone()
+                    .unwrap_or_else(|| "netlink event socket unavailable".to_string()),
+            ));
+        };
+        let (bytes, _from) = socket
+            .recv_from_full()
+            .map_err(|e| Error::unavailable(format!("netlink event recv: {e}")))?;
+        let events = parse_event_datagram(&bytes)?;
+        let n = events.len();
+        self.pending.lock().unwrap().extend(events);
+        Ok(n)
     }
 
     fn bind_events(&mut self) -> std::io::Result<()> {
@@ -416,6 +495,11 @@ impl RealNetlinkReader {
     /// Send one `NLM_F_DUMP` request and collect its replies until `NLMSG_DONE`.
     /// A kernel `NLMSG_ERROR` is mapped to a `core::Error`; an unrelated reply
     /// (a stray sequence number) is skipped, never misread as data.
+    ///
+    /// One received datagram can carry several netlink messages — the kernel
+    /// packs a dump's replies that way — so every message in the datagram is
+    /// parsed. Parsing only the first silently loses links, which is exactly
+    /// what the live read-only probe caught on a three-interface host.
     fn dump(&self, request: RouteNetlinkMessage) -> Result<Vec<RouteNetlinkMessage>> {
         let Some(socket) = self.dump.as_ref() else {
             return Err(Error::unavailable(
@@ -441,19 +525,20 @@ impl RealNetlinkReader {
             let (bytes, _from) = socket
                 .recv_from_full()
                 .map_err(|e| Error::failed(format!("netlink dump recv: {e}")))?;
-            let parsed = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&bytes)
-                .map_err(|e| Error::failed(format!("netlink dump parse: {e}")))?;
-            if parsed.header.sequence_number != seq {
-                continue; // a stale reply from an earlier request
-            }
-            match parsed.payload {
-                NetlinkPayload::Done(_) => return Ok(replies),
-                NetlinkPayload::Error(err) => return Err(map_nlmsgerr(&err)),
-                NetlinkPayload::InnerMessage(inner) => replies.push(inner),
-                NetlinkPayload::Noop | NetlinkPayload::Overrun(_) => {}
-                // The payload enum is non-exhaustive (new message kinds arrive
-                // with the crate); anything else is skipped, not misread.
-                _ => {}
+            for parsed in parse_datagram(&bytes)? {
+                if parsed.header.sequence_number != seq {
+                    continue; // a stale reply from an earlier request
+                }
+                match parsed.payload {
+                    NetlinkPayload::Done(_) => return Ok(replies),
+                    NetlinkPayload::Error(err) => return Err(map_nlmsgerr(&err)),
+                    NetlinkPayload::InnerMessage(inner) => replies.push(inner),
+                    NetlinkPayload::Noop | NetlinkPayload::Overrun(_) => {}
+                    // The payload enum is non-exhaustive (new message kinds
+                    // arrive with the crate); anything else is skipped, not
+                    // misread.
+                    _ => {}
+                }
             }
         }
     }
@@ -470,31 +555,28 @@ impl NetlinkReader for RealNetlinkReader {
         let links = self.dump(RouteNetlinkMessage::GetLink(LinkMessage::default()))?;
         let addresses = self.dump(RouteNetlinkMessage::GetAddress(AddressMessage::default()))?;
         let routes = self.dump(RouteNetlinkMessage::GetRoute(RouteMessage::default()))?;
-        let mut snapshot = KernelSnapshot {
-            links: Vec::new(),
-            addresses: Vec::new(),
-            routes: Vec::new(),
+        let (links, addresses, routes) = fold_dump_replies(links, addresses, routes);
+        Ok(KernelSnapshot {
+            links: links.into_iter().map(|l| self.enrich_link(l)).collect(),
+            addresses,
+            routes,
             rfkill: self.rfkill()?,
-        };
-        for m in links {
-            if let RouteNetlinkMessage::GetLink(link) = m {
-                snapshot.links.push(parse_link_message(&link));
-            }
-        }
-        for m in addresses {
-            if let RouteNetlinkMessage::GetAddress(addr) = m {
-                snapshot.addresses.push(parse_address_message(&addr));
-            }
-        }
-        for m in routes {
-            if let RouteNetlinkMessage::GetRoute(route) = m {
-                snapshot.routes.push(parse_route_message(&route));
-            }
-        }
-        Ok(snapshot)
+        })
     }
 
     fn next_event(&self) -> Result<KernelEvent> {
+        loop {
+            if let Some(event) = self.take_pending() {
+                return Ok(event);
+            }
+            if self.receive_events()? == 0 {
+                // Not store-relevant (DONE / NOOP): wait for the next datagram.
+                continue;
+            }
+        }
+    }
+
+    fn drain_events(&self, max: usize) -> Result<Vec<KernelEvent>> {
         let Some(socket) = self.events.as_ref() else {
             return Err(Error::unavailable(
                 self.open_error
@@ -502,11 +584,41 @@ impl NetlinkReader for RealNetlinkReader {
                     .unwrap_or_else(|| "netlink event socket unavailable".to_string()),
             ));
         };
-        let (bytes, _from) = socket
-            .recv_from_full()
-            .map_err(|e| Error::unavailable(format!("netlink event recv: {e}")))?;
-        parse_event_packet(&bytes)?
-            .ok_or_else(|| Error::failed("netlink event carried no store-relevant payload"))
+        let mut events: Vec<KernelEvent> = Vec::new();
+        // What a previous blocking wait already parsed is served first.
+        events.extend(self.take_pending().into_iter());
+        // The drain must never wait: the kernel's answer for "nothing queued" is
+        // EAGAIN, which we read as an empty batch (not an error, not a block).
+        socket
+            .set_non_blocking(true)
+            .map_err(|e| Error::failed(format!("netlink drain: {e}")))?;
+        while events.len() < max {
+            match socket.recv_from_full() {
+                Ok((bytes, _from)) => match parse_event_datagram(&bytes) {
+                    Ok(mut parsed) => events.append(&mut parsed),
+                    Err(e) => {
+                        let _ = socket.set_non_blocking(false);
+                        return Err(e);
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                // ENOBUFS: the kernel overran its notification queue. The view
+                // we hold is now missing events, so the drain reports the channel
+                // as untrustworthy and the caller re-primes from a full dump.
+                Err(e) if e.raw_os_error() == Some(ENOBUFS) => {
+                    let _ = socket.set_non_blocking(false);
+                    return Err(Error::temporary(
+                        "netlink event overrun (ENOBUFS): the kernel dropped notifications; a full re-dump is required",
+                    ));
+                }
+                Err(e) => {
+                    let _ = socket.set_non_blocking(false);
+                    return Err(Error::temporary(format!("netlink event recv: {e}")));
+                }
+            }
+        }
+        let _ = socket.set_non_blocking(false);
+        Ok(events)
     }
 }
 
@@ -569,6 +681,12 @@ impl MockNetlink {
         *self.fault.lock().unwrap() = Some(error);
     }
 
+    /// Clear an injected fault: the scripted kernel answers again (the channel
+    /// came back), which is what a store's recovery path must notice.
+    pub(crate) fn clear_failure(&self) {
+        *self.fault.lock().unwrap() = None;
+    }
+
     fn check(&self) -> Result<()> {
         match self.fault.lock().unwrap().as_ref() {
             Some(e) => Err(e.clone()),
@@ -591,6 +709,32 @@ impl NetlinkReader for MockNetlink {
             return Err(Error::temporary("mock netlink: no events queued"));
         }
         Ok(events.remove(0))
+    }
+
+    fn drain_events(&self, max: usize) -> Result<Vec<KernelEvent>> {
+        self.check()?;
+        let mut events = self.events.lock().unwrap();
+        let n = events.len().min(max);
+        Ok(events.drain(..n).collect())
+    }
+}
+
+/// A shareable handle on a [`MockNetlink`]. A test that must queue kernel
+/// events AFTER the store took the reader (a subscription that spans events, a
+/// carrier that drops mid-read) keeps this clone and drives the scripted kernel
+/// through it. The production reader is never shared: the store owns its socket.
+#[cfg(test)]
+impl NetlinkReader for std::sync::Arc<MockNetlink> {
+    fn snapshot(&self) -> Result<KernelSnapshot> {
+        (**self).snapshot()
+    }
+
+    fn next_event(&self) -> Result<KernelEvent> {
+        (**self).next_event()
+    }
+
+    fn drain_events(&self, max: usize) -> Result<Vec<KernelEvent>> {
+        (**self).drain_events(max)
     }
 }
 
@@ -702,34 +846,154 @@ pub fn parse_route_message(msg: &RouteMessage) -> KernelRoute {
     route
 }
 
-/// Parse one raw netlink packet (a dump reply or a multicast event) into the
-/// store's event vocabulary. `Ok(None)` means "not store-relevant" (`NLMSG_DONE`,
-/// `NLMSG_NOOP`); an `NLMSG_ERROR` NACK is a mapped `core::Error`.
-pub fn parse_event_packet(bytes: &[u8]) -> Result<Option<KernelEvent>> {
-    let message = NetlinkMessage::<RouteNetlinkMessage>::deserialize(bytes)
-        .map_err(|e| Error::failed(format!("netlink parse: {e}")))?;
-    match message.payload {
-        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link))
-        | NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetLink(link)) => {
-            Ok(Some(KernelEvent::Link(parse_link_message(&link))))
+/// Fold the three dumps' replies into the store's snapshot vocabulary.
+///
+/// The kernel answers a `RTM_GETLINK`/`RTM_GETADDR`/`RTM_GETROUTE` dump with the
+/// `RTM_NEWLINK`/`RTM_NEWADDR`/`RTM_NEWROUTE` message kinds — the same messages
+/// an event carries — so the fold accepts both shapes (a daemon or a test may
+/// echo the request kind back) and skips anything else, never misreading a
+/// stray message as data.
+fn fold_dump_replies(
+    link_replies: Vec<RouteNetlinkMessage>,
+    address_replies: Vec<RouteNetlinkMessage>,
+    route_replies: Vec<RouteNetlinkMessage>,
+) -> (Vec<KernelLink>, Vec<KernelAddress>, Vec<KernelRoute>) {
+    let mut links = Vec::new();
+    for message in link_replies {
+        match message {
+            RouteNetlinkMessage::NewLink(link) | RouteNetlinkMessage::GetLink(link) => {
+                links.push(parse_link_message(&link))
+            }
+            _ => {}
         }
-        NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelLink(link)) => {
-            Ok(Some(KernelEvent::LinkGone(link.header.index)))
-        }
-        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(addr))
-        | NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetAddress(addr)) => {
-            Ok(Some(KernelEvent::Address(parse_address_message(&addr))))
-        }
-        NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelAddress(addr)) => {
-            Ok(Some(KernelEvent::AddressGone(parse_address_message(&addr))))
-        }
-        NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetRoute(_route)) => {
-            // A route dump reply: the store does not model routes as events.
-            Ok(None)
-        }
-        NetlinkPayload::Error(err) => Err(map_nlmsgerr(&err)),
-        _ => Ok(None),
     }
+    let mut addresses = Vec::new();
+    for message in address_replies {
+        match message {
+            RouteNetlinkMessage::NewAddress(addr) | RouteNetlinkMessage::GetAddress(addr) => {
+                addresses.push(parse_address_message(&addr))
+            }
+            _ => {}
+        }
+    }
+    let mut routes = Vec::new();
+    for message in route_replies {
+        match message {
+            RouteNetlinkMessage::NewRoute(route) | RouteNetlinkMessage::GetRoute(route) => {
+                routes.push(parse_route_message(&route))
+            }
+            _ => {}
+        }
+    }
+    (links, addresses, routes)
+}
+
+/// The kernel's own wireless marker for one link: a wlan device has a
+/// `/sys/class/net/<name>/wireless` directory (and a `phy80211` link to its phy).
+/// rtnetlink's `ARPHRD_*` link type is `ether` for a normal wlan interface — the
+/// wireless-ness lives in the phy, not in the link type — so without this marker
+/// the "wifi" token would be wrong for exactly the interfaces the incident was
+/// about. A sysfs read is a kernel read: no daemon hop, and no guess.
+fn is_wireless(sysfs_root: &std::path::Path, name: &str) -> bool {
+    sysfs_root.join(name).join("wireless").is_dir()
+}
+
+/// Apply the per-link kernel facts the wire does not carry. A `wwan` link keeps
+/// its cellular identity (the wwan net device IS the cellular interface).
+fn enrich_link(sysfs_root: &std::path::Path, mut link: KernelLink) -> KernelLink {
+    if !link.is_cellular() && is_wireless(sysfs_root, &link.name) {
+        link.kind = LinkKind::Wifi;
+    }
+    link
+}
+
+/// The NLMSG alignment stride (the kernel pads every netlink message to 4).
+fn nlmsg_align(length: usize) -> usize {
+    let align = usize::from(NLMSG_ALIGNTO);
+    let rem = length % align;
+    if rem == 0 {
+        length
+    } else {
+        length + (align - rem)
+    }
+}
+
+/// Parse EVERY netlink message in one received datagram, in order.
+///
+/// One datagram can carry several messages — the kernel packs a dump's replies
+/// into as few datagrams as fit, and the crate's `deserialize` parses exactly
+/// one message per buffer (ignoring whatever follows it). The stride between
+/// messages is the header's own length field, the same field the crate itself
+/// emits; reading it to slice the datagram is framing, not a second marshaller.
+/// A length that does not fit the datagram is an error, never a truncation.
+fn parse_datagram(bytes: &[u8]) -> Result<Vec<NetlinkMessage<RouteNetlinkMessage>>> {
+    let mut messages = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        // A trailing fragment shorter than a netlink header is alignment
+        // padding (the kernel pads every message to 4 bytes), not a truncated
+        // message: stop cleanly rather than fail the whole datagram.
+        if rest.len() < 16 {
+            break;
+        }
+        let buffer = NetlinkBuffer::new_checked(rest)
+            .map_err(|e| Error::failed(format!("netlink parse header: {e}")))?;
+        let header = netlink_packet_core::NetlinkHeader::parse(&buffer)
+            .map_err(|e| Error::failed(format!("netlink parse header: {e}")))?;
+        let length = header.length as usize;
+        // A netlink header is 16 bytes; anything shorter is a desync, and a
+        // message longer than the datagram is a truncated read.
+        if length < 16 || length > rest.len() {
+            return Err(Error::failed(format!(
+                "netlink framing: message length {length} does not fit the {} bytes left",
+                rest.len()
+            )));
+        }
+        let message = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&rest[..length])
+            .map_err(|e| Error::failed(format!("netlink parse: {e}")))?;
+        messages.push(message);
+        offset += nlmsg_align(length);
+    }
+    Ok(messages)
+}
+
+/// Parse one received datagram (a dump reply or a multicast event) into the
+/// store's event vocabulary. `Ok(vec![])` means "nothing store-relevant"
+/// (`NLMSG_DONE`, `NLMSG_NOOP`, a route dump reply); an `NLMSG_ERROR` NACK is a
+/// mapped `core::Error`. Several events may come back from one datagram.
+pub fn parse_event_datagram(bytes: &[u8]) -> Result<Vec<KernelEvent>> {
+    let mut events = Vec::new();
+    for message in parse_datagram(bytes)? {
+        match message.payload {
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link))
+            | NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetLink(link)) => {
+                events.push(KernelEvent::Link(parse_link_message(&link)))
+            }
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelLink(link)) => {
+                events.push(KernelEvent::LinkGone(link.header.index))
+            }
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(addr))
+            | NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetAddress(addr)) => {
+                events.push(KernelEvent::Address(parse_address_message(&addr)))
+            }
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelAddress(addr)) => {
+                events.push(KernelEvent::AddressGone(parse_address_message(&addr)))
+            }
+            // A route dump reply: the store does not model routes as events.
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::GetRoute(_route)) => {}
+            NetlinkPayload::Error(err) => return Err(map_nlmsgerr(&err)),
+            _ => {}
+        }
+    }
+    Ok(events)
+}
+
+/// The single-message form of [`parse_event_datagram`]: the first store-relevant
+/// event in one netlink message, or `None` when the message carries none.
+pub fn parse_event_packet(bytes: &[u8]) -> Result<Option<KernelEvent>> {
+    let mut events = parse_event_datagram(bytes)?;
+    Ok(if events.is_empty() { None } else { Some(events.remove(0)) })
 }
 
 fn map_nlmsgerr(err: &ErrorMessage) -> Error {
@@ -864,6 +1128,20 @@ mod tests {
         msg
     }
 
+    /// A buildable loopback link: operstate UP, the shape `/sys/class/net/lo`
+    /// reports on every host.
+    fn loopback_link() -> LinkMessage {
+        let mut msg = LinkMessage::default();
+        msg.header.index = 1;
+        msg.header.link_layer_type = LinkLayerType::from(ARPHRD_LOOPBACK);
+        msg.attributes = alloc::vec![
+            LinkAttribute::IfName("lo".to_string()),
+            LinkAttribute::Mtu(65_536),
+            LinkAttribute::OperState(State::from(6u8) /* IF_OPER_UP */),
+        ];
+        msg
+    }
+
     /// The 26×u64 `IFLA_STATS64` block with the contract's 8 counters in the
     /// kernel's field order.
     fn stats64_payload() -> Vec<u8> {
@@ -957,8 +1235,8 @@ mod tests {
         // IFLA_STATS64 attribute into its typed form, which the store's parse
         // maps onto the contract counters.
         let wire = serialize(RouteNetlinkMessage::NewLink(msg));
-        match parse_event_packet(&wire).unwrap() {
-            Some(KernelEvent::Link(link)) => {
+        match parse_event_datagram(&wire).unwrap().remove(0) {
+            KernelEvent::Link(link) => {
                 let stats = link.stats.expect("IFLA_STATS64 was present");
                 assert_eq!(stats.packets_in, 90001);
                 assert_eq!(stats.packets_out, 90002);
@@ -984,8 +1262,8 @@ mod tests {
     fn event_packets_parse_from_the_wire() {
         // A NEWLINK event (through the production serializer).
         let wire = serialize(RouteNetlinkMessage::NewLink(wifi_stalled_link()));
-        match parse_event_packet(&wire).unwrap() {
-            Some(KernelEvent::Link(link)) => {
+        match parse_event_datagram(&wire).unwrap().remove(0) {
+            KernelEvent::Link(link) => {
                 assert_eq!(link.name, "wlp0s20f3");
                 assert!(link.stalled());
             }
@@ -995,10 +1273,62 @@ mod tests {
         let mut gone = wifi_stalled_link();
         gone.header.index = 7;
         let wire = serialize(RouteNetlinkMessage::DelLink(gone));
-        assert_eq!(parse_event_packet(&wire).unwrap(), Some(KernelEvent::LinkGone(7)));
+        assert_eq!(
+            parse_event_datagram(&wire).unwrap(),
+            alloc::vec![KernelEvent::LinkGone(7)]
+        );
         // NLMSG_DONE is not store-relevant: a 16-byte header with no payload.
         let done: [u8; 16] = [16, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        assert_eq!(parse_event_packet(&done).unwrap(), None);
+        assert!(parse_event_datagram(&done).unwrap().is_empty());
+    }
+
+    /// The kernel answers a `RTM_GETLINK` dump with `RTM_NEWLINK` messages (the
+    /// same kinds an event carries). The fold must map those — the live probe
+    /// caught a snapshot that only accepted the request kind and therefore
+    /// reported an empty link table on a host that has three.
+    #[test]
+    fn dump_replies_fold_the_new_message_kinds_into_the_snapshot() {
+        // Real wire bytes for a NEWLINK, NEWADDR and NEWROUTE reply, the way the
+        // kernel sends them.
+        let mut v4 = AddressMessage::default();
+        v4.header.family = AddressFamily::Inet;
+        v4.header.prefix_len = 24;
+        v4.header.index = 2;
+        v4.attributes = alloc::vec![AddressAttribute::Address(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 18, 128)),
+        )];
+        let mut route = RouteMessage::default();
+        route.header.table = 254;
+        route.attributes = alloc::vec![
+            RouteAttribute::Destination(RouteAddress::Inet(std::net::Ipv4Addr::new(0, 0, 0, 0))),
+            RouteAttribute::Oif(2),
+        ];
+        let wire_link = serialize(RouteNetlinkMessage::NewLink(ethernet_carrier_down_link()));
+        let wire_addr = serialize(RouteNetlinkMessage::NewAddress(v4));
+        let wire_route = serialize(RouteNetlinkMessage::NewRoute(route));
+        let inner = |wire: Vec<u8>| -> RouteNetlinkMessage {
+            match NetlinkMessage::<RouteNetlinkMessage>::deserialize(&wire).unwrap().payload {
+                NetlinkPayload::InnerMessage(m) => m,
+                other => panic!("expected an inner message, got {other:?}"),
+            }
+        };
+
+        let (links, addresses, routes) =
+            fold_dump_replies(alloc::vec![inner(wire_link)], alloc::vec![inner(wire_addr)], alloc::vec![inner(wire_route)]);
+        assert_eq!(links.len(), 1, "a NEWLINK reply is a link, not skipped");
+        assert_eq!(links[0].name, "enp0s31f6");
+        assert_eq!(links[0].index, 0, "the fixture link's ifindex");
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, "192.168.18.128");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].index, 2);
+        // A stray message kind is skipped, never misread as data.
+        let (skipped, _, _) = fold_dump_replies(
+            alloc::vec![RouteNetlinkMessage::GetRoute(RouteMessage::default())],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(skipped.is_empty(), "a GETROUTE in the link dump is not a link");
     }
 
     #[test]
@@ -1016,8 +1346,8 @@ mod tests {
         assert_eq!(addr.family, "ipv4");
         let wire = serialize(RouteNetlinkMessage::NewAddress(v4));
         assert_eq!(
-            parse_event_packet(&wire).unwrap(),
-            Some(KernelEvent::Address(addr))
+            parse_event_datagram(&wire).unwrap(),
+            alloc::vec![KernelEvent::Address(addr)]
         );
     }
 
@@ -1040,6 +1370,87 @@ mod tests {
         ));
     }
 
+    /// The wireless marker decides the kind token for a wlan device, and it is a
+    /// KERNEL fact: `/sys/class/net/<name>/wireless` exists for a wlan interface
+    /// while rtnetlink's `ARPHRD_*` type is `ether` (the live probe reported
+    /// `kind=ethernet` for the box's wifi until this marker landed). Hermetic: a
+    /// throwaway sysfs tree, no socket.
+    #[test]
+    fn the_wireless_marker_names_a_wlan_device_that_the_wire_calls_ether() {
+        let dir = std::env::temp_dir().join(format!("smart-lib-sysfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("wlp0s20f3").join("wireless")).unwrap();
+        std::fs::create_dir_all(dir.join("enp0s31f6")).unwrap();
+        std::fs::create_dir_all(dir.join("wwan0")).unwrap();
+
+        let ether = parse_link_message(&ethernet_carrier_down_link());
+        let wifi = enrich_link(&dir, KernelLink {
+            name: "wlp0s20f3".to_string(),
+            ..ether.clone()
+        });
+        assert_eq!(wifi.kind, LinkKind::Wifi, "the wireless marker names the wlan");
+        assert_eq!(wifi.kind_token(), "wifi");
+        // A wired link keeps its identity, and so does the wwan net device.
+        assert_eq!(enrich_link(&dir, ether).kind, LinkKind::Ethernet);
+        let wwan = enrich_link(
+            &dir,
+            KernelLink {
+                name: "wwan0".to_string(),
+                info_kind: "wwan".to_string(),
+                kind: LinkKind::Ethernet,
+                ..parse_link_message(&wifi_stalled_link())
+            },
+        );
+        assert!(wwan.is_cellular());
+        assert_eq!(wwan.kind_token(), "cellular", "the wwan net device stays cellular");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The regression the read-only live probe caught: the kernel packs several
+    /// netlink messages into ONE datagram, and a parser that reads only the
+    /// first silently loses the rest (this host's `enp0s31f6` vanished from the
+    /// link table that way). Every message in a datagram must be parsed.
+    #[test]
+    fn one_datagram_carries_several_events_and_all_are_parsed() {
+        let mut datagram = Vec::new();
+        datagram.extend_from_slice(&serialize(RouteNetlinkMessage::NewLink(loopback_link())));
+        datagram.extend_from_slice(&serialize(RouteNetlinkMessage::NewLink(wifi_stalled_link())));
+        datagram.extend_from_slice(&serialize(RouteNetlinkMessage::NewLink(ethernet_carrier_down_link())));
+        let events = parse_event_datagram(&datagram).unwrap();
+        assert_eq!(events.len(), 3, "all three links in the datagram survive");
+        match &events[2] {
+            KernelEvent::Link(link) => assert_eq!(link.name, "enp0s31f6"),
+            other => panic!("expected the third link, got {other:?}"),
+        }
+        // The dump fold sees the same multi-message datagram shape.
+        let messages = parse_datagram(&datagram).unwrap();
+        assert_eq!(messages.len(), 3);
+        let inner: Vec<RouteNetlinkMessage> = messages
+            .into_iter()
+            .filter_map(|m| match m.payload {
+                NetlinkPayload::InnerMessage(inner) => Some(inner),
+                _ => None,
+            })
+            .collect();
+        let (links, addresses, routes) = fold_dump_replies(inner, Vec::new(), Vec::new());
+        assert_eq!(links.len(), 3, "a packed dump reply folds every link");
+        assert!(addresses.is_empty() && routes.is_empty());
+    }
+
+    /// A truncated or corrupt framing length is an error, never a silent
+    /// truncation that drops links.
+    #[test]
+    fn a_bad_framing_length_is_an_error_not_a_truncation() {
+        // 16-byte header claiming a 400-byte message in a 20-byte buffer.
+        let mut bogus = alloc::vec![0u8; 20];
+        bogus[0..4].copy_from_slice(&400u32.to_le_bytes());
+        assert!(parse_datagram(&bogus).is_err());
+        // A trailing fragment (fewer than 16 bytes) is ignored, not misread.
+        let mut padded = serialize(RouteNetlinkMessage::NewLink(loopback_link()));
+        padded.extend_from_slice(&[0u8; 4]);
+        assert_eq!(parse_datagram(&padded).unwrap().len(), 1, "the 4-byte pad is not a message");
+    }
+
     #[test]
     fn rfkill_events_split_hard_and_soft() {
         // event: idx=u32, type=1(wifi), op=2, soft=1, hard=0
@@ -1057,8 +1468,23 @@ mod tests {
         assert!(parse_rfkill_events(&wifi[..5]).is_empty());
     }
 
-    /// A read-only live probe of the kernel's link table over a real netlink
-    /// socket. Law #8: reads only (RTM_GETLINK/GETADDR/GETROUTE dumps +
+    /// The mock seam's non-blocking drain: a bounded batch, in order, and an
+    /// empty queue answers an empty batch (never a block, never an error).
+    #[test]
+    fn mock_drain_returns_a_bounded_batch_in_order() {
+        let mock = MockNetlink::with_snapshot(KernelSnapshot::default());
+        for i in 1..=4u32 {
+            mock.queue_event(KernelEvent::LinkGone(i));
+        }
+        assert_eq!(mock.drain_events(2).unwrap(), alloc::vec![KernelEvent::LinkGone(1), KernelEvent::LinkGone(2)]);
+        assert_eq!(mock.drain_events(8).unwrap().len(), 2, "the rest arrive in the next drain");
+        assert!(mock.drain_events(8).unwrap().is_empty(), "an empty queue is an empty batch");
+        // A channel fault on the drain is the caller's re-prime signal.
+        mock.fail_with(Error::temporary("mock netlink: channel fault"));
+        assert!(mock.drain_events(4).is_err());
+    }
+
+    /// A read-only live probe of the kernel's link table over a real netlink    /// socket. Law #8: reads only (RTM_GETLINK/GETADDR/GETROUTE dumps +
     /// /dev/rfkill). `#[ignore]`d so the default hermetic suite never touches
     /// the host; run with `cargo test -- --ignored`.
     #[test]
@@ -1068,6 +1494,13 @@ mod tests {
         let snap = reader
             .snapshot()
             .expect("the kernel answered RTM_GETLINK (netlink is the always-present primitive)");
+        std::println!(
+            "live dump: {} links {:?}, {} addresses, {} routes",
+            snap.links.len(),
+            snap.links.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            snap.addresses.len(),
+            snap.routes.len()
+        );
         assert!(!snap.links.is_empty(), "the kernel always has at least lo");
         assert!(
             snap.links.iter().any(|l| l.name == "lo"),
