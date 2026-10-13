@@ -5,7 +5,10 @@
 use clap::Parser;
 use std::fmt;
 
+#[cfg(feature = "domain-network")]
 use shell::domains::network::NetworkCmd;
+#[cfg(feature = "domain-clipboard")]
+use shell::domains::clipboard::ClipboardCmd;
 use shell::migrate;
 use shell::shell::run_shell;
 use shell::{OutputFormat, SmartError};
@@ -24,7 +27,7 @@ pub struct Cli {
     pub interactive: bool,
     /// Accept the host write a mutating verb performs (the live bring-back
     /// proof is founder-run; charter law #8).
-    #[arg(long, global = true, help = "Accept host-mutating verbs (network wifi on/off, apply)")]
+    #[arg(long, global = true, help = "Accept host-mutating verbs (network wifi on/off, clipboard set, apply)")]
     pub force: bool,
     /// Run one shell-language line and exit (selectors, pipes, conditionals).
     #[arg(short = 'c', long = "command", value_name = "LINE")]
@@ -34,7 +37,11 @@ pub struct Cli {
 #[derive(clap::Subcommand)]
 pub enum DomainCommand {
     /// Network connectivity — the real domain on the new engine.
+    #[cfg(feature = "domain-network")]
     Network(NetworkCmd),
+    /// The system clipboard — the native selection read/write path.
+    #[cfg(feature = "domain-clipboard")]
+    Clipboard(ClipboardCmd),
     /// The domain migration queue, as data.
     Migrate {
         #[command(subcommand)]
@@ -51,20 +58,22 @@ pub enum MigrateAction {
 impl fmt::Debug for DomainCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "domain-network")]
             DomainCommand::Network(_) => write!(f, "DomainCommand::Network(...)"),
+            #[cfg(feature = "domain-clipboard")]
+            DomainCommand::Clipboard(_) => write!(f, "DomainCommand::Clipboard(...)"),
             DomainCommand::Migrate { .. } => write!(f, "DomainCommand::Migrate(...)"),
         }
     }
 }
 
-fn main() {
-    let cli = Cli::parse();
-
-    // The engine is embedded in-process (the corrected architecture): the
-    // shell talks to it through the per-domain backend trait object, exactly
-    // as the original shell did.
-    #[cfg(feature = "domain-network")]
-    let backend = match smart_lib::platforms::linux::network::LinuxNetworkBackend::connect() {
+/// The engine is embedded in-process (the corrected architecture): the shell
+/// talks to it through the per-domain backend trait object. The network backend
+/// is built only when its feature is on; without it the seam is the unit type,
+/// so a clipboard-only build still runs.
+#[cfg(feature = "domain-network")]
+fn network_backend() -> Box<shell::domains::network::Backend> {
+    match smart_lib::platforms::linux::network::LinuxNetworkBackend::connect() {
         Ok(b) => Box::new(b) as Box<shell::domains::network::Backend>,
         Err(e) => {
             shell::color::error(&format!(
@@ -73,41 +82,48 @@ fn main() {
             eprintln!("(reads only; nothing was changed)");
             std::process::exit(1);
         }
-    };
+    }
+}
+#[cfg(not(feature = "domain-network"))]
+fn network_backend() -> Box<shell::domains::network::Backend> {
+    Box::new(())
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let backend = network_backend();
 
     if let Some(line) = cli.line.as_deref() {
-        #[cfg(feature = "domain-network")]
-        {
-            let mut shell = shell::shell::Shell::new(backend);
-            shell::shell::eval_line(&mut shell, line);
-            return;
-        }
-        #[cfg(not(feature = "domain-network"))]
-        {
-            let _ = line;
-            shell::color::error("smart: built without the domain-network feature");
-            std::process::exit(1);
-        }
+        let mut shell = shell::shell::Shell::new(backend);
+        #[cfg(feature = "domain-clipboard")]
+        shell.connect_clipboard();
+        shell::shell::eval_line(&mut shell, line);
+        return;
     }
 
     match &cli.command {
+        #[cfg(feature = "domain-network")]
         Some(DomainCommand::Network(cmd)) => {
-            #[cfg(feature = "domain-network")]
-            {
-                use shell::domains::network::WriteGuard;
-                let guard = WriteGuard { allowed: cli.force };
-                match shell::domains::network::run(cmd, &cli.output, backend.as_ref(), guard) {
-                    Ok(_) => {}
-                    Err(e) => report(e),
-                }
+            use shell::domains::network::WriteGuard;
+            let guard = WriteGuard { allowed: cli.force };
+            match shell::domains::network::run(cmd, &cli.output, backend.as_ref(), guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
             }
-            #[cfg(not(feature = "domain-network"))]
-            {
-                let _ = (cmd, &cli.output);
-                shell::color::error(
-                    "smart: the network domain is not compiled (build with default features)",
-                );
-                std::process::exit(1);
+        }
+        #[cfg(feature = "domain-clipboard")]
+        Some(DomainCommand::Clipboard(cmd)) => {
+            use shell::domains::clipboard;
+            // Native transport when the host has a seat; the seat-less backend
+            // (honest Unavailable-with-reason) otherwise.
+            let clipboard_backend = smart_lib::platforms::linux::clipboard::LinuxClipboardBackend::native_connect()
+                .unwrap_or_else(|_| {
+                    smart_lib::platforms::linux::clipboard::LinuxClipboardBackend::solid()
+                });
+            let guard = clipboard::WriteGuard { allowed: cli.force };
+            match clipboard::run(cmd, &cli.output, &clipboard_backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
             }
         }
         Some(DomainCommand::Migrate { .. }) => {
@@ -115,16 +131,7 @@ fn main() {
         }
         None => {
             if cli.interactive || cli.command.is_none() {
-                #[cfg(feature = "domain-network")]
                 run_shell(backend);
-                #[cfg(not(feature = "domain-network"))]
-                {
-                    let _ = &cli;
-                    shell::color::error(
-                        "smart: the REPL needs the engine's network domain (default features)",
-                    );
-                    std::process::exit(1);
-                }
             }
         }
     }

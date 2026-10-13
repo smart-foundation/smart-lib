@@ -346,6 +346,19 @@ fn network_root(
     ]))
 }
 
+/// Walk a path (fields, indexes, wildcards) into a value and apply the
+/// selector's optional `where` filter. Shared by every domain's selector tree
+/// so the grammar behaves identically over `@network/*` and `@clipboard/*`.
+pub fn resolve(root: Value, sel: &Selector) -> Value {
+    match &sel.filter {
+        Some(filter) => match resolve_path(root, &sel.path) {
+            Value::List(items) => Value::List(apply_filter(&items, filter)),
+            other => other,
+        },
+        None => resolve_path(root, &sel.path),
+    }
+}
+
 /// Read one field out of a record value (a non-record has no fields).
 fn get_field(obj: &Value, field: &str) -> Value {
     match obj {

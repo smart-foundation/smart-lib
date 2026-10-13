@@ -29,11 +29,15 @@ name = "shell"
 path = "src/lib.rs"
 
 [features]
-default = ["domain-network"]
+default = ["domain-network", "domain-clipboard"]
 # The network domain's engine half. With it off the shell still builds (the
 # engine crate compiles without the schema), but the network commands answer
 # honestly that the engine was built without the domain.
 domain-network = ["smart-lib/domain-network"]
+# The clipboard domain's engine half — the native selection read/write path.
+# With it off the shell still builds, but the clipboard commands answer honestly
+# that the engine was built without the domain-clipboard feature.
+domain-clipboard = ["smart-lib/domain-clipboard"]
 
 [dependencies]
 # The engine, in-process. `default-features = false` keeps the zero-cost law:

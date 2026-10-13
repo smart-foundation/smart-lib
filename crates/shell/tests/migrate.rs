@@ -28,22 +28,21 @@ fn every_domain_the_original_shell_hosted_is_in_the_queue() {
 }
 
 #[test]
-fn exactly_one_domain_is_real_today() {
+fn two_domains_are_real_today() {
     let real: Vec<&Domain> = QUEUE.iter().filter(|d| d.status == Status::RealToday).collect();
-    assert_eq!(real.len(), 1);
-    assert_eq!(real[0].name, "network", "the live-proven engine domain");
+    assert_eq!(real.len(), 2);
+    let names: Vec<&str> = real.iter().map(|d| d.name).collect();
+    assert!(names.contains(&"network"), "the live-proven engine domain");
+    assert!(names.contains(&"clipboard"), "clipboard migrated C2 on the native selection path");
 }
 
 #[test]
-fn the_queue_order_is_the_recons_value_order() {
-    let ordered: Vec<u16> = QUEUE
-        .iter()
-        .filter_map(|d| d.order)
-        .collect();
+fn the_queue_order_is_the_recons_value_order_past_clipboard() {
+    let ordered: Vec<u16> = QUEUE.iter().filter_map(|d| d.order).collect();
     let mut sorted = ordered.clone();
     sorted.sort_unstable();
     assert_eq!(ordered, sorted, "the positions are the order");
-    assert_eq!(ordered, (1..=12).collect::<Vec<u16>>(), "twelve queued domains, contiguous");
+    assert_eq!(ordered, (1..=11).collect::<Vec<u16>>(), "eleven queued domains, contiguous");
 }
 
 #[test]
@@ -67,10 +66,14 @@ fn every_entry_names_its_archive_body() {
 
 #[test]
 fn the_pending_reason_is_generated_from_the_table() {
-    let reason = migrate::pending_reason("clipboard");
+    // A still-queued domain reads its pending reason from the archive note.
+    let reason = migrate::pending_reason("queue");
     assert!(reason.contains("migration pending"), "{reason}");
-    assert!(reason.contains("platforms/linux/clipboard.rs"), "{reason}");
+    assert!(reason.contains("platforms/linux/queue.rs"), "{reason}");
     assert!(reason.contains("smart migrate"), "{reason}");
+    // A domain that is real today is never told it is pending — honesty both ways.
+    let clipboard = migrate::pending_reason("clipboard");
+    assert!(clipboard.contains("real today"), "{clipboard}");
     // A domain the queue never knew answers as unknown, never as a lie.
     let reason = migrate::pending_reason("telepathy");
     assert!(reason.contains("unknown domain"), "{reason}");

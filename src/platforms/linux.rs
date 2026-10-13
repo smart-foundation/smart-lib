@@ -19,3 +19,10 @@ pub mod network;
 #[cfg(feature = "domain-network")]
 #[path = "linux/netlink.rs"]
 pub mod netlink;
+
+// The clipboard domain's native selection backend (law #9): the CLIPBOARD
+// selection protocol spoken by a real X client (`x11rb`) — no wl-paste/xclip
+// subprocess — behind the mockable `SelectionHost` seam.
+#[cfg(feature = "domain-clipboard")]
+#[path = "linux/clipboard.rs"]
+pub mod clipboard;

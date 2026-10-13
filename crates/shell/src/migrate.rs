@@ -72,88 +72,89 @@ pub const QUEUE: &[Domain] = &[
         archive: "engine: netlink reads + NM policy/control (live-proven, 358 tests)",
         count: "real engine",
     },
-    // ── the ordered queue (C2: one dispatch per domain, in this order) ──
     Domain {
         name: "clipboard",
-        status: Status::MigratedPending,
-        order: Some(1),
-        archive: "platforms/linux/clipboard.rs (real body, 295 lines)",
-        count: "3/3 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: native X11 CLIPBOARD selection over x11rb (live-proven) + wlr-data-control on Wayland — no wl-paste/xclip shellout",
+        count: "native · 8 REAL / 9 DEGRADED",
     },
+    // ── the ordered queue (C2: one dispatch per domain, in this order) ──
     Domain {
         name: "queue",
         status: Status::MigratedPending,
-        order: Some(2),
+        order: Some(1),
         archive: "platforms/linux/queue.rs (real body, 60 lines)",
         count: "8/8 methods",
     },
     Domain {
         name: "service",
         status: Status::MigratedPending,
-        order: Some(3),
+        order: Some(2),
         archive: "platforms/linux/service/ (systemd, openrc, sysvinit, runit — 5 files)",
         count: "8/8 methods",
     },
     Domain {
         name: "media",
         status: Status::MigratedPending,
-        order: Some(4),
+        order: Some(3),
         archive: "platforms/linux/media.rs (real body, 95 lines)",
         count: "8/13 methods",
     },
     Domain {
         name: "database",
         status: Status::MigratedPending,
-        order: Some(5),
+        order: Some(4),
         archive: "platforms/linux/database.rs (real body, 99 lines)",
         count: "8/14 methods",
     },
     Domain {
         name: "files",
         status: Status::MigratedPending,
-        order: Some(6),
+        order: Some(5),
         archive: "platforms/linux/files.rs (real body, 110 lines)",
         count: "8/17 methods",
     },
     Domain {
         name: "audio",
         status: Status::MigratedPending,
-        order: Some(7),
+        order: Some(6),
         archive: "platforms/linux/audio.rs (real body, 173 lines)",
         count: "6/7 methods",
     },
     Domain {
         name: "power",
         status: Status::MigratedPending,
-        order: Some(8),
+        order: Some(7),
         archive: "platforms/linux/power.rs (real body, 294 lines)",
         count: "4/7 methods",
     },
     Domain {
         name: "process",
         status: Status::MigratedPending,
-        order: Some(9),
+        order: Some(8),
         archive: "platforms/linux/process.rs (real body, 102 lines)",
         count: "4/13 methods",
     },
     Domain {
         name: "window",
         status: Status::MigratedPending,
-        order: Some(10),
+        order: Some(9),
         archive: "platforms/linux/window.rs (real body, 412 lines)",
         count: "10/36 methods",
     },
     Domain {
         name: "package",
         status: Status::MigratedPending,
-        order: Some(11),
+        order: Some(10),
         archive: "platforms/linux/package/ (19 managers: apt, dnf, pacman, …)",
         count: "19 managers",
     },
     Domain {
         name: "compositor",
         status: Status::MigratedPending,
-        order: Some(12),
+        order: Some(11),
         archive: "platforms/linux/compositor/ (9 backends: sway, hyprland, i3, …)",
         count: "9 backends",
     },
@@ -398,10 +399,13 @@ pub fn find(domain: &str) -> Option<&'static Domain> {
 }
 
 /// The honest answer for a domain that is not migrated yet: the queue's own
-/// data says where the archive body is and what it holds. This is what the
-/// shell prints instead of a fake command.
+/// data says where the archive body is and what it holds. A domain that is real
+/// today is never told it is "pending" — honesty cuts both ways.
 pub fn pending_reason(domain: &str) -> String {
     match find(domain) {
+        Some(d) if d.status == Status::RealToday => format!(
+            "{domain} is real today on the engine — run `smart {domain}` (see `smart migrate`)"
+        ),
         Some(d) => format!(
             "migration pending — archive body exists at {} ({}); see `smart migrate`",
             d.archive, d.count
@@ -504,15 +508,15 @@ pub fn render_queue(format: &crate::OutputFormat) -> String {
             out.push_str(&table.render());
             out.push('\n');
             out.push_str(&format!(
-                "\n  {} The order is the recon's value order: whole real bodies first\n",
+                "\n  {} The order is the recon's value order, now past clipboard (real):\n",
                 "●".blue().bold()
             ));
-            out.push_str("    (clipboard 3/3, queue 8/8, service 8/8), then the partial\n");
-            out.push_str("    bodies by real-method ratio (media 8/13, database 8/14, files\n");
-            out.push_str("    8/17), then the thin ones (audio 6/7, power 4/7, process 4/13),\n");
-            out.push_str("    then the multi-backend domains (window 10/36 across four WMs,\n");
-            out.push_str("    package's 19 managers, compositor's 9 backends). Each migration\n");
-            out.push_str("    is its own wave with its own live proof in the shell.\n");
+            out.push_str("    queue 8/8, service 8/8 (whole bodies first), then the partial\n");
+            out.push_str("    ones by real-method ratio (media 8/13, database 8/14, files 8/17),\n");
+            out.push_str("    then the thin ones (audio 6/7, power 4/7, process 4/13), then the\n");
+            out.push_str("    multi-backend domains (window 10/36 across four WMs, package's 19\n");
+            out.push_str("    managers, compositor's 9 backends). Each migration is its own wave\n");
+            out.push_str("    with its own live proof in the shell.\n");
             out.push_str(&format!(
                 "\n  {} A domain not yet migrated answers honestly from this table:\n",
                 "●".blue().bold()

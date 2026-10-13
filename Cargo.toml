@@ -118,7 +118,7 @@ domain-calendar = []
 domain-camera = []
 domain-capture = []
 domain-cli = []
-domain-clipboard = []
+domain-clipboard = ["dep:x11rb"]
 domain-clock = []
 domain-compositor = []
 domain-console = []
@@ -208,6 +208,21 @@ capnp = { version = "0.27.2", default-features = false, features = ["alloc"] }
 netlink-packet-core = "0.9.0"
 netlink-packet-route = "0.33.0"
 netlink-sys = "0.9.0"
+
+# The clipboard domain's native X11 read/write path (charter law #9): the
+# maintained `x11rb` crate — a pure-Rust reimplementation of the X11 protocol,
+# so the backend speaks the CLIPBOARD selection protocol directly and links no
+# C library (libX11 / libxcb are not installed on the build box, so a C-backed
+# client such as `x11`, `x11-dl` or `xcb` would fail to link here). It replaces
+# the archive body's condemned `xclip` / `wl-paste` subprocess shellout with a
+# real X client: no fork per op, no locale text parsing, no lost error codes.
+# `optional = true` because the feature `domain-clipboard` turns it on, so a
+# build that does not enable the clipboard domain never pays for it.
+#
+# The crate sits behind the mockable `SelectionHost` seam in
+# `src/platforms/linux/clipboard.rs` (a scripted host in tests, the real X
+# server in production), so no hermetic test touches a display.
+x11rb = { version = "0.13.2", default-features = false, optional = true }
 
 [build-dependencies]
 # The codegen half of the triad (capnpc 0.27.0 — pure-Rust schema compiler that

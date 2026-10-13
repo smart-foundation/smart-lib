@@ -21,7 +21,7 @@
 //!
 //! The aesthetic is spec: box-drawing, `◉/○`, `↑↓`, aligned tables.
 
-#[cfg(feature = "domain-network")]
+#[cfg(any(feature = "domain-network", feature = "domain-clipboard"))]
 use clap::Parser as _;
 use std::collections::HashMap;
 
@@ -37,6 +37,8 @@ use crate::selector::{self, Value};
 use crate::{OutputFormat, SmartError, SmartResult};
 
 use crate::domains::network::Backend;
+#[cfg(feature = "domain-clipboard")]
+use crate::domains::clipboard::Backend as ClipboardBackend;
 
 #[derive(Debug, Clone)]
 pub enum ShellCommand {
@@ -111,6 +113,8 @@ pub struct Shell {
     pub functions: HashMap<String, (Vec<String>, Vec<ShellCommand>)>,
     #[cfg(feature = "domain-network")]
     pub backend: Box<Backend>,
+    #[cfg(feature = "domain-clipboard")]
+    pub clipboard: Box<ClipboardBackend>,
 }
 
 impl Shell {
@@ -120,7 +124,43 @@ impl Shell {
             functions: HashMap::new(),
             #[cfg(feature = "domain-network")]
             backend,
+            #[cfg(feature = "domain-clipboard")]
+            clipboard: Box::new(smart_lib::platforms::linux::clipboard::LinuxClipboardBackend::solid()),
         }
+    }
+
+    /// Build the shell with an explicitly-connected clipboard backend (the live
+    /// X11/Wayland selection path when the host has a seat). Network is carried
+    /// the same way as [`Shell::new`].
+    #[cfg(feature = "domain-clipboard")]
+    pub fn new_with_clipboard(
+        backend: Box<Backend>,
+        clipboard: Box<ClipboardBackend>,
+    ) -> Self {
+        Shell {
+            variables: HashMap::new(),
+            functions: HashMap::new(),
+            #[cfg(feature = "domain-network")]
+            backend,
+            clipboard,
+        }
+    }
+
+    /// Connect this shell's clipboard backend to the live native transport,
+    /// falling back to the seat-less backend (honest Unavailable-with-reason)
+    /// when the host has no display.
+    #[cfg(feature = "domain-clipboard")]
+    pub fn connect_clipboard(&mut self) {
+        self.clipboard = match smart_lib::platforms::linux::clipboard::LinuxClipboardBackend::native_connect() {
+            Ok(b) => Box::new(b),
+            // A seat this backend does not serve (a Wayland seat) or a headless
+            // host: the specific reason is surfaced, then the seat-less backend
+            // answers every live read honestly rather than faking one.
+            Err(e) => {
+                eprintln!("clipboard: {e}");
+                Box::new(smart_lib::platforms::linux::clipboard::LinuxClipboardBackend::solid())
+            }
+        };
     }
 
     // ── the evaluator ───────────────────────────────────────────────────────
@@ -129,17 +169,35 @@ impl Shell {
         match expr {
             Expr::Selector(s) => {
                 let sel = selector::parse(s)?;
+                // The domain is decided by the selector prefix; each real
+                // domain builds its own tree from the engine's owned types, and
+                // every other prefix answers honestly from the migration queue.
+                let domain = sel.domain.as_str();
                 #[cfg(feature = "domain-network")]
-                {
-                    Ok(selector::evaluate(&sel, self.backend.as_ref())?)
+                if domain == "network" {
+                    return Ok(selector::evaluate(&sel, self.backend.as_ref())?);
                 }
-                #[cfg(not(feature = "domain-network"))]
-                {
-                    let _ = &sel;
-                    Err(SmartError::unavailable(
-                        "the shell was built without the domain-network feature — selectors \
-                         need the engine's network domain",
-                    ))
+                #[cfg(feature = "domain-clipboard")]
+                if domain == "clipboard" {
+                    let root = crate::domains::clipboard::selector_root(self.clipboard.as_ref())?;
+                    return Ok(selector::resolve(root, &sel));
+                }
+                match domain {
+                    #[cfg(not(feature = "domain-network"))]
+                    "network" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-network feature — the @network \
+                             selector needs the engine's network domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-clipboard"))]
+                    "clipboard" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-clipboard feature — the \
+                             @clipboard selector needs the engine's clipboard domain",
+                        ))
+                    }
+                    other => Err(SmartError::Failed(migrate::pending_reason(other))),
                 }
             }
             Expr::Literal(v) => Ok(v.clone()),
@@ -302,6 +360,8 @@ impl Shell {
 
         match cmd {
             "network" => self.exec_network(args, render),
+            #[cfg(feature = "domain-clipboard")]
+            "clipboard" => self.exec_clipboard(args, render),
             "migrate" => {
                 if render {
                     print!("{}", migrate::render_queue(&OutputFormat::Human));
@@ -356,6 +416,27 @@ impl Shell {
             );
         }
         Ok(Value::Null)
+    }
+
+    /// The clipboard: parse its command with the same clap grammar the one-shot
+    /// binary uses and route it to the native selection engine, in-process.
+    /// Host-mutating verbs are gated (allowed: false here; the REPL prompts and
+    /// one-shot `--force` opens the gate).
+    #[cfg(feature = "domain-clipboard")]
+    fn exec_clipboard(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::clipboard::{self, ClipboardCmd};
+
+        let mut argv: Vec<String> = vec!["clipboard".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = ClipboardCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = clipboard::WriteGuard { allowed: false };
+        if render {
+            clipboard::run(&cmd, &OutputFormat::Human, self.clipboard.as_ref(), guard)?;
+            Ok(Value::Null)
+        } else {
+            clipboard::evaluate(&cmd, self.clipboard.as_ref(), guard)
+        }
     }
 
     // ── watch: the store's real bounded events ──────────────────────────────
@@ -1009,6 +1090,8 @@ impl rustyline::Helper for ShellHelper {}
 /// stdin's lines when piped (so the language is scriptable and provable).
 pub fn run_shell(backend: Box<Backend>) {
     let mut shell = Shell::new(backend);
+    #[cfg(feature = "domain-clipboard")]
+    shell.connect_clipboard();
     let aliases = alias::load_aliases();
 
     println!();

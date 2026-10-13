@@ -279,3 +279,128 @@ impl NetworkBackend for MockBackend {
         })
     }
 }
+
+/// A scripted [`ClipboardBackend`] over the engine's owned types. The host is
+/// never touched (charter law #8): reads are served from an in-memory ledger,
+/// and every host-mutating verb is recorded so a test proves the shell issues
+/// the right engine call and routes it through the gate. It models a seat, so
+/// `set` serves the copy back on `get` exactly as the real backend does.
+#[derive(Default)]
+pub struct MockClipboard {
+    pub transport: String,
+    pub can_read: bool,
+    pub can_write: bool,
+    pub content: std::cell::RefCell<Option<(String, Vec<u8>)>>,
+    pub targets: Vec<String>,
+    pub history: std::cell::RefCell<Vec<MockItem>>,
+    pub writes: std::cell::RefCell<Vec<String>>,
+    pub next_id: std::cell::Cell<u64>,
+}
+
+#[derive(Clone)]
+pub struct MockItem {
+    pub id: u64,
+    pub text: String,
+    pub pinned: bool,
+}
+
+#[derive(Default)]
+pub struct MockClip;
+
+impl MockClipboard {
+    pub fn seat() -> Self {
+        MockClipboard {
+            transport: "scripted".to_string(),
+            can_read: true,
+            can_write: true,
+            next_id: std::cell::Cell::new(1),
+            ..Default::default()
+        }
+    }
+}
+
+impl smart_lib::domains::clipboard::ClipboardBackend for MockClipboard {
+    fn clipboard_caps(&self) -> (String, bool, bool) {
+        (self.transport.clone(), self.can_read, self.can_write)
+    }
+
+    fn get_content(
+        &self,
+        mime_type: &str,
+    ) -> smart_lib::core::Result<smart_lib::domains::clipboard::types::ContentOutcome> {
+        Ok(match self.content.borrow().clone() {
+            Some((_, data)) if mime_type.starts_with("text") => {
+                smart_lib::domains::clipboard::types::ContentOutcome::Content(
+                    smart_lib::domains::clipboard::types::ClipboardContent {
+                        mime_type: mime_type.to_string(),
+                        data,
+                    },
+                )
+            }
+            _ => smart_lib::domains::clipboard::types::ContentOutcome::Empty,
+        })
+    }
+
+    fn set_content(
+        &self,
+        content: smart_lib::domains::clipboard::types::ClipboardContent,
+    ) -> smart_lib::core::Result<()> {
+        self.writes
+            .borrow_mut()
+            .push(format!("set_content(mime={})", content.mime_type));
+        *self.content.borrow_mut() = Some((content.mime_type.clone(), content.data.clone()));
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        self.history.borrow_mut().push(MockItem {
+            id,
+            text: String::from_utf8_lossy(&content.data).into_owned(),
+            pinned: false,
+        });
+        Ok(())
+    }
+
+    fn clear_content(&self) -> smart_lib::core::Result<()> {
+        self.writes.borrow_mut().push("clear_content".to_string());
+        *self.content.borrow_mut() = None;
+        Ok(())
+    }
+
+    fn get_supported_mime_types(&self) -> smart_lib::core::Result<Vec<String>> {
+        if self.targets.is_empty() {
+            Err(smart_lib::core::Error::unavailable(
+                "no-backend: the current selection has no owner to introspect",
+            ))
+        } else {
+            Ok(self.targets.clone())
+        }
+    }
+
+    fn get_history(
+        &self,
+        page: smart_lib::domains::clipboard::types::Pagination,
+    ) -> smart_lib::core::Result<
+        smart_lib::domains::clipboard::types::Page<smart_lib::domains::clipboard::types::ClipboardItem>,
+    > {
+        use smart_lib::domains::clipboard::types::ClipboardItem;
+        let total = self.history.borrow().len() as u64;
+        let limit = page.effective_limit() as usize;
+        let items = self
+            .history
+            .borrow()
+            .iter()
+            .skip(page.offset as usize)
+            .take(limit)
+            .map(|m| ClipboardItem {
+                id: smart_lib::core::ids::ClipboardId::new(m.id),
+                timestamp: 1_000,
+                mime_types: vec!["text/plain".to_string()],
+                tags: Vec::new(),
+                pinned: m.pinned,
+                source_id: smart_lib::core::ids::ClipboardSourceId::new(1),
+                size_bytes: m.text.len() as u64,
+                text: m.text.clone(),
+            })
+            .collect();
+        Ok(smart_lib::domains::clipboard::types::Page { items, total })
+    }
+}

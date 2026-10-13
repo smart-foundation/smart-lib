@@ -97,12 +97,15 @@ fn the_status_section_carries_the_four_state_hoststate() {
 /// The honesty rule on the selector surface: an unmigrated domain's
 /// selector answers from the queue, never a fabricated value.
 #[test]
-fn an_unmigrated_selector_answers_from_the_queue() {
+fn a_still_queued_selector_answers_from_the_queue() {
     let backend = host();
-    let err = evaluate(&parse("@clipboard/content").unwrap(), &backend).unwrap_err();
+    // A domain that is still queued (audio) is answered from the migration
+    // queue's archive note — clipboard is real now, so it is no longer the
+    // example of an honest pending answer.
+    let err = evaluate(&parse("@audio/volume").unwrap(), &backend).unwrap_err();
     assert!(
         err.to_string().contains("migration pending")
-            && err.to_string().contains("platforms/linux/clipboard.rs"),
+            && err.to_string().contains("platforms/linux/audio.rs"),
         "the selector's honest answer names the archive body: {err}"
     );
     // And the engine was never asked for it.
