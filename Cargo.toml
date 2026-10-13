@@ -25,6 +25,11 @@ publish = false
 
 [workspace]
 resolver = "2"
+# The convergence (C1): the Smart Shell comes home to the working stack — one
+# new member crate producing the `smart` binary, depending on the engine
+# in-process (the corrected architecture: the shell embeds its engine via the
+# per-domain trait object, exactly as the original shell did).
+members = ["crates/shell"]
 
 [lib]
 name = "smart_lib"

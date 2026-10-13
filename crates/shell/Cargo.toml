@@ -1,0 +1,48 @@
+# The Smart Shell — the product. One binary, `smart`, hosting every domain
+# command over the smart-lib engine, in-process.
+#
+# The corrected architecture (2026-10-13): the shell embedding a library of
+# backends in-process is the CORRECT shape — the coupling that had to die was
+# the god-trait and the stale schemas, not shell-uses-library. So this crate
+# depends on the engine crate directly and speaks to it through the per-domain
+# backend traits (here: `NetworkBackend`), exactly as the original shell
+# embedded its engine through the backend trait object.
+#
+# Feature matrix: `domain-network` by default — the one domain whose engine
+# is real and live-proven today. Every other domain is the migration queue
+# (`smart migrate`), never a fake command.
+
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2021"
+description = "The Smart Shell: one binary hosting every domain command over the smart-lib engine, in-process."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "smart"
+path = "src/main.rs"
+
+[lib]
+name = "shell"
+path = "src/lib.rs"
+
+[features]
+default = ["domain-network"]
+# The network domain's engine half. With it off the shell still builds (the
+# engine crate compiles without the schema), but the network commands answer
+# honestly that the engine was built without the domain.
+domain-network = ["smart-lib/domain-network"]
+
+[dependencies]
+# The engine, in-process. `default-features = false` keeps the zero-cost law:
+# the shell enables std (it is a host application) plus exactly the domains
+# its features name — never `--all-features` (charter law #11).
+smart-lib = { path = "../..", default-features = false, features = ["std"] }
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+dirs = "5"
+toml = "0.8"
+atty = "0.2"
+serde = { version = "1", features = ["derive"] }

@@ -163,17 +163,24 @@ fn marshal(buf: &mut Vec<u8>, sig: &[u8], val: &Val) -> Result<()> {
         (b'a', Val::Array(items)) => {
             // element signature is sig[1..next-complete-type]
             let (elem_sig, rest) = split_one_type(&sig[1..]);
-            // Mirror the reader: the array's length field is 4-aligned.
+            let elem_align = align_of(elem_sig[0]);
+            // Mirror the reader (and the D-Bus spec): the length field is
+            // 4-aligned, the elements start at the element-type's alignment
+            // boundary, and the length counts ONLY the element bytes — never
+            // the padding after the length field. The payload is padded out
+            // to the element alignment at the end, which is what dbus-daemon
+            // writes and what the reader's trailing-padding guard expects.
             let target = pad_to(buf.len(), 4);
             buf.resize(target, 0);
             let content = buf.len();
             buf.extend_from_slice(&0u32.to_le_bytes()); // length placeholder
-            let start = buf.len();
+            let start = pad_to(buf.len(), elem_align);
+            buf.resize(start, 0);
             for item in items {
                 marshal(buf, elem_sig, item)?;
             }
+            buf.resize(pad_to(buf.len(), elem_align), 0);
             let len = (buf.len() - start) as u32;
-            // arrays that are struct members are padded to 8; not needed here.
             buf[content..content + 4].copy_from_slice(&len.to_le_bytes());
             let _ = rest;
         }
@@ -321,6 +328,7 @@ fn unmarshal(buf: &[u8], off: &mut usize, sig: &[u8]) -> Result<Val> {
         }
         b'a' => {
             let (elem_sig, _rest) = split_one_type(&sig[1..]);
+            let elem_align = align_of(elem_sig[0]);
             // An array's LENGTH field is aligned to 4 (the D-Bus spec's ARRAY
             // alignment); the ELEMENTS inside are then aligned individually to
             // their own type (a dict entry to 8, a string to 4). The live probe
@@ -330,18 +338,30 @@ fn unmarshal(buf: &[u8], off: &mut usize, sig: &[u8]) -> Result<Val> {
             *off = pad_to(*off, 4);
             let byte_len = u32::from_le_bytes(take(buf, *off, 4)?.try_into().unwrap()) as usize;
             *off += 4;
+            // The spec is explicit: the length does NOT include the padding
+            // after the length field — the elements begin at the element
+            // type's alignment boundary. The @78 live desync was exactly
+            // this: counting the pre-element padding inside the length made
+            // every element boundary drift, and the `a{sa{sv}}` settings
+            // reply walked off the end of the message.
+            *off = pad_to(*off, elem_align);
             let end = *off + byte_len;
             let mut items = Vec::new();
-            // array elements align to their type from message start, but the
-            // array's element region starts here; NM marshals with absolute
-            // alignment, so we keep absolute offsets.
-            while *off < end {
+            // The payload is padded out to the element alignment, so the
+            // trailing padding is never a phantom element: an element only
+            // exists when the next alignment boundary still falls inside the
+            // payload (an element occupies at least one byte past it).
+            while pad_to(*off, elem_align) < end {
                 items.push(unmarshal(buf, off, elem_sig)?);
             }
             *off = end;
             Val::Array(items)
         }
         b'(' => {
+            // A struct always starts on an 8-byte boundary, even when its
+            // contents are less strictly aligned (D-Bus spec: STRUCT and
+            // DICT_ENTRY are always 8-aligned).
+            *off = pad_to(*off, 8);
             let mut members = Vec::new();
             let mut rest = &sig[1..];
             while rest[0] != b')' {
@@ -2251,6 +2271,7 @@ mod tests {
         KernelSnapshot, MockNetlink, MockNetlinkWriter,
     };
     use alloc::collections::BTreeSet;
+    use alloc::vec;
     use std::cell::RefCell;
     use std::sync::Arc;
 
@@ -2554,8 +2575,7 @@ mod tests {
 
     /// The common fixture: one healthy ethernet, one healthy wifi, loopback, and
     /// an NM policy that has both radios on.
-    fn happy_backend() -> LinuxNetworkBackend<Mock> {
-        backend(
+    fn happy_backend() -> LinuxNetworkBackend<Mock> {        backend(
             kernel(alloc::vec![
                 loopback_link(),
                 ethernet_link("enp0s31f6", 2, true),
@@ -2891,6 +2911,34 @@ mod tests {
         // `managed` is NM policy: a device NM does not enumerate reports false,
         // never a guess dressed as a kernel fact.
         assert!(!lo.managed);
+    }
+
+    /// BUG 1's hermetic lock: the two surfaces that once disagreed on a link's
+    /// type read the SAME record. `getStatus(id)` must report the type
+    /// `getInterfaces` enumerated — every interface, and in particular the
+    /// wifi link must be `wifi` in the status path too, never a defaulted
+    /// `ethernet` (the divergence the live verification caught).
+    #[test]
+    fn status_and_enumeration_agree_on_the_type() {
+        let b = happy_backend();
+        let page = b.get_interfaces(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        let mut checked = 0;
+        for iface in &page.items {
+            let status = b.get_status(iface.id).expect("getStatus read");
+            assert_eq!(
+                status.kind, iface.kind,
+                "getStatus typed {} as {:?} while getInterfaces typed it {:?} — \
+                 the two paths must read the type from the same source",
+                iface.name, status.kind, iface.kind
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "every enumerated interface was cross-checked");
+        let wifi = page.items.iter().find(|i| i.name == "wlp0s20f3").unwrap();
+        assert_eq!(wifi.kind, "wifi");
+        assert_eq!(b.get_status(wifi.id).unwrap().kind, "wifi");
+        let ether = page.items.iter().find(|i| i.name == "enp0s31f6").unwrap();
+        assert_eq!(b.get_status(ether.id).unwrap().kind, "ethernet");
     }
 
     /// A `wwan` link reports the "cellular" token derived from the kernel's
@@ -3410,6 +3458,164 @@ mod tests {
         }
     }
 
+    // ── Test-local wire builders (the DAEMON's convention, byte for byte) ────
+
+    fn w_pad(buf: &mut Vec<u8>, align: usize) {
+        buf.resize(pad_to(buf.len(), align), 0);
+    }
+    fn w_u32(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    fn w_str(buf: &mut Vec<u8>, s: &str) {
+        w_pad(buf, 4);
+        w_u32(buf, s.len() as u32);
+        buf.extend_from_slice(s.as_bytes());
+        buf.push(0);
+    }
+    /// One `{sv}` entry in the daemon's convention.
+    fn w_entry_sv(buf: &mut Vec<u8>, key: &str, inner_sig: &[u8], value: &Val) {
+        w_pad(buf, 8);
+        w_str(buf, key);
+        buf.push(inner_sig.len() as u8);
+        buf.extend_from_slice(inner_sig);
+        buf.push(0);
+        marshal(buf, inner_sig, value).unwrap();
+    }
+
+    /// The @78 wire fix, pinned hermetically: a dbus-daemon-shaped
+    /// `a{sa{sv}}` settings reply built byte-for-byte in the DAEMON's
+    /// convention — the length field never counts the pre-element padding,
+    /// the payload is tail-padded to the element alignment, struct elements
+    /// are 8-aligned, and the last setting's value array is empty. Every
+    /// shape here desynchronised the hand-rolled reader live.
+    #[test]
+    fn dbus_settings_reply_in_the_daemons_convention_parses() {
+        // Build the body in ONE buffer so every padding is the absolute
+        // offset the reader will compute (the daemon aligns from the message
+        // start, never from the container's start).
+        let mut body: Vec<u8> = Vec::new();
+        // Outer `a{sa{sv}}`: a 4-aligned length field, pre-element padding
+        // (NOT counted in n), then the entries.
+        w_pad(&mut body, 4);
+        let outer_len_at = body.len();
+        w_u32(&mut body, 0); // placeholder
+        w_pad(&mut body, 8); // the first dict entry is 8-aligned
+        let outer_start = body.len();
+
+        // Setting "connection" → its `a{sv}` property array.
+        w_pad(&mut body, 8);
+        w_str(&mut body, "connection");
+        w_pad(&mut body, 4);
+        let props_len_at = body.len();
+        w_u32(&mut body, 0); // placeholder
+        // n counts the ELEMENT bytes only: the count starts at the element
+        // alignment boundary the daemon pads to after the length field.
+        let props_start = pad_to(body.len(), 8);
+        w_entry_sv(&mut body, "id", b"s", &Val::Text("Matrix".to_string()));
+        // A property whose value is a struct array `a(yu)`: the struct
+        // elements are 8-aligned, each an 8-byte payload (y + pad + u).
+        w_entry_sv(
+            &mut body,
+            "slots",
+            b"a(yu)",
+            &Val::Array(vec![
+                Val::Struct(vec![Val::Byte(7), Val::UInt32(1500)]),
+                Val::Struct(vec![Val::Byte(9), Val::UInt32(9000)]),
+            ]),
+        );
+        // A property whose value is an array of arrays of uint32 (`aau`).
+        w_entry_sv(
+            &mut body,
+            "addresses",
+            b"aau",
+            &Val::Array(vec![Val::Array(vec![
+                Val::UInt32(0x0a00_0001),
+                Val::UInt32(24),
+                Val::UInt32(0x0a00_0001),
+            ])]),
+        );
+        // Tail-pad the property array's payload to the dict-entry alignment
+        // (8) — the daemon counts that padding inside n.
+        w_pad(&mut body, 8);
+        let props_len = (body.len() - props_start) as u32;
+        body[props_len_at..props_len_at + 4].copy_from_slice(&props_len.to_le_bytes());
+
+        // Setting "proxy" → an EMPTY property array (the live reply's tail:
+        // the last entry whose value is `a{sv}` with n == 0).
+        w_pad(&mut body, 8);
+        w_str(&mut body, "proxy");
+        w_pad(&mut body, 4);
+        w_u32(&mut body, 0);
+        w_pad(&mut body, 8); // the empty payload is still padded to the element alignment
+
+        // The outer payload's tail padding (a no-op here — the last element
+        // already ends 8-aligned).
+        w_pad(&mut body, 8);
+        let outer_len = (body.len() - outer_start) as u32;
+        body[outer_len_at..outer_len_at + 4].copy_from_slice(&outer_len.to_le_bytes());
+
+        let mut off = 0usize;
+        let value = unmarshal(&body, &mut off, b"a{sa{sv}}").expect("the daemon's convention parses");
+        assert_eq!(off, body.len(), "the whole reply is consumed, no desync");
+        let settings = flatten_settings(&value).expect("a settings map");
+        let names: Vec<&str> = settings.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["connection", "proxy"], "both settings survive");
+        let conn = &settings[0].1;
+        assert_eq!(conn.len(), 3, "id, slots and addresses survive");
+        match &conn[0].1 {
+            Val::Variant(_, v) => assert_eq!(**v, Val::Text("Matrix".to_string())),
+            other => panic!("expected a variant, got {other:?}"),
+        }
+        // The struct array keeps its two 8-aligned elements in order.
+        match &conn[1].1 {
+            Val::Variant(_, v) => match v.as_ref() {
+                Val::Array(items) => {
+                    assert_eq!(items.len(), 2);
+                    assert_eq!(
+                        items[0],
+                        Val::Struct(vec![Val::Byte(7), Val::UInt32(1500)])
+                    );
+                    assert_eq!(
+                        items[1],
+                        Val::Struct(vec![Val::Byte(9), Val::UInt32(9000)])
+                    );
+                }
+                other => panic!("expected an array, got {other:?}"),
+            },
+            other => panic!("expected a variant, got {other:?}"),
+        }
+        // The empty setting keeps an empty property list (the profile exists).
+        assert!(settings[1].1.is_empty(), "proxy survives as an empty setting");
+    }
+
+    /// The marshal/unmarshal codec agrees with itself in the daemon's
+    /// convention: a settings-shaped value survives a full round trip.
+    #[test]
+    fn dbus_settings_value_round_trips_through_the_codec() {
+        let value = Val::Array(vec![
+            Val::Entry(
+                Box::new(Val::Text("connection".to_string())),
+                Box::new(Val::Array(vec![Val::Entry(
+                    Box::new(Val::Text("id".to_string())),
+                    Box::new(Val::Variant(
+                        b"s".to_vec(),
+                        Box::new(Val::Text("Matrix".to_string())),
+                    )),
+                )])),
+            ),
+            Val::Entry(
+                Box::new(Val::Text("proxy".to_string())),
+                Box::new(Val::Array(vec![])),
+            ),
+        ]);
+        let mut body = Vec::new();
+        marshal(&mut body, b"a{sa{sv}}", &value).unwrap();
+        let mut off = 0usize;
+        let back = unmarshal(&body, &mut off, b"a{sa{sv}}").unwrap();
+        assert_eq!(back, value, "the value survives the wire byte for byte");
+        assert_eq!(off, body.len());
+    }
+
     /// A read-only live integration test over the real system bus and the real
     /// netlink socket. Law #8: this only READS (kernel sweeps, NM properties,
     /// rfkill) — it never turns a host switch. `#[ignore]`d so the default
@@ -3811,8 +4017,21 @@ mod tests {
         // Every enumerated interface yields a status whose hostState is one of
         // the contract's seven tokens (never an invented state), each with a
         // source naming the layer that decided it.
+        let mut live_kinds: Vec<String> = Vec::new();
         for iface in &page.items {
             let s = backend.get_status(iface.id).expect("getStatus read");
+            // BUG 1's live lock: the status's type and the enumeration's type
+            // come from the same kernel link record. The live verification
+            // once saw getStatus type wlp0s20f3 as `ethernet` while
+            // getInterfaces typed it `wifi`; this assertion is the
+            // regression detector for that divergence.
+            assert_eq!(
+                s.kind, iface.kind,
+                "getStatus typed {} as {:?} but getInterfaces typed it {:?} — \
+                 the two paths disagree on the type's source",
+                iface.name, s.kind, iface.kind
+            );
+            live_kinds.push(format!("{}({})", iface.name, s.kind));
             assert!(
                 HostState::ALL.contains(&s.host_state),
                 "hostState {:?} must be a contract token",
@@ -3831,8 +4050,9 @@ mod tests {
         // Hard and soft are reported separately (never folded into enabled).
         assert!(radios.items.iter().any(|r| r.name == "wifi"));
         std::println!(
-            "live: netlink links = {:?}, NM seam calls = {}, store revision = {}",
+            "live: netlink links = {:?}, status kinds = {:?}, NM seam calls = {}, store revision = {}",
             backend.store().links().iter().map(|l| format!("{}({})", l.name, l.kind_token())).collect::<Vec<_>>(),
+            live_kinds,
             backend.nm_fallback_calls(),
             backend.store_revision()
         );

@@ -462,6 +462,28 @@ impl RealNetlinkReader {
         enrich_link(&self.sysfs_root, link)
     }
 
+    /// Parse one datagram's events with the per-link kernel facts applied.
+    ///
+    /// BUG 1's fix. The kernel reports a wlan interface's `ARPHRD_*` type as
+    /// `ether` — the wireless-ness lives in the phy, which rtnetlink does not
+    /// carry — so the snapshot path upgrades a link's kind from sysfs
+    /// (`/sys/class/net/<name>/wireless`). The EVENT path parsed the wire
+    /// only, so an `RTM_NEWLINK` event silently re-typed a wifi interface as
+    /// `ethernet` in the store: `getStatus` then answered `ethernet` while
+    /// `getInterfaces` answered `wifi` — the two surfaces disagreed on the
+    /// type's source. Both surfaces now read the type from the same place:
+    /// the kernel's link type, plus the kernel's own sysfs marker.
+    fn parse_events(&self, bytes: &[u8]) -> Result<Vec<KernelEvent>> {
+        let events = parse_event_datagram(bytes)?;
+        Ok(events
+            .into_iter()
+            .map(|event| match event {
+                KernelEvent::Link(link) => KernelEvent::Link(self.enrich_link(link)),
+                other => other,
+            })
+            .collect())
+    }
+
     /// Take the next already-parsed event, or `None` when none is pending.
     fn take_pending(&self) -> Option<KernelEvent> {
         let mut pending = self.pending.lock().unwrap();
@@ -485,7 +507,7 @@ impl RealNetlinkReader {
         let (bytes, _from) = socket
             .recv_from_full()
             .map_err(|e| Error::unavailable(format!("netlink event recv: {e}")))?;
-        let events = parse_event_datagram(&bytes)?;
+        let events = self.parse_events(&bytes)?;
         let n = events.len();
         self.pending.lock().unwrap().extend(events);
         Ok(n)
@@ -607,7 +629,7 @@ impl NetlinkReader for RealNetlinkReader {
             .map_err(|e| Error::failed(format!("netlink drain: {e}")))?;
         while events.len() < max {
             match socket.recv_from_full() {
-                Ok((bytes, _from)) => match parse_event_datagram(&bytes) {
+                Ok((bytes, _from)) => match self.parse_events(&bytes) {
                     Ok(mut parsed) => events.append(&mut parsed),
                     Err(e) => {
                         let _ = socket.set_non_blocking(false);
@@ -1444,9 +1466,57 @@ mod tests {
         assert!(link.stats.is_none(), "absent IFLA_STATS64 is None, never a zeroed counter");
     }
 
+    /// BUG 1's hermetic lock. The kernel reports a wlan interface's link type
+    /// as `ARPHRD_ETHER` — the wireless-ness lives in the phy, not the link
+    /// type — so the SNAPSHOT path upgrades the kind from sysfs
+    /// (`/sys/class/net/<name>/wireless`). The EVENT path parsed the wire
+    /// only, so an `RTM_NEWLINK` event silently re-typed a wifi interface as
+    /// `ethernet` in the store: `getStatus` then answered `ethernet` while
+    /// `getInterfaces` answered `wifi` — the two surfaces disagreed on the
+    /// type's source. Both surfaces now read the type from the same place,
+    /// and this test locks the event path to it.
     #[test]
-    fn event_packets_parse_from_the_wire() {
-        // A NEWLINK event (through the production serializer).
+    fn event_links_report_the_same_kind_the_snapshot_would() {
+        use crate::platforms::linux::netlink::{NetlinkReader, RealNetlinkReader};
+        use std::path::Path;
+
+        let root = std::env::temp_dir().join(format!("smart-lib-bug1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("wlp0s20f3").join("wireless")).unwrap();
+        std::fs::create_dir_all(root.join("enp0s31f6")).unwrap();
+        let reader = RealNetlinkReader::with_roots(Path::new("/nonexistent-rfkill"), &root);
+
+        // The kernel's own wire for a wlan link: ARPHRD_ETHER, no 80211 type.
+        let mut wifi = LinkMessage::default();
+        wifi.header.link_layer_type = LinkLayerType::from(ARPHRD_ETHER);
+        wifi.header.index = 3;
+        wifi.attributes = alloc::vec![LinkAttribute::IfName("wlp0s20f3".to_string())];
+        let wire = serialize(RouteNetlinkMessage::NewLink(wifi.clone()));
+        match reader.parse_events(&wire).unwrap().remove(0) {
+            KernelEvent::Link(link) => {
+                assert_eq!(link.name, "wlp0s20f3");
+                assert_eq!(
+                    link.kind,
+                    LinkKind::Wifi,
+                    "the event path must enrich exactly like the snapshot path"
+                );
+                assert_eq!(link.kind_token(), "wifi");
+            }
+            other => panic!("expected a Link event, got {other:?}"),
+        }
+        // A wired link keeps its kind — the enrichment adds, never overrides.
+        let mut ether = wifi.clone();
+        ether.attributes = alloc::vec![LinkAttribute::IfName("enp0s31f6".to_string())];
+        let wire = serialize(RouteNetlinkMessage::NewLink(ether));
+        match reader.parse_events(&wire).unwrap().remove(0) {
+            KernelEvent::Link(link) => assert_eq!(link.kind, LinkKind::Ethernet),
+            other => panic!("expected a Link event, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn event_packets_parse_from_the_wire() {        // A NEWLINK event (through the production serializer).
         let wire = serialize(RouteNetlinkMessage::NewLink(wifi_stalled_link()));
         match parse_event_datagram(&wire).unwrap().remove(0) {
             KernelEvent::Link(link) => {
