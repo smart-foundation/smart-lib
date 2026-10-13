@@ -261,7 +261,9 @@ fn unmarshal(buf: &[u8], off: &mut usize, sig: &[u8]) -> Result<Val> {
     let Some(&s) = sig.first() else {
         return Err(Error::failed("unmarshal: empty signature (wire desync)"));
     };
-    std::println!("DEBUG u sig={:?} off={} len={}", core::str::from_utf8(sig), *off, buf.len());
+    if std::env::var_os("SMART_LIB_DBUS_TRACE").is_some() {
+        std::println!("DEBUG u sig={:?} off={} len={}", core::str::from_utf8(sig), *off, buf.len());
+    }
     // A variant is not pre-padded (its signature byte follows immediately).
     if s != b'v' {
         *off = pad_to(*off, align_of(s));
@@ -635,9 +637,9 @@ fn dbus_call(
         .map_err(|e| Error::failed(format!("dbus write: {e}")))?;
     let (_reply_serial, reply_sig, reply_body) = read_message(stream)?;
     // Unmarshal the reply body into values, matching reply_sig.
-    if reply_sig.starts_with("a{") {
-        let hex: alloc::string::String = reply_body.iter().skip(225).take(60).enumerate().map(|(i, b)| alloc::format!("{}{:02x}", if i % 16 == 0 { alloc::format!("\n{:03}: ", i + 225) } else { String::new() }, b)).collect();
-        std::println!("DEBUG slice = {hex}");
+    if std::env::var_os("SMART_LIB_DBUS_HEXDUMP").is_some() {
+        let hex: alloc::string::String = reply_body.iter().take(1024).enumerate().map(|(i, b)| alloc::format!("{}{:02x}", if i % 32 == 0 { alloc::format!("\n{:04}: ", i) } else { String::new() }, b)).collect();
+        std::println!("HEX sig={reply_sig} len={}\n{hex}", reply_body.len());
     }
     let mut off = 0usize;
     let mut out = Vec::new();
@@ -1941,7 +1943,9 @@ impl RealNmClient {
     fn connection_settings(&self, path: &str) -> Result<Vec<(String, Vec<(String, Val)>)>> {
         let out = self.call(path, NM_CONNECTION_IFACE, "GetSettings", &[], &[])?;
         if let Some(Val::Variant(_, _)) = out.first() { let _ = out; }
-        std::println!("DEBUG GetSettings ok");
+        if std::env::var_os("SMART_LIB_DBUS_TRACE").is_some() {
+            std::println!("DEBUG GetSettings ok");
+        }
         let Some(reply) = out.into_iter().next() else {
             return Err(Error::failed(format!(
                 "GetSettings({path}) returned nothing"
@@ -3832,5 +3836,56 @@ mod tests {
             backend.nm_fallback_calls(),
             backend.store_revision()
         );
+    }
+
+    /// A read-only live probe of the two paths that must agree on a link's
+    /// type: the SNAPSHOT (which `getInterfaces` enumerates from) and an
+    /// RTM_NEWLINK EVENT (which the store applies in place). Read-only
+    /// (`RTM_GETLINK` dump + a non-blocking event drain; the host is never
+    /// mutated). `#[ignore]`d so the default hermetic suite never touches the
+    /// host; run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "read-only live netlink probe: snapshot kind vs event-applied kind; run with `cargo test -- --ignored`"]
+    fn live_snapshot_and_event_agree_on_a_links_kind() {
+        use crate::platforms::linux::netlink::{KernelEvent, NetlinkReader, RealNetlinkReader};
+        let reader = RealNetlinkReader::new();
+        let snap = reader.snapshot().expect("the kernel answered RTM_GETLINK");
+        std::println!(
+            "live snapshot links: {:?}",
+            snap.links
+                .iter()
+                .map(|l| alloc::format!("{}({})", l.name, l.kind_token()))
+                .collect::<Vec<_>>()
+        );
+        // A read drains what the kernel already queued (the same bounded,
+        // non-blocking drain the store performs) and applies it in place.
+        let events = reader.drain_events(64).expect("a live non-blocking drain");
+        std::println!(
+            "live drained events: {:?}",
+            events
+                .iter()
+                .map(|e| match e {
+                    KernelEvent::Link(l) => alloc::format!("link {}({})", l.name, l.kind_token()),
+                    KernelEvent::LinkGone(i) => alloc::format!("gone {i}"),
+                    KernelEvent::Address(a) => alloc::format!("addr {} {}", a.index, a.address),
+                    KernelEvent::AddressGone(a) => alloc::format!("addr-gone {} {}", a.index, a.address),
+                })
+                .collect::<Vec<_>>()
+        );
+        for link in &snap.links {
+            let snapshot_kind = link.kind_token();
+            for event in &events {
+                if let KernelEvent::Link(event_link) = event {
+                    if event_link.index == link.index && event_link.kind_token() != snapshot_kind {
+                        panic!(
+                            "type divergence on {}: the snapshot names it {snapshot_kind:?} but an \
+                             RTM_NEWLINK event names it {:?} — the two reads of the same link disagree",
+                            link.name,
+                            event_link.kind_token()
+                        );
+                    }
+                }
+            }
+        }
     }
 }
