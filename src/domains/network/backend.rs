@@ -38,7 +38,7 @@ use super::types::{
     NicProviderHandle, Pagination, Page, ProxyConfigInfo, QosRuleInfo, RadioState, RouteInfo,
     SatelliteConfigEcho, SliceConfigEcho, SliceId, SliceInfo, SubscriptionId, TelemetryInfo,
     TimeSyncInfo, TopologyLinkInfo, TopologyNodeInfo, TracerouteHopInfo, VpnConnectionInfo,
-    VpnProfileInfo, WifiNetwork, WifiNanConfigEcho,
+    VpnProfileInfo, WifiNetwork, WifiNanConfigEcho, WifiWritePrivilege,
 };
 
 /// A protocol-compliant network backend: one method per contract method, with
@@ -692,6 +692,20 @@ pub trait NetworkBackend {
         Err(Error::not_supported(
             "no-privilege: the host proxy is written by the system administrator (/etc) or a \
              desktop settings daemon; smart-lib never writes /etc (charter law #8)",
+        ))
+    }
+
+    /// The read-shaped privilege measurement: what this uid may actually do to
+    /// the wifi control surface, as the host's authorisation authority reports
+    /// it (charter law #8 — this is a READ; it performs no write and, with no
+    /// interaction, triggers no prompt). The measured verdict REPLACES the old
+    /// "polkit-gated" assumption: `REAL` if the authority grants the verbs,
+    /// `DEGRADED`-with-measured-words if it refuses. A backend that cannot
+    /// reach the authority answers `Unavailable` with the reason and
+    /// `measured: false` — never a guessed verdict.
+    fn measure_wifi_write_privilege(&self) -> Result<WifiWritePrivilege> {
+        Err(Error::unavailable(
+            "no-backend: the privilege authority could not be queried on this backend",
         ))
     }
 

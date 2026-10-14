@@ -48,5 +48,5 @@ pub use types::{
     NicProviderHandle, Page, Pagination, ProxyConfigInfo, QosRuleInfo, RadioState, RouteInfo,
     SatelliteConfigEcho, SliceConfigEcho, SliceId, SliceInfo, SubscriptionId, TelemetryInfo,
     TimeSyncInfo, TopologyLinkInfo, TopologyNodeInfo, TracerouteHopInfo, VpnConnectionInfo,
-    VpnProfileInfo, WifiNetwork, WifiNanConfigEcho,
+    VpnProfileInfo, WifiNetwork, WifiNanConfigEcho, WifiWritePrivilege,
 };

@@ -79,6 +79,35 @@ pub enum WifiAction {
     On,
     /// Disable the wifi radio (a real engine call).
     Off,
+    /// Decode a `WIFI:T:WPA;S:<ssid>;P:<pass>;;` QR payload (a string, or a
+    /// text-payload file path) and route it to `wifiConnect` via a secret
+    /// reference — the password is never echoed. Without `--force` this is a
+    /// dry-run: it parses and shows the resolved call, and performs nothing.
+    Join {
+        /// The QR payload text, or a path to a text file holding it.
+        payload: String,
+        /// Supply the password when the payload carries none (used only to
+        /// build the secret reference, never stored or echoed).
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Render a terminal QR of a network's `WIFI:` payload so a phone can join
+    /// by scanning the screen. The rendered matrix is decoded back and shown to
+    /// match the payload — the round-trip proof a phone will read it.
+    Share {
+        ssid: String,
+        /// The password to embed (needed for a secured network the host cannot
+        /// read the secret of; used only to build the payload, never stored).
+        #[arg(long)]
+        password: Option<String>,
+        /// Render the larger ASCII `#`/space form instead of half blocks.
+        #[arg(long)]
+        ascii: bool,
+    },
+    /// The read-shaped privilege measurement: what THIS uid may actually do to
+    /// the wifi surface, as the host's authority reports it (never an
+    /// assumption, never a write).
+    Privilege,
 }
 
 /// Whether the caller accepted the host write (the REPL prompts; one-shot
@@ -127,6 +156,8 @@ pub fn run(
 }
 
 #[cfg(feature = "domain-network")]
+pub mod qr;
+#[cfg(feature = "domain-network")]
 pub mod render;
 
 #[cfg(feature = "domain-network")]
@@ -141,7 +172,15 @@ fn evaluate_network(
     match &cmd.action {
         None | Some(NetworkAction::Interfaces) => {
             let interfaces = backend.get_interfaces(all)?;
-            render::interfaces_value(&interfaces.items)
+            // Each interface row carries its status's SSID, so a connected wifi
+            // network's NAME reaches the default table too (the founder's "no
+            // network name anywhere"). One cached status read per interface.
+            let mut rows = Vec::with_capacity(interfaces.items.len());
+            for iface in &interfaces.items {
+                let status = backend.get_status(iface.id)?;
+                rows.push(render::interface_row(iface, &status));
+            }
+            Ok(Value::List(rows))
         }
         Some(NetworkAction::Status) => {
             // The full status: the host-networking master switch, the radios,
@@ -204,13 +243,69 @@ fn evaluate_network(
                 ))
             }
             Some(WifiAction::Scan) => {
-                // A real engine call: on this host the engine answers
-                // honestly that the active scan is not built (and that
-                // refusal is rendered, never papered over).
+                // A real engine call: NM RequestScan + GetAllAccessPoints. The
+                // visible networks (SSID / signal / security) come back as a
+                // list; the honest empty when the radio sees nothing.
                 let found = backend.wifi_scan(all)?;
                 Ok(Value::List(
                     found.items.iter().map(render::wifi_value).collect(),
                 ))
+            }
+            Some(WifiAction::Privilege) => {
+                // The read-shaped measurement: what this uid may actually do.
+                let priv_ = backend.measure_wifi_write_privilege()?;
+                Ok(render::privilege_value(&priv_))
+            }
+            Some(WifiAction::Join { payload, password }) => {
+                // A text file is read when the argument names one; otherwise
+                // the argument is the payload itself.
+                let text = match std::fs::read_to_string(payload) {
+                    Ok(contents) => contents,
+                    Err(_) => payload.clone(),
+                };
+                let mut join = qr::parse(&text)?;
+                // A payload password wins; `--password` supplies one the payload
+                // omitted. Neither is ever stored or echoed past the reference.
+                if join.password.is_empty() {
+                    if let Some(p) = password {
+                        join.password = p.clone();
+                    }
+                }
+                // The resolved call, self-contained: SSID + security + the
+                // secret reference (the stable slot name, never the password).
+                let secret_ref = stable_secret_ref(&join.ssid, Some(&join.password));
+                let resolved = format!(
+                    "wifiConnect(ssid={:?}, security={:?}, credential=SecretKeyId({secret_ref}))",
+                    join.ssid, join.security
+                );
+                // Gated exactly like every other host write: without --force
+                // this is a dry-run that SHOWS the resolved call and performs
+                // nothing (the founder's join proof).
+                let performed = if guard.allowed && !join.ssid.is_empty() {
+                    backend.wifi_connect(&join.ssid, smart_lib::core::ids::SecretKeyId::new(secret_ref))?;
+                    true
+                } else {
+                    false
+                };
+                Ok(render::join_value(&join, &resolved, performed))
+            }
+            Some(WifiAction::Share { ssid, password, ascii }) => {
+                // Build the WIFI payload: open when no password is supplied and
+                // the network is not known-secured; WPA (with the password, or
+                // without it and a note) otherwise. The host never exposes a
+                // remembered network's secret, so a secured share carries a
+                // password only when the operator provides one.
+                let join = qr::WifiJoin {
+                    ssid: ssid.clone(),
+                    security: if password.is_some() { "wpa".to_string() } else { "open".to_string() },
+                    password: password.clone().unwrap_or_default(),
+                    hidden: false,
+                };
+                let payload = join.to_payload();
+                // The round-trip proof: decode the rendered matrix back and show
+                // it equals the payload, so a phone reads exactly this network.
+                let decoded = qr::round_trip(&payload, *ascii)?;
+                Ok(render::share_value(&join, &payload, *ascii, &decoded))
             }
             Some(WifiAction::Connect { ssid, password }) => {
                 guard_host_write(guard, "wifi connect", ssid)?;

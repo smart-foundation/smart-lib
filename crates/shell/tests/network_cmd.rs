@@ -122,8 +122,8 @@ fn the_known_networks_read_is_real_and_an_empty_set_is_honest() {
     }
 }
 
-/// An active scan routes to the engine, and the engine's refusal is the
-/// answer — rendered, never papered over.
+/// An active scan routes to the engine and carries the real visible networks:
+/// SSID / signal / security — the three the founder asked to finally see.
 #[test]
 fn wifi_scan_routes_to_the_engine_and_carries_its_answer() {
     let mut backend = MockBackend::host();
@@ -134,6 +134,142 @@ fn wifi_scan_routes_to_the_engine_and_carries_its_answer() {
         "the engine's own reason survives: {err}"
     );
     assert!(backend.seams().contains(&"wifi_scan".to_string()));
+
+    // A real scan returns the visible networks with signal and security.
+    let mut backend = MockBackend::host();
+    backend.scan = vec![common_wifi("Big Boy Soweto", -40, "open")];
+    let value = evaluate(&cmd(&["network", "wifi", "scan"]), &backend, refused()).unwrap();
+    match value {
+        Value::List(items) => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].field_str("ssid"), "Big Boy Soweto");
+            assert_eq!(items[0].field_str("security"), "open");
+            assert_eq!(items[0].field_str("strength_dbm"), "-40");
+        }
+        other => panic!("expected a list, got {other:?}"),
+    }
+}
+
+fn common_wifi(ssid: &str, dbm: i32, security: &str) -> smart_lib::domains::network::types::WifiNetwork {
+    use smart_lib::domains::network::types::{MacAddress, WifiNetwork};
+    WifiNetwork {
+        ssid: ssid.to_string(),
+        bssid: MacAddress("AA:BB:CC:DD:EE:FF".to_string()),
+        strength_dbm: dbm,
+        frequency_hz: 2_437_000,
+        security: security.to_string(),
+        hidden: false,
+    }
+}
+
+/// The network NAME reaches the interface detail — the founder's exact
+/// complaint ("there is no network name anywhere").
+#[test]
+fn the_interface_detail_carries_the_connected_ssid() {
+    let backend = MockBackend::host();
+    let value = evaluate(&cmd(&["network", "interface", "wlp0s20f3"]), &backend, refused()).unwrap();
+    assert_eq!(value.field_str("ssid"), "VR-3245-0884");
+    // A wired interface carries no name.
+    let wired = evaluate(&cmd(&["network", "interface", "enp0s31f6"]), &backend, refused()).unwrap();
+    assert!(wired.field_str("ssid").is_empty());
+    // The human render prints it (the screen a user reads).
+    let rendered = shell::domains::network::render::render_action(
+        &cmd(&["network", "interface", "wlp0s20f3"]),
+        &value,
+        OutputFormat::Human,
+    );
+    let plain = strip_ansi(&rendered);
+    assert!(plain.contains("Network") && plain.contains("VR-3245-0884"), "{plain}");
+}
+
+/// `network wifi privilege` returns the MEASURED verdict — the truth that
+/// replaced the assumed "polkit-gated" label.
+#[test]
+fn wifi_privilege_reports_the_measured_verdict() {
+    let mut backend = MockBackend::host();
+    backend.wifi_privilege = Some(smart_lib::domains::network::types::WifiWritePrivilege {
+        network_control: "yes".to_string(),
+        modify_connection: "no".to_string(),
+        measured: true,
+        uid: 1000,
+        detail: "uid 1000 → network-control=yes, settings.modify.system=no".to_string(),
+    });
+    let value = evaluate(&cmd(&["network", "wifi", "privilege"]), &backend, refused()).unwrap();
+    assert!(value.field_bool("measured"));
+    assert_eq!(value.field_str("network_control"), "yes");
+    assert_eq!(value.field_str("modify_connection"), "no");
+    // An engine that cannot reach the authority is honestly unmeasured.
+    let cold = MockBackend::host();
+    assert!(evaluate(&cmd(&["network", "wifi", "privilege"]), &cold, refused()).is_err());
+}
+
+/// `network wifi join` decodes a `WIFI:` payload and shows the resolved engine
+/// call WITHOUT performing it (the dry-run); with --force it performs. The
+/// password never appears in the resolved call — only a secret reference.
+#[test]
+fn wifi_join_decodes_and_shows_the_resolved_call() {
+    let backend = MockBackend::host();
+    // Dry-run: parse + show, perform nothing.
+    let value = evaluate(
+        &cmd(&["network", "wifi", "join", "WIFI:T:WPA;S:Big Boy Soweto;P:hunter2;;"]),
+        &backend,
+        refused(),
+    )
+    .unwrap();
+    assert_eq!(value.field_str("ssid"), "Big Boy Soweto");
+    assert_eq!(value.field_str("security"), "WPA");
+    assert!(!value.field_bool("performed"), "a dry-run performs nothing");
+    let resolved = value.field_str("resolved_call");
+    assert!(resolved.contains("wifiConnect(ssid=\"Big Boy Soweto\""), "{resolved}");
+    assert!(resolved.contains("SecretKeyId("), "{resolved}");
+    assert!(!resolved.contains("hunter2"), "the password must never appear: {resolved}");
+    assert!(backend.writes().is_empty(), "no host write performed");
+
+    // With --force the real engine call is issued (mock-verified).
+    let value = evaluate(
+        &cmd(&["network", "wifi", "join", "WIFI:T:WPA;S:Matrix;P:secret;;"]),
+        &backend,
+        allowed(),
+    )
+    .unwrap();
+    assert!(value.field_bool("performed"));
+    assert!(backend.seams().contains(&"wifi_connect(Matrix)".to_string()));
+}
+
+/// `network wifi share` builds a scannable payload whose round-trip reads back
+/// to the exact payload — the proof a phone will join the right network.
+#[test]
+fn wifi_share_renders_a_qr_that_reads_back() {
+    let backend = MockBackend::host();
+    let value = evaluate(&cmd(&["network", "wifi", "share", "VR-3245-0884"]), &backend, refused()).unwrap();
+    assert_eq!(value.field_str("ssid"), "VR-3245-0884");
+    assert!(value.field_bool("round_trip_ok"), "the rendered QR decodes to the payload");
+    let payload = value.field_str("payload");
+    assert_eq!(value.field_str("round_trip"), payload);
+    assert!(payload.starts_with("WIFI:T:nopass;S:VR-3245-0884;"), "{payload}");
+}
+
+/// A correct CSI skipper strips ANSI escapes but keeps the text between them —
+/// the width measure the report runs against, so a false drift cannot be
+/// manufactured by a hand-rolled stripper.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI: ESC [ , intermediates, a final byte in @..~
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ── the control verbs (the old fake arms, now real calls) ──────────────────

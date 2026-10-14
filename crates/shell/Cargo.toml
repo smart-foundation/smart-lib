@@ -33,7 +33,7 @@ default = ["domain-network", "domain-clipboard", "domain-service"]
 # The network domain's engine half. With it off the shell still builds (the
 # engine crate compiles without the schema), but the network commands answer
 # honestly that the engine was built without the domain.
-domain-network = ["smart-lib/domain-network"]
+domain-network = ["smart-lib/domain-network", "dep:qrcode", "dep:rqrr"]
 # The clipboard domain's engine half — the native selection read/write path.
 # With it off the shell still builds, but the clipboard commands answer honestly
 # that the engine was built without the domain-clipboard feature.
@@ -66,3 +66,12 @@ serde = { version = "1", features = ["derive"] }
 # (Ambiguous = 2); the renderer picks between them per locale
 # (`widgets::ambiguous_width`). `no_std`, ~40 KiB.
 unicode-width = "0.2"
+# The QR codec behind `domain-network` — the founder's rule: crates for the
+# heavy, ours for the small. `qrcode` ENCODES a payload into a module matrix
+# (`network wifi share` renders it to the terminal so a phone can join by
+# scanning the screen); `rqrr` DECODES a matrix back (the round-trip proof that
+# the rendered output reads to the exact payload, and the image-path join).
+# Both are optional and pulled only by the network domain, so a clipboard-only
+# build pays nothing for a QR codec it never runs.
+qrcode = { version = "0.14", optional = true }
+rqrr = { version = "0.7", optional = true }

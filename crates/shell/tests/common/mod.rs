@@ -11,7 +11,7 @@ use smart_lib::core::ids::{NetworkInterfaceId, SecretKeyId};
 use smart_lib::core::values::Duration;
 use smart_lib::domains::network::types::{
     ConnStatus, HostState, HostStateSource, InterfaceCounters, InterfaceSnapshot, MacAddress,
-    Pagination, Page, RadioState, SubscriptionId,
+    Pagination, Page, RadioState, SubscriptionId, WifiNetwork, WifiWritePrivilege,
 };
 
 pub use smart_lib::domains::network::types::KnownWifiNetwork;
@@ -70,7 +70,7 @@ pub fn wifi_status() -> ConnStatus {
         behind_captive: false,
         host_state: HostState::Managed,
         host_state_source: HostStateSource::Kernel,
-        ssid: String::new(),
+        ssid: "VR-3245-0884".to_string(),
     }
 }
 
@@ -85,6 +85,13 @@ pub struct MockBackend {
     pub writes: RefCell<Vec<String>>,
     pub seams: RefCell<Vec<String>>,
     pub scan_error: bool,
+    /// Scripted access-point set `wifi_scan` enumerates.
+    pub scan: Vec<WifiNetwork>,
+    /// The SSID the scripted wifi status carries (the active connection name).
+    pub active_ssid: String,
+    /// The scripted privilege verdict; `None` ⇒ the engine's own default
+    /// (Unavailable — the authority could not be queried).
+    pub wifi_privilege: Option<WifiWritePrivilege>,
 }
 
 impl MockBackend {
@@ -112,6 +119,9 @@ impl MockBackend {
             writes: RefCell::new(Vec::new()),
             seams: RefCell::new(Vec::new()),
             scan_error: false,
+            scan: Vec::new(),
+            active_ssid: "VR-3245-0884".to_string(),
+            wifi_privilege: None,
         }
     }
 
@@ -149,6 +159,12 @@ impl NetworkBackend for MockBackend {
             "ethernet".to_string()
         } else {
             "wifi".to_string()
+        };
+        // The active connection name is only carried on a wifi interface.
+        status.ssid = if status.kind == "wifi" {
+            self.active_ssid.clone()
+        } else {
+            String::new()
         };
         Ok(status)
     }
@@ -237,18 +253,29 @@ impl NetworkBackend for MockBackend {
         Ok(())
     }
 
-    fn wifi_scan(&self, page: Pagination) -> smart_lib::core::Result<Page<smart_lib::domains::network::types::WifiNetwork>> {
+    fn wifi_scan(&self, page: Pagination) -> smart_lib::core::Result<Page<WifiNetwork>> {
         self.seams.borrow_mut().push("wifi_scan".to_string());
         if self.scan_error {
             return Err(smart_lib::core::Error::not_supported(
                 "no-backend: active WiFi scan orchestration (NM RequestScan + AccessPoint enumeration) not implemented",
             ));
         }
-        let _ = page;
+        let total = self.scan.len() as u64;
+        let limit = page.effective_limit() as usize;
         Ok(Page {
-            items: Vec::new(),
-            total: 0,
+            items: self.scan.iter().take(limit).cloned().collect(),
+            total,
         })
+    }
+
+    fn measure_wifi_write_privilege(&self) -> smart_lib::core::Result<WifiWritePrivilege> {
+        self.seams.borrow_mut().push("measure_wifi_write_privilege".to_string());
+        match &self.wifi_privilege {
+            Some(p) => Ok(p.clone()),
+            None => Err(smart_lib::core::Error::unavailable(
+                "no-backend: the privilege authority could not be queried on this backend",
+            )),
+        }
     }
 
     fn wifi_connect(&self, ssid: &str, _credential: SecretKeyId) -> smart_lib::core::Result<()> {

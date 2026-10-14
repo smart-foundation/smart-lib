@@ -509,6 +509,33 @@ pub fn firewall_action_token(action: network_capnp::FirewallAction) -> &'static 
     }
 }
 
+/// The MEASURED result of the read-shaped privilege probe: what this uid may
+/// actually do to the wifi control surface, as the host's authorisation
+/// authority reports it — never an assumption and never a host write. Each
+/// verb carries the one of three honest answers the authority's
+/// `CheckAuthorization` reply can give.
+///
+/// The network name (`ssid`) and the probe's verdict travel together because a
+/// connected wifi status and the authority to change it are read the same way:
+/// measured, with the measured words kept verbatim.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WifiWritePrivilege {
+    /// The `network-control` action (activate / disconnect / radio control):
+    /// `"yes"` = authorised, `"no"` = refused, `"challenge"` = would prompt,
+    /// `"unknown"` = the authority answered but not in a shape we map.
+    pub network_control: String,
+    /// The action adding a NEW connection needs (`settings.modify.system`):
+    /// the verb `wifiConnect` to a network the host does not remember.
+    pub modify_connection: String,
+    /// Whether the authority answered at all. `false` ⇒ it could not be reached
+    /// and NO verdict was measured (the columns stay empty, never guessed).
+    pub measured: bool,
+    /// The uid the verdict was issued for (read from `/proc/self/status`).
+    pub uid: u32,
+    /// The full measured detail, one line per action — the verbatim evidence.
+    pub detail: String,
+}
+
 /// One network the host remembers (`KnownWifiNetwork`): the bookkeeping half
 /// of `wifiConnect` — what is known, whether it joins automatically, and when
 /// it last did.
