@@ -160,10 +160,16 @@ pub fn supervisor_value(backend: &Backend) -> Value {
         ("declared_root".into(), Value::String(identity.declared_root)),
         ("state_root".into(), Value::String(identity.state_root)),
         (
-            "can_enumerate".into(),
-            Value::Bool(caps.can_enumerate),
+            "can_read_state".into(),
+            Value::Bool(caps.can_read_state),
         ),
-        ("can_read_state".into(), Value::Bool(caps.can_read_state)),
+        // The privileged half of the state read (the supervisor's own exact
+        // words), separately measured so a caller can tell what every uid
+        // gets from what a root caller gets.
+        (
+            "can_read_exact_state".into(),
+            Value::Bool(caps.can_read_exact_state),
+        ),
         ("can_control".into(), Value::Bool(caps.can_control)),
     ])
 }

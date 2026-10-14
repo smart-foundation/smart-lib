@@ -43,6 +43,16 @@ path = "src/lib.rs"
 name = "smart-service"
 required-features = ["domain-network", "std"]
 
+# The founder's privileged exact state read for the runit service cell (the
+# physical limit: /run/runit/supervise.<name>/stat is root-only on this host,
+# so the exact half of the state read is served by this binary run under
+# `sudo`, while the library's /proc derivation serves every uid without it).
+# A thin CLI over the engine's own RunitBackend::exact_states, so the tool
+# cannot drift from what the backend reports.
+[[example]]
+name = "service-state-probe"
+required-features = ["domain-service", "std"]
+
 [[example]]
 name = "network_probe"
 required-features = ["domain-network", "std"]
@@ -118,7 +128,7 @@ domain-calendar = []
 domain-camera = []
 domain-capture = []
 domain-cli = []
-domain-clipboard = ["dep:x11rb"]
+domain-clipboard = ["dep:x11rb", "dep:wayland-client", "dep:wayland-protocols-wlr"]
 domain-clock = []
 domain-compositor = []
 domain-console = []
@@ -224,6 +234,23 @@ netlink-sys = "0.9.0"
 # server in production), so no hermetic test touches a display.
 x11rb = { version = "0.13.2", default-features = false, optional = true }
 
+# The clipboard domain's native Wayland read/write path (charter law #9): the
+# maintained `wayland-client` crate — a from-scratch Rust implementation of the
+# Wayland wire protocol (no C libwayland, so it links on any box) — plus the
+# generated `zwlr_data_control_unstable_v1` protocol from
+# `wayland-protocols-wlr` (the standard freedesktop clipboard protocol wlroots
+# compositors speak). It replaces the archive body's condemned
+# `wl-paste`/`wl-copy` subprocess shellout with a real Wayland client: the
+# registry global, the data-control device, the source/selection offers, the
+# mime-type offers and the fd-passing read — the same "maintained crate
+# ecosystem, native over subprocess, behind a mockable seam" standard the X11
+# arm met with `x11rb`. Both are behind the mockable `SelectionHost` seam in
+# `src/platforms/linux/clipboard.rs`; the arm is protocol-proven against a
+# scripted compositor (a real wayland-server peer in the tests) even on a host
+# with no compositor.
+wayland-client = { version = "0.31", default-features = false, optional = true }
+wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"], optional = true }
+
 # The service domain's native systemd read/write path (charter law #9): the
 # maintained `dbus` crate — a from-scratch Rust reimplementation of the D-Bus
 # client protocol (libdbus's wire format), no C library, so it links and runs
@@ -247,6 +274,12 @@ dbus = { version = "0.9", default-features = false, optional = true }
 # it is dev-only here: a build of the library never links it.
 [dev-dependencies]
 libc = "0.2"
+# The clipboard Wayland arm's scripted peer: a REAL wayland-server that speaks
+# the wlr-data-control handshake to the engine's real wayland client, so the
+# arm is proven over the wire without a compositor (charter law #8). Dev-only:
+# a build of the library never links a Wayland server.
+wayland-server = { version = "0.31", default-features = false }
+wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["server"] }
 
 [build-dependencies]
 # The codegen half of the triad (capnpc 0.27.0 — pure-Rust schema compiler that

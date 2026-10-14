@@ -50,7 +50,7 @@ use crate::core::{Error, ErrorCode, Result};
 use crate::domains::service::backend::LifecycleVerb;
 use crate::domains::service::types::{ServiceStatus, SupervisionCapabilities, SupervisorIdentity};
 
-use super::{NativeDep, NativeObservation, NativeState, NativeSupervision};
+use super::{NativeDep, NativeObservation, NativeProcFacts, NativeState, NativeSupervision};
 
 /// The systemd manager identity, per the published interface.
 pub const SYSTEMD_DEST: &str = "org.freedesktop.systemd1";
@@ -331,6 +331,7 @@ impl SystemdBackend {
                 state: Some(state),
                 state_reason: String::new(),
                 dependencies: Vec::new(),
+                proc_facts: NativeProcFacts::default(),
             });
         }
         Ok(observations)
@@ -389,6 +390,7 @@ impl NativeSupervision for SystemdBackend {
                 state: None,
                 state_reason: reason,
                 dependencies: Vec::new(),
+                proc_facts: NativeProcFacts::default(),
             }]
         })
     }
@@ -443,7 +445,11 @@ impl NativeSupervision for SystemdBackend {
         let caps = SupervisionCapabilities {
             supervisor: "systemd".to_string(),
             can_enumerate: reachable,
+            // On systemd the bus IS the exact read (the manager's own
+            // Properties.Get against its own object path), so the two state
+            // capabilities stand or fall together, both measured here.
             can_read_state: reachable,
+            can_read_exact_state: reachable,
             // The control path's *permission* is polkit's decision, made per
             // call: the bus being reachable is what this backend can measure,
             // and every refused write reports the bus's own reason.

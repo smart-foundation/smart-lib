@@ -9,7 +9,7 @@
 //! | seat | transport | crate | provenance on this box |
 //! |---|---|---|---|
 //! | X11 | the ICCCM CLIPBOARD selection protocol — `GetSelectionOwner` → `ConvertSelection` → `SelectionNotify` → `GetProperty` (read); `SetSelectionOwner` + serve `SelectionRequest` (write) | [`x11rb`](https://docs.rs/x11rb) 0.13, a pure-Rust X11 protocol library | **live-proven here**: this box is an X11 session (`DISPLAY=:0`, socket `/tmp/.X11-unix/X0`) |
-//! | Wayland | the `zwlr_data_control` protocol through a real Wayland client connection (`wayland-client` + `wayland-protocols`) | `wayland-client`, `wayland-protocols-wlr` | **honest decision**: this box runs no Wayland compositor (no `wayland-*` socket, `WAYLAND_DISPLAY` empty), so the Wayland read/write is present behind feature `clipboard-wayland`, compiles and links against a real Wayland client, and cannot be live-proven here — see §"The Wayland arm" below |
+//! | Wayland | the `zwlr_data_control` protocol through a real Wayland client connection: the registry globals, the data-control device, the source/selection offers, the MIME-type offers and the fd-passing read | `wayland-client`, `wayland-protocols-wlr` | **protocol-proven here, live-proven on a compositor box**: this box runs no Wayland compositor (no `wayland-*` socket, `WAYLAND_DISPLAY` empty), so the arm is proven end-to-end against a scripted compositor — a real `wayland-server` peer in the tests — with the whole handshake over the real wire protocol, never deferred |
 
 //! ## Why `x11rb` and not `x11`/`x11-dl`/`xcb`
 //!
@@ -152,10 +152,10 @@ impl SelectionHost for NoSelectionHost {
 
     fn read(&self, _mime_type: &str) -> std::result::Result<SelectionRead, String> {
         Err("no-backend: this Linux backend has no connected native selection transport — on a \
-             headless host there is no seat at all, and on a Wayland seat the wlr-data-control \
-             read/write is a documented deferred arm this milestone does not ship (no compositor on \
-             the build box to prove it). The native X11 path is the one implemented and proven \
-             here; the archive body's wl-paste/xclip shellout is not a substitute"
+             headless host there is no seat at all. The two selection protocols this backend \
+             speaks are wlr-data-control over a real wayland-client connection (a Wayland seat) \
+             and the ICCCM selection protocol over x11rb (an X11 session); neither is reachable \
+             here, and the archive body's wl-paste/xclip shellout is not a substitute"
             .to_string())
     }
 
@@ -550,6 +550,489 @@ mod x11 {
 pub use x11::X11SelectionHost;
 
 // ═══════════════════════════════════════════════════════════════════════
+// The Wayland client — the wlr-data-control protocol, spoken natively.
+//
+// The arm the C1 wave left at the SelectionHost seam, now written to protocol
+// completeness: connect, the registry globals (wl_seat +
+// zwlr_data_control_manager_v1), the data-control device, the source and
+// selection offers, the mime-type offers and the fd-passing read — every one
+// of them over the real wire protocol through `wayland-client`, never a
+// wl-paste/xclip subprocess. It is proven against a scripted compositor (a
+// real wayland-server peer in the tests) because this box runs no compositor,
+// and the availability rows say exactly that: protocol-proven here,
+// live-proven on the first box with a compositor.
+// ═══════════════════════════════════════════════════════════════════════
+mod wayland {
+    // Edition-2021 `extern crate` is module-local; this nested std backend needs
+    // its own declaration so `std::` and `format!` resolve here (the crate root
+    // is no_std).
+    extern crate std;
+    use super::{now_nanos, SelectionHost, SelectionRead};
+    use alloc::format;
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+    use std::collections::HashMap;
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use wayland_client::delegate_noop;
+    use wayland_client::event_created_child;
+    use wayland_client::protocol::{wl_registry, wl_seat};
+    use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+    use wayland_protocols_wlr::data_control::v1::client::{
+        zwlr_data_control_device_v1, zwlr_data_control_manager_v1, zwlr_data_control_offer_v1,
+        zwlr_data_control_source_v1,
+    };
+    use zwlr_data_control_device_v1::ZwlrDataControlDeviceV1;
+    use zwlr_data_control_manager_v1::ZwlrDataControlManagerV1;
+    use zwlr_data_control_offer_v1::ZwlrDataControlOfferV1;
+    use zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
+
+    /// How long one fd-passing read waits for the seat to serve it. A slow
+    /// owner cannot hang the shell.
+    const READ_TIMEOUT_MS: u64 = 2_000;
+    /// A conservative byte ceiling for one selection read, so a payload that
+    /// never says EOF cannot be grown without bound.
+    const MAX_READ_BYTES: usize = 64 * 1024 * 1024;
+
+    /// The dispatch state: what the seat has told us, plus what this client
+    /// serves while it owns the selection.
+    #[derive(Default)]
+    struct SeatState {
+        /// The data-control manager global, once the registry advertised it.
+        manager: Option<ZwlrDataControlManagerV1>,
+        /// The seat global, once the registry advertised it.
+        seat: Option<wl_seat::WlSeat>,
+        /// This client's data-control device (the clipboard surface).
+        device: Option<ZwlrDataControlDeviceV1>,
+        /// The MIME types each live offer advertised, keyed by the offer's own
+        /// protocol id (pruned to the selection and primary selection, so a
+        /// long-lived seat cannot grow this without bound).
+        offer_mimes: HashMap<u32, Vec<String>>,
+        /// The current selection's offer — the fd-passing read target.
+        selection: Option<ZwlrDataControlOfferV1>,
+        /// The primary selection's offer, when the protocol version carries it.
+        primary_selection: Option<ZwlrDataControlOfferV1>,
+        /// What this client serves while it owns the selection (mime → bytes).
+        served: Vec<(String, Vec<u8>)>,
+        /// The source this client owns the selection with. Destroying the
+        /// proxy destroys the protocol object, so it is kept here.
+        source: Option<ZwlrDataControlSourceV1>,
+        /// The compositor revoked this device (the seat went away).
+        finished: bool,
+    }
+
+    impl SeatState {
+        /// The MIME types one offer advertised, as the compositor sent them.
+        fn targets_of(&self, offer: Option<&ZwlrDataControlOfferV1>) -> Vec<String> {
+            offer
+                .and_then(|o| self.offer_mimes.get(&o.id().protocol_id()).cloned())
+                .unwrap_or_default()
+        }
+
+        /// Create the data-control device once both globals it needs are bound
+        /// (the registry advertises them in either order).
+        fn ensure_device(&mut self, qh: &QueueHandle<Self>) {
+            if self.device.is_some() {
+                return;
+            }
+            let (Some(manager), Some(seat)) = (self.manager.clone(), self.seat.clone()) else {
+                return;
+            };
+            self.device = Some(manager.get_data_device(&seat, qh, ()));
+        }
+    }
+
+    // ── The protocol events this arm reads ─────────────────────────────────
+
+    impl Dispatch<wl_registry::WlRegistry, ()> for SeatState {
+        fn event(
+            state: &mut Self,
+            registry: &wl_registry::WlRegistry,
+            event: wl_registry::Event,
+            _: &(),
+            _: &Connection,
+            qh: &QueueHandle<Self>,
+        ) {
+            // The registry is the protocol's own discovery: every global this
+            // arm needs is bound from it, at the version the seat advertises
+            // (capped at the protocol version this code speaks).
+            if let wl_registry::Event::Global { name, interface, version } = event {
+                match interface.as_str() {
+                    "wl_seat" => {
+                        // This arm needs the seat only to address the
+                        // data-control device, so version 1 is bound — a lower
+                        // bind is always legal and needs no seat capabilities.
+                        state.seat = Some(registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ()));
+                        state.ensure_device(qh);
+                    }
+                    "zwlr_data_control_manager_v1" => {
+                        state.manager = Some(registry.bind::<ZwlrDataControlManagerV1, _, _>(
+                            name,
+                            version.min(2),
+                            qh,
+                            (),
+                        ));
+                        state.ensure_device(qh);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    impl Dispatch<ZwlrDataControlDeviceV1, ()> for SeatState {
+        fn event(
+            state: &mut Self,
+            _proxy: &ZwlrDataControlDeviceV1,
+            event: zwlr_data_control_device_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            match event {
+                // A new offer arrives; its MIME types follow as `offer` events
+                // on the offer itself, then the selection event names it.
+                zwlr_data_control_device_v1::Event::DataOffer { id } => {
+                    state.offer_mimes.insert(id.id().protocol_id(), Vec::new());
+                }
+                zwlr_data_control_device_v1::Event::Selection { id } => {
+                    // The previous selection's offer is dead: prune to what is
+                    // still live so a long session cannot grow the map.
+                    let keep: Vec<u32> = [
+                        id.as_ref().map(|o| o.id().protocol_id()),
+                        state.primary_selection.as_ref().map(|o| o.id().protocol_id()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    state.offer_mimes.retain(|k, _| keep.contains(k));
+                    state.selection = id;
+                }
+                zwlr_data_control_device_v1::Event::PrimarySelection { id } => {
+                    state.primary_selection = id;
+                }
+                zwlr_data_control_device_v1::Event::Finished => {
+                    state.finished = true;
+                }
+                _ => {}
+            }
+        }
+
+        // The `data_offer` event creates the offer object: this is the
+        // protocol's own child-creation hook, with the offer's user data.
+        event_created_child!(
+            SeatState,
+            ZwlrDataControlDeviceV1,
+            [zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ZwlrDataControlOfferV1, ())]
+        );
+    }
+
+    impl Dispatch<ZwlrDataControlOfferV1, ()> for SeatState {
+        fn event(
+            state: &mut Self,
+            proxy: &ZwlrDataControlOfferV1,
+            event: zwlr_data_control_offer_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            // Sent immediately after the offer is created: one per offered
+            // MIME type, in the seat's own words.
+            if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
+                state
+                    .offer_mimes
+                    .entry(proxy.id().protocol_id())
+                    .or_default()
+                    .push(mime_type);
+            }
+        }
+    }
+
+    impl Dispatch<ZwlrDataControlSourceV1, ()> for SeatState {
+        fn event(
+            state: &mut Self,
+            _proxy: &ZwlrDataControlSourceV1,
+            event: zwlr_data_control_source_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            match event {
+                // A peer asked for our data: write the offered representation
+                // into the seat's fd, then close it (closing is the seat's
+                // end-of-transfer signal).
+                zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
+                    let payload = state
+                        .served
+                        .iter()
+                        .find(|(mime, _)| *mime == mime_type)
+                        .map(|(_, data)| data.clone());
+                    if let Some(bytes) = payload {
+                        let mut file = std::fs::File::from(fd);
+                        let _ = file.write_all(&bytes);
+                    }
+                }
+                // Another client took the selection: our offer no longer
+                // serves anyone.
+                zwlr_data_control_source_v1::Event::Cancelled => {
+                    state.served.clear();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // No events arrive on the seat or the manager that this arm acts on; the
+    // seat's capabilities/name events are not selection state.
+    delegate_noop!(SeatState: ignore wl_seat::WlSeat);
+    delegate_noop!(SeatState: ignore ZwlrDataControlManagerV1);
+
+    /// The live Wayland selection seam: a real Wayland client speaking
+    /// `zwlr_data_control_unstable_v1`.
+    pub struct WaylandSelectionHost {
+        conn: Connection,
+        /// The event queue and the state it dispatches into, each behind one
+        /// mutex so the trait's `&self` methods can drive the connection.
+        queue: Mutex<wayland_client::EventQueue<SeatState>>,
+        state: Mutex<SeatState>,
+        manager: ZwlrDataControlManagerV1,
+        device: ZwlrDataControlDeviceV1,
+    }
+
+    impl WaylandSelectionHost {
+        /// The real seat: connect through the environment (`WAYLAND_DISPLAY`,
+        /// which may be an absolute socket path).
+        pub fn connect() -> Result<Self, String> {
+            let conn = Connection::connect_to_env()
+                .map_err(|e| format!("cannot reach the Wayland compositor: {e:?}"))?;
+            Self::from_connection(conn)
+        }
+
+        /// A seat at an explicit socket: the scripted compositor in the tests
+        /// binds one and this connects to it, so the whole arm is proven over
+        /// the wire with no compositor on the host.
+        pub fn connect_socket(stream: UnixStream) -> Result<Self, String> {
+            let conn = Connection::from_socket(stream)
+                .map_err(|e| format!("cannot speak the Wayland protocol over the seat socket: {e:?}"))?;
+            Self::from_connection(conn)
+        }
+
+        /// Bind the registry's globals and create the data-control device.
+        fn from_connection(conn: Connection) -> Result<Self, String> {
+            let mut queue = conn.new_event_queue::<SeatState>();
+            let qh = queue.handle();
+            let _registry = conn.display().get_registry(&qh, ());
+            let mut state = SeatState::default();
+            // Two roundtrips: the globals arrive first, and the compositor
+            // answers `get_data_device` with the current selection next.
+            for _ in 0..2 {
+                queue
+                    .roundtrip(&mut state)
+                    .map_err(|e| format!("the seat connection failed during setup: {e:?}"))?;
+            }
+            let Some(manager) = state.manager.clone() else {
+                return Err(
+                    "no-backend: this Wayland compositor advertises no \
+                     zwlr_data_control_manager_v1 global, so the clipboard selection cannot be read or \
+                     written over the data-control protocol — this backend speaks the selection \
+                     protocol itself and never the archive body's wl-paste/xclip subprocess shellout"
+                        .to_string(),
+                );
+            };
+            let Some(device) = state.device.clone() else {
+                return Err(
+                    "no-backend: this Wayland compositor advertises no wl_seat global, so no \
+                     data-control device can be created and the clipboard selection cannot be reached"
+                        .to_string(),
+                );
+            };
+            if state.finished {
+                return Err(
+                    "no-backend: the compositor finished the data-control device during setup, so \
+                     the clipboard selection is not reachable on this seat"
+                        .to_string(),
+                );
+            }
+            Ok(WaylandSelectionHost {
+                conn,
+                queue: Mutex::new(queue),
+                state: Mutex::new(state),
+                manager,
+                device,
+            })
+        }
+
+        /// Drive the connection, in one of two shapes:
+        ///
+        /// - `roundtrip` — the protocol's own guarantee that the seat has
+        ///   processed every request this client sent (used after the claim
+        ///   and the relinquish, whose effect must be real before we answer).
+        /// - otherwise — take the events the seat has already sent, without
+        ///   blocking: a prepared read that finds nothing waiting is a fine
+        ///   answer (an idle seat) rather than a hang.
+        ///
+        /// The two locks are always taken in this order, and never held across
+        /// a blocking read.
+        fn serve(&self, roundtrip: bool) {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            if roundtrip {
+                let _ = queue.roundtrip(&mut state);
+            } else {
+                if let Some(guard) = queue.prepare_read() {
+                    match guard.read() {
+                        Ok(_) => {}
+                        // An idle seat answers WouldBlock — a fine answer, not
+                        // a fault. Anything else means the seat is gone, which
+                        // the next read reports through the measured flag.
+                        Err(wayland_client::backend::WaylandError::Io(e))
+                            if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => state.finished = true,
+                    }
+                }
+                let _ = queue.dispatch_pending(&mut state);
+            }
+            let _ = self.conn.flush();
+        }
+
+        /// The fd-passing read: ask the seat's offer for one MIME type over
+        /// the write end of a channel we own, then read the channel until the
+        /// seat closes it. This process's own selection service is driven
+        /// while we wait, so a seat that asks US for the data (we just claimed
+        /// it) still completes.
+        fn read_offer(&self, offer: &ZwlrDataControlOfferV1, mime_type: &str) -> Result<SelectionRead, String> {
+            let (mut ours, theirs) = UnixStream::pair()
+                .map_err(|e| format!("cannot create the fd-passing read channel: {e}"))?;
+            offer.receive(mime_type.to_string(), AsFd::as_fd(&theirs));
+            // Dropping our end after the request is the transfer's shape: the
+            // seat writes the payload and closes its end, which is our EOF.
+            drop(theirs);
+            let _ = self.conn.flush();
+            let _ = ours.set_read_timeout(Some(Duration::from_millis(50)));
+            let deadline = Instant::now() + Duration::from_millis(READ_TIMEOUT_MS);
+            let mut out: Vec<u8> = Vec::new();
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                match ours.read(&mut buf) {
+                    Ok(0) => return Ok(SelectionRead::Data(out)),
+                    Ok(n) => {
+                        out.extend_from_slice(&buf[..n]);
+                        if out.len() >= MAX_READ_BYTES {
+                            return Err(format!(
+                                "limitExceeded: the selection payload exceeds the {MAX_READ_BYTES}-byte \
+                                 in-message bound; refusing to grow without a stated limit"
+                            ));
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        // The seat is still serving (possibly by asking us):
+                        // dispatch our own events so the transfer can finish.
+                        self.serve(false);
+                        if Instant::now() >= deadline {
+                            return Err(format!(
+                                "limitExceeded: the selection owner did not answer the fd-passing \
+                                 read within {READ_TIMEOUT_MS}ms"
+                            ));
+                        }
+                    }
+                    Err(e) => return Err(format!("the fd-passing read failed: {e}")),
+                }
+            }
+        }
+    }
+
+    impl SelectionHost for WaylandSelectionHost {
+        fn now_nanos(&self) -> u64 {
+            now_nanos()
+        }
+
+        fn targets(&self) -> Vec<String> {
+            self.serve(false);
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.targets_of(state.selection.as_ref())
+        }
+
+        fn read(&self, mime_type: &str) -> std::result::Result<SelectionRead, String> {
+            // Take the seat's queued events first: the selection it announced
+            // since our last dispatch is the one we answer about.
+            self.serve(false);
+            let (offer, targets) = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.finished {
+                    return Err(
+                        "no-backend: the compositor finished this data-control device, so the \
+                         clipboard selection is no longer reachable on this seat"
+                            .to_string(),
+                    );
+                }
+                match state.selection.clone() {
+                    // No owner: the clipboard is empty — a first-class answer.
+                    None => return Ok(SelectionRead::Empty),
+                    Some(offer) => (offer.clone(), state.targets_of(Some(&offer))),
+                }
+            };
+            if !targets.iter().any(|m| m == mime_type) {
+                return Ok(SelectionRead::NotOffered(format!(
+                    "the current selection owner does not offer {mime_type}"
+                )));
+            }
+            self.read_offer(&offer, mime_type)
+        }
+
+        fn claim(&self, offers: Vec<(String, Vec<u8>)>) -> std::result::Result<(), String> {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let qh = queue.handle();
+            // Each claim starts a fresh source: offering after set_selection is
+            // a protocol error, so the previous source is destroyed first.
+            if let Some(previous) = state.source.take() {
+                previous.destroy();
+            }
+            let source = self.manager.create_data_source(&qh, ());
+            for (mime, _) in &offers {
+                source.offer(mime.clone());
+            }
+            state.served = offers.clone();
+            self.device.set_selection(Some(&source));
+            state.source = Some(source);
+            drop((state, queue));
+            // A roundtrip is the protocol's own guarantee that the seat has
+            // processed the claim (and it surfaces an immediate cancellation),
+            // so a peer's next read is served by a live selection.
+            self.serve(true);
+            Ok(())
+        }
+
+        fn relinquish(&self) -> std::result::Result<(), String> {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            self.device.set_selection(None);
+            if let Some(source) = state.source.take() {
+                source.destroy();
+            }
+            state.served.clear();
+            drop(state);
+            self.serve(true);
+            Ok(())
+        }
+
+        fn serve_pending(&self) {
+            self.serve(false);
+        }
+    }
+}
+
+/// The live Wayland selection seam, re-exported so the backend builder can
+/// name it.
+pub use wayland::WaylandSelectionHost;
+
+// ═══════════════════════════════════════════════════════════════════════
 // The Linux clipboard backend — the clipboard domain's host implementation.
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -644,31 +1127,51 @@ impl LinuxClipboardBackend {
         LinuxClipboardBackend::with_host(Box::new(NoSelectionHost), "none", false, false)
     }
 
-    /// Connect to `$DISPLAY` and build the live native backend. The native path
-    /// this milestone ships AND proves is X11 (this build box is an X11 session
-    /// with a live X server). On a **Wayland-only** seat the honest decision is
-    /// surfaced here rather than faked: the wlr-data-control read/write is a
-    /// documented deferred arm — there is no compositor on this box to
-    /// live-prove it — so the error names it, and the caller answers honestly
-    /// instead of pretending an X11 clip the Wayland box does not have.
+    /// Connect to the seat this session actually runs on and build the live
+    /// native backend. The transport is decided **per session, by
+    /// measurement** (law #11: no compile-time platform fiction): a Wayland
+    /// seat speaks `zwlr_data_control` through the real client below, an X11
+    /// session speaks the ICCCM selection protocol through `x11rb`, and a box
+    /// with both (XWayland) prefers the native Wayland seat and falls back to
+    /// X11 only when the seat does not advertise the data-control manager.
     pub fn native_connect() -> Result<Self> {
         let display = std::env::var_os("DISPLAY").is_some();
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-        if !display && wayland {
-            return Err(Error::unavailable(
-                "no-backend: a Wayland seat is present, but this milestone ships and live-proves \
-                 the native X11 selection path (x11rb, on this build box's X session). The Wayland \
-                 wlr-data-control read/write arm is a documented DECISION not to ship code that \
-                 cannot be proven on a box with no compositor (charter law #8 + the C1 lesson: no \
-                 untested wire protocol). It is faked nowhere; it is simply not built here.",
+        if wayland {
+            match WaylandSelectionHost::connect() {
+                Ok(host) => {
+                    return Ok(LinuxClipboardBackend::with_host(
+                        Box::new(host),
+                        "wayland",
+                        true,
+                        true,
+                    ));
+                }
+                Err(reason) => {
+                    // A Wayland seat without the data-control manager: the
+                    // honest answer names it — unless an X server is present
+                    // too (XWayland), whose selection protocol then serves.
+                    if !display {
+                        return Err(Error::unavailable(reason));
+                    }
+                }
+            }
+        }
+        if display {
+            let host = X11SelectionHost::connect().map_err(Error::unavailable)?;
+            return Ok(LinuxClipboardBackend::with_host(
+                Box::new(host),
+                "x11",
+                true,
+                true,
             ));
         }
-        let host = X11SelectionHost::connect().map_err(Error::unavailable)?;
-        Ok(LinuxClipboardBackend::with_host(
-            Box::new(host),
-            "x11",
-            true,
-            true,
+        Err(Error::unavailable(
+            "no-backend: this host has no native selection transport — no Wayland seat \
+             (WAYLAND_DISPLAY is unset) and no X display (DISPLAY is unset). The two protocols this \
+             backend speaks are wlr-data-control (over a real wayland-client connection) and X11's \
+             ICCCM selection protocol (over x11rb); the archive body's wl-paste/xclip subprocess \
+             shellout is not a substitute and is not used",
         ))
     }
 
@@ -1456,5 +1959,531 @@ mod tests {
             Ok(ContentOutcome::Empty) => std::eprintln!("live clipboard: empty (no selection owner)"),
             Err(e) => std::eprintln!("live clipboard read: {e}"),
         }
+    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // The Wayland arm's seat test: a SCRIPTED COMPOSITOR that is a real
+    // wayland-server, so the engine's real wayland client speaks the entire
+    // wlr-data-control handshake to it over a real Unix socket — the registry
+    // global, the source set, the selection event, the MIME-type offers and
+    // the fd-passing read. This box runs no compositor (charter law #8), so
+    // this is how the arm is proven: over the wire, with no host seat.
+    // ═══════════════════════════════════════════════════════════════════════
+    mod wayland_seat {
+        use super::*;
+        use crate::core::ErrorCode;
+        use std::collections::HashMap;
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::AsFd as _;
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use wayland_protocols_wlr::data_control::v1::server::{
+            zwlr_data_control_device_v1, zwlr_data_control_manager_v1, zwlr_data_control_offer_v1,
+            zwlr_data_control_source_v1,
+        };
+        use wayland_server::protocol::wl_seat;
+        use wayland_server::{
+            backend::ClientData, Dispatch, Display, DisplayHandle, GlobalDispatch, ListeningSocket,
+            New,
+        };
+        use zwlr_data_control_device_v1::ZwlrDataControlDeviceV1 as Device;
+        use zwlr_data_control_manager_v1::ZwlrDataControlManagerV1 as Manager;
+        use zwlr_data_control_offer_v1::ZwlrDataControlOfferV1 as Offer;
+        use zwlr_data_control_source_v1::ZwlrDataControlSourceV1 as Source;
+
+        /// The scripted compositor's clipboard state, plus every request the
+        /// client sent in the protocol's own words, so the handshake itself is
+        /// asserted and not assumed.
+        #[derive(Default)]
+        struct Seat {
+            /// The selection this seat serves (mime → payload), when it has an
+            /// owner at all.
+            content: HashMap<String, Vec<u8>>,
+            owner: bool,
+            /// Every request the client sent, in order.
+            log: Vec<String>,
+            client: Option<wayland_server::Client>,
+            device: Option<Device>,
+            source: Option<Source>,
+        }
+
+        impl Seat {
+            /// The seat's own half of the handshake: data_offer, one offer per
+            /// MIME type, then the selection event naming the offer.
+            fn announce_selection(&mut self, dh: &DisplayHandle, mimes: &[&str]) {
+                let (Some(client), Some(device)) = (self.client.clone(), self.device.clone()) else {
+                    panic!("the seat has no device to announce a selection on");
+                };
+                let offer = client
+                    .create_resource::<Offer, (), Seat>(dh, 1, ())
+                    .unwrap_or_else(|e| panic!("the scripted seat cannot create the offer: {e:?}"));
+                device.data_offer(&offer);
+                for mime in mimes {
+                    offer.offer((*mime).to_string());
+                }
+                if self.owner {
+                    device.selection(Some(&offer));
+                } else {
+                    device.selection(None);
+                }
+            }
+
+        }
+
+        // ── The peer's request handling: the protocol's own requests ────────
+
+        impl Dispatch<Manager, ()> for Seat {
+            fn request(
+                state: &mut Self,
+                client: &wayland_server::Client,
+                _resource: &Manager,
+                request: zwlr_data_control_manager_v1::Request,
+                _data: &(),
+                _dhandle: &DisplayHandle,
+                data_init: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                if state.client.is_none() {
+                    state.client = Some(client.clone());
+                }
+                match request {
+                    zwlr_data_control_manager_v1::Request::CreateDataSource { id } => {
+                        state.log.push("create_data_source".to_string());
+                        state.source = Some(data_init.init(id, ()));
+                    }
+                    zwlr_data_control_manager_v1::Request::GetDataDevice { id, seat: _ } => {
+                        state.log.push("get_data_device".to_string());
+                        state.device = Some(data_init.init(id, ()));
+                    }
+                    zwlr_data_control_manager_v1::Request::Destroy => {}
+                    _ => {}
+                }
+            }
+        }
+
+        impl Dispatch<Device, ()> for Seat {
+            fn request(
+                state: &mut Self,
+                client: &wayland_server::Client,
+                _resource: &Device,
+                request: zwlr_data_control_device_v1::Request,
+                _data: &(),
+                _dhandle: &DisplayHandle,
+                _data_init: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                if state.client.is_none() {
+                    state.client = Some(client.clone());
+                }
+                match request {
+                    zwlr_data_control_device_v1::Request::SetSelection { source } => {
+                        state
+                            .log
+                            .push(if source.is_some() { "set_selection(source)" } else { "set_selection(none)" }.to_string());
+                        if source.is_none() {
+                            state.source = None;
+                        }
+                    }
+                    zwlr_data_control_device_v1::Request::SetPrimarySelection { source } => {
+                        state
+                            .log
+                            .push(format!("set_primary_selection({})", source.is_some()));
+                    }
+                    zwlr_data_control_device_v1::Request::Destroy => {}
+                    _ => {}
+                }
+            }
+        }
+
+        impl Dispatch<Source, ()> for Seat {
+            fn request(
+                state: &mut Self,
+                _client: &wayland_server::Client,
+                _resource: &Source,
+                request: zwlr_data_control_source_v1::Request,
+                _data: &(),
+                _dhandle: &DisplayHandle,
+                _data_init: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                match request {
+                    zwlr_data_control_source_v1::Request::Offer { mime_type } => {
+                        state.log.push(format!("source offer {mime_type}"));
+                    }
+                    zwlr_data_control_source_v1::Request::Destroy => {}
+                    _ => {}
+                }
+            }
+        }
+
+        impl Dispatch<Offer, ()> for Seat {
+            fn request(
+                state: &mut Self,
+                _client: &wayland_server::Client,
+                _resource: &Offer,
+                request: zwlr_data_control_offer_v1::Request,
+                _data: &(),
+                _dhandle: &DisplayHandle,
+                _data_init: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                match request {
+                    // The fd-passing read: write the served representation
+                    // into the seat's fd and close it (the transfer's end).
+                    zwlr_data_control_offer_v1::Request::Receive { mime_type, fd } => {
+                        state.log.push(format!("receive {mime_type}"));
+                        use std::io::Write as _;
+                        let payload = state.content.get(&mime_type).cloned().unwrap_or_default();
+                        let mut file = std::fs::File::from(fd);
+                        let _ = file.write_all(&payload);
+                    }
+                    zwlr_data_control_offer_v1::Request::Destroy => {}
+                    _ => {}
+                }
+            }
+        }
+
+        impl Dispatch<wl_seat::WlSeat, ()> for Seat {
+            fn request(
+                _state: &mut Self,
+                _client: &wayland_server::Client,
+                _resource: &wl_seat::WlSeat,
+                _request: wl_seat::Request,
+                _data: &(),
+                _dhandle: &DisplayHandle,
+                _data_init: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+            }
+        }
+
+        // Binding a global creates the client-side object: the bind callback
+        // must initialize it (the protocol's own requirement), and the seat
+        // records its client so it can send events to it later.
+        impl GlobalDispatch<Manager, ()> for Seat {
+            fn bind(
+                _state: &mut Self,
+                _handle: &DisplayHandle,
+                _client: &wayland_server::Client,
+                resource: New<Manager>,
+                _global_data: &(),
+                data_init: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                data_init.init(resource, ());
+            }
+        }
+
+        impl GlobalDispatch<wl_seat::WlSeat, ()> for Seat {
+            fn bind(
+                _state: &mut Self,
+                _handle: &DisplayHandle,
+                _client: &wayland_server::Client,
+                resource: New<wl_seat::WlSeat>,
+                _global_data: &(),
+                data_init: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                data_init.init(resource, ());
+            }
+        }
+
+        struct SeatClient;
+        impl ClientData for SeatClient {}
+
+        /// A running scripted seat: its socket, its display and state, and a
+        /// pump thread that keeps both sides of the wire moving while the test
+        /// drives the client.
+        struct RunningSeat {
+            display: Arc<Mutex<Display<Seat>>>,
+            seat: Arc<Mutex<Seat>>,
+            stop: Arc<AtomicBool>,
+            pump: std::thread::JoinHandle<()>,
+        }
+
+        impl RunningSeat {
+            /// Start the seat, advertising the globals named (the full seat
+            /// advertises both; a seat with no data-control manager is the
+            /// honest-negative case the arm must name rather than fake).
+            fn start(root: &std::path::Path, globals: &[&str]) -> (RunningSeat, String) {
+                let mut display = Display::<Seat>::new().expect("the scripted seat starts");
+                let mut handle = display.handle();
+                for global in globals {
+                    match *global {
+                        "zwlr_data_control_manager_v1" => {
+                            handle.create_global::<Seat, Manager, ()>(2, ());
+                        }
+                        "wl_seat" => {
+                            handle.create_global::<Seat, wl_seat::WlSeat, ()>(1, ());
+                        }
+                        other => panic!("the scripted seat cannot advertise {other}"),
+                    }
+                }
+                let socket =
+                    ListeningSocket::bind_absolute(root.join("wayland-test")).expect("the seat binds");
+                let display = Arc::new(Mutex::new(display));
+                let seat = Arc::new(Mutex::new(Seat::default()));
+                let stop = Arc::new(AtomicBool::new(false));
+                let pump = {
+                    let display = display.clone();
+                    let seat = seat.clone();
+                    let stop = stop.clone();
+                    std::thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(20);
+                        while !stop.load(AtomicOrdering::Relaxed) && Instant::now() < deadline {
+                            if let Ok(Some(stream)) = socket.accept() {
+                                let mut d = display.lock().unwrap();
+                                if let Err(e) = d.handle().insert_client(stream, Arc::new(SeatClient)) {
+                                    std::eprintln!("PUMP insert_client failed: {e}");
+                                } else {
+                                    std::eprintln!("PUMP inserted client");
+                                }
+                            }
+                            let mut s = seat.lock().unwrap();
+                            let mut d = display.lock().unwrap();
+                            let _ = d.dispatch_clients(&mut s);
+                            let _ = d.flush_clients();
+                            drop((s, d));
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    })
+                };
+                (
+                    RunningSeat { display, seat, stop, pump },
+                    root.join("wayland-test").to_string_lossy().into_owned(),
+                )
+            }
+
+            /// The seat's own announcement, driven from the test.
+            fn announce(&self, mimes: &[&str]) {
+                let handle = self.display.lock().unwrap().handle();
+                let mut seat = self.seat.lock().unwrap();
+                seat.announce_selection(&handle, mimes);
+            }
+
+            fn log(&self) -> Vec<String> {
+                self.seat.lock().unwrap().log.clone()
+            }
+
+            fn source(&self) -> Option<()> {
+                self.seat.lock().unwrap().source.as_ref().map(|_| ())
+            }
+
+            /// A peer asks this seat's owner (our client, after it claimed the
+            /// selection) for data: the seat forwards an fd and the source's
+            /// `send` event to the owner, exactly as a compositor does. The
+            /// source is cloned under the lock and the lock released BEFORE the
+            /// transfer waits — the pump thread that flushes this event needs
+            /// the same lock, and holding it across the transfer would stall
+            /// the very dispatch that serves it.
+            fn ask_owner_for(&self, mime: &str, pump: &dyn Fn()) -> Vec<u8> {
+                let source = self
+                    .seat
+                    .lock()
+                    .unwrap()
+                    .source
+                    .clone()
+                    .expect("the client owns a selection");
+                let (mut ours, theirs) = UnixStream::pair().expect("the reader's channel");
+                source.send(mime.to_string(), std::os::fd::AsFd::as_fd(&theirs));
+                drop(theirs);
+                let mut out = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let _ = ours.set_read_timeout(Some(Duration::from_millis(25)));
+                let mut buf = [0u8; 4096];
+                loop {
+                    match ours.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => out.extend_from_slice(&buf[..n]),
+                        Err(_) => {
+                            // The owner serves the request from its own
+                            // dispatch: keep it moving while we wait.
+                            pump();
+                            if Instant::now() >= deadline {
+                                break;
+                            }
+                        }
+                    }
+                }
+                out
+            }
+        }
+
+        impl Drop for RunningSeat {
+            fn drop(&mut self) {
+                self.stop.store(true, AtomicOrdering::Relaxed);
+                // The pump thread ends on its own deadline or the stop flag;
+                // detach it rather than joining a moved handle.
+            }
+        }
+
+        fn temp_root(tag: &str) -> std::path::PathBuf {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, AtomicOrdering::Relaxed);
+            std::env::temp_dir().join(format!("smart-wl-{tag}-{}-{n}", std::process::id()))
+        }
+
+        /// The Wayland arm, protocol-complete: the registry global, the
+        /// device, the selection's MIME offers, the fd-passing read, the set
+        /// path and its source serving, and the relinquish.
+        #[test]
+        fn the_wayland_seat_is_protocol_proven_end_to_end() {
+            let root = temp_root("seat");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let (seat, socket_path) = RunningSeat::start(&root, &["zwlr_data_control_manager_v1", "wl_seat"]);
+
+            // The engine's real client, over the scripted seat's socket.
+            let stream = UnixStream::connect(&socket_path).expect("connect to the seat socket");
+            let host = WaylandSelectionHost::connect_socket(stream)
+                .expect("the seat handshake completes");
+
+            // The seat serves a selection: two MIME types.
+            {
+                let mut s = seat.seat.lock().unwrap();
+                s.owner = true;
+                s.content.insert("text/plain".to_string(), b"hello from the scripted seat".to_vec());
+                s.content.insert("image/png".to_string(), vec![0x89, b'P', 0x4E, 0x47]);
+            }
+            // Let the client's device creation reach the seat first.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !seat.log().iter().any(|l| l == "get_data_device") && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            seat.announce(&["text/plain", "image/png"]);
+
+            // The registry global bound, the device created, the selection's
+            // MIME-type offers read back through the client's own dispatch.
+            // (The seat's announcement is asynchronous, so the client is given
+            // a bounded moment to receive it — the shape a live seat has.)
+            let mut targets = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                targets = host.targets();
+                if !targets.is_empty() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                targets,
+                vec!["text/plain".to_string(), "image/png".to_string()],
+                "the seat's offers are the client's targets"
+            );
+            assert!(
+                seat.log().iter().any(|l| l == "get_data_device"),
+                "the device was created over the wire: {:?}",
+                seat.log()
+            );
+
+            // The fd-passing read: the client asks the seat's offer for one
+            // MIME type and the payload crosses the fd.
+            match host.read("text/plain").expect("the read speaks the protocol") {
+                SelectionRead::Data(bytes) => {
+                    assert_eq!(bytes, b"hello from the scripted seat");
+                }
+                other => panic!("expected the payload, got {other:?}"),
+            }
+            assert!(
+                seat.log().iter().any(|l| l == "receive text/plain"),
+                "the seat saw the fd-passing read: {:?}",
+                seat.log()
+            );
+            match host.read("image/png").expect("the second read") {
+                SelectionRead::Data(bytes) => assert_eq!(bytes, vec![0x89, b'P', 0x4E, 0x47]),
+                other => panic!("expected the payload, got {other:?}"),
+            }
+
+            // A MIME type the owner does not offer is a first-class answer.
+            match host.read("application/json").expect("the read answers") {
+                SelectionRead::NotOffered(reason) => {
+                    assert!(reason.contains("application/json"), "{reason}");
+                }
+                other => panic!("expected not-offered, got {other:?}"),
+            }
+
+            // The set path: the client becomes the owner over the protocol —
+            // a fresh source, its MIME offers, and the selection set.
+            host.claim(alloc::vec![
+                ("text/plain".to_string(), b"written by the client".to_vec()),
+                ("image/png".to_string(), vec![0x89, b'P', 0x4E, 0x47, 0x0D]),
+            ])
+            .expect("the claim speaks the protocol");
+            let log = seat.log();
+            assert!(log.iter().any(|l| l == "create_data_source"), "{log:?}");
+            assert!(log.iter().any(|l| l == "source offer text/plain"), "{log:?}");
+            assert!(log.iter().any(|l| l == "source offer image/png"), "{log:?}");
+            assert!(log.iter().any(|l| l == "set_selection(source)"), "{log:?}");
+            assert!(seat.source().is_some(), "the seat holds the client's source");
+
+            // The source serves a reader: the seat asks the owner, and the
+            // payload crosses the fd in the other direction.
+            let served = seat.ask_owner_for("text/plain", &|| host.serve_pending());
+            assert_eq!(
+                served, b"written by the client",
+                "the client serves its own selection over the seat's fd"
+            );
+
+            // The relinquish disowns the selection over the protocol.
+            host.relinquish().expect("the relinquish speaks the protocol");
+            assert!(
+                seat.log().iter().any(|l| l == "set_selection(none)"),
+                "{:?}",
+                seat.log()
+            );
+
+            // And the seat can take the selection away, which the client sees.
+            {
+                let mut s = seat.seat.lock().unwrap();
+                s.owner = false;
+                s.content.clear();
+            }
+            seat.announce(&[]);
+            let mut cleared = false;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if host.targets().is_empty() {
+                    cleared = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(cleared, "no owner, no targets");
+            match host.read("text/plain").expect("the read answers") {
+                SelectionRead::Empty => {}
+                other => panic!("expected the honest empty, got {other:?}"),
+            }
+
+            // The backend over this seat publishes the real transport.
+            let backend = LinuxClipboardBackend::with_host(
+                Box::new(host),
+                "wayland",
+                true,
+                true,
+            );
+            assert_eq!(backend.clipboard_caps(), ("wayland".to_string(), true, true));
+            drop(backend);
+        }
+
+        /// The engine's own decision when a Wayland seat speaks no data-control
+        /// manager: the honest answer names the protocol that is missing, and
+        /// the shell then answers with the seat-less backend rather than a fake.
+        #[test]
+        fn a_seat_without_the_data_control_manager_answers_with_the_protocol_reason() {
+            let root = temp_root("no-manager");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            // A real seat that speaks the protocol but advertises no
+            // data-control manager: the client's registry roundtrip completes
+            // and finds nothing to bind, and the arm answers with the protocol
+            // that is missing — never a fake selection.
+            let (seat, socket_path) = RunningSeat::start(&root, &["wl_seat"]);
+            let stream = UnixStream::connect(&socket_path).expect("connect to the seat socket");
+            let err = match WaylandSelectionHost::connect_socket(stream) {
+                Ok(_) => panic!("a seat without the manager is not a selection seat"),
+                Err(reason) => reason,
+            };
+            assert!(err.contains("zwlr_data_control_manager_v1"), "{err}");
+            assert!(err.starts_with("no-backend:"), "{err}");
+            drop(seat);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        use alloc::vec;
     }
 }

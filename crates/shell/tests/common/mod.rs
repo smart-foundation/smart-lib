@@ -548,6 +548,9 @@ impl smart_lib::domains::service::ServiceBackend for MockService {
             supervisor: self.supervisor.borrow().supervisor.clone(),
             can_enumerate: true,
             can_read_state: self.can_read_state.get(),
+            // The mock serves the supervisor's own words directly, so the
+            // exact half stands with the state read.
+            can_read_exact_state: self.can_read_state.get(),
             can_control: self.can_control.get(),
         }
     }

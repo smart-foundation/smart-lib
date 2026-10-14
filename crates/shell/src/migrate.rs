@@ -78,7 +78,7 @@ pub const QUEUE: &[Domain] = &[
         order: None,
         archive:
             "engine: native X11 CLIPBOARD selection over x11rb (live-proven) + wlr-data-control on Wayland — no wl-paste/xclip shellout",
-        count: "native · 8 REAL / 9 DEGRADED",
+        count: "native · 8 REAL / 10 DEGRADED",
     },
     // ── the ordered queue (C2: one dispatch per domain, in this order) ──
     Domain {
@@ -93,8 +93,8 @@ pub const QUEUE: &[Domain] = &[
         status: Status::RealToday,
         order: None,
         archive:
-            "engine: the supervisor's own state read natively — runit's supervise tree (live-proven on this host), systemd's system bus over the dbus crate, openrc's own state files — no sv/systemctl/rc-service shellout",
-        count: "native · 7 REAL / 11 DEGRADED / 10 UNAVAILABLE",
+            "engine: the supervisor's own state read natively — runit's supervise tree plus the /proc-derived supervision truth (live states for every uid on this host), systemd's system bus over the dbus crate, openrc's own state files — no sv/systemctl/rc-service shellout",
+        count: "native · 7 REAL / 12 DEGRADED / 10 UNAVAILABLE",
     },
     Domain {
         name: "media",

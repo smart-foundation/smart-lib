@@ -43,7 +43,7 @@ use crate::core::{Error, Result};
 use crate::domains::service::backend::LifecycleVerb;
 use crate::domains::service::types::{SupervisionCapabilities, SupervisorIdentity};
 
-use super::{NativeDep, NativeObservation, NativeState, NativeSupervision};
+use super::{NativeDep, NativeObservation, NativeProcFacts, NativeState, NativeSupervision};
 
 /// Where openrc keeps its per-service state files (one file per state, one
 /// service name per line inside it).
@@ -239,6 +239,7 @@ impl NativeSupervision for OpenrcBackend {
                     state_reason,
                     description: self.description_of(&name),
                     name,
+                    proc_facts: NativeProcFacts::default(),
                 }
             })
             .collect()
@@ -269,7 +270,10 @@ impl NativeSupervision for OpenrcBackend {
         let caps = SupervisionCapabilities {
             supervisor: "openrc".to_string(),
             can_enumerate: self.init_root.is_dir(),
+            // openrc publishes its own state as files, which is this
+            // backend's exact read as well — no privileged half exists.
             can_read_state: readable,
+            can_read_exact_state: readable,
             // openrc has no native control protocol (see `control` above), so
             // the claim is the measured absence, never a promise.
             can_control: false,

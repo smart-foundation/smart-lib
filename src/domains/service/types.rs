@@ -535,9 +535,17 @@ pub struct SupervisionCapabilities {
     pub supervisor: String,
     /// Whether service enumeration is served natively.
     pub can_enumerate: bool,
-    /// Whether the per-service run state is readable by THIS caller (the
-    /// supervisor's state files are root-only on many hosts).
+    /// Whether the per-service run state is readable by THIS caller — either
+    /// through the supervisor's own state files (privileged on many hosts) or
+    /// through the supervised process truth every uid can read.
     pub can_read_state: bool,
+    /// Whether the supervisor's own EXACT state read is readable by THIS caller
+    /// (runit's `supervise.<name>/stat`, its own transition clock and want
+    /// up/down flags). On a runit host with a root-only supervise tree this is
+    /// false for uid 1000 while `can_read_state` stays true: the /proc
+    /// derivation answers for every uid, and the exact half is the founder's
+    /// privileged command.
+    pub can_read_exact_state: bool,
     /// Whether lifecycle control (start/stop/restart) is reachable by THIS
     /// caller through the supervisor's own control path.
     pub can_control: bool,

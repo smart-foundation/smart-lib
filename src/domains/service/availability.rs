@@ -27,11 +27,18 @@
 //!
 //! A row is the backend's *target*. What a caller actually gets is also gated
 //! by the host's permissions: on this box the runit supervise tree
-//! (`/run/runit/supervise.<name>/stat`, `pid`) is **root-only**, so an
-//! unprivileged reader receives `status = unknown` with the measured reason and
-//! the control verbs receive `permissionDenied`. That gate is
-//! [`runtime_gate`], computed from the backend's measured caps, so the runtime
-//! answer and this table can never disagree.
+//! (`/run/runit/supervise.<name>/stat`, `pid`) is **root-only**, so the exact
+//! half of the state read is unreachable for uid 1000 and is published as the
+//! DEGRADED `readSuperviseStat` row with the founder's privileged command.
+//! The state itself is NOT parked behind that wall: the same read path derives
+//! it for every uid from the supervised process truth in `/proc` (the `runsv`
+//! process, its live children, the service's own pid file, the kernel's boot
+//! clock), so `getState` answers real up/down states everywhere and only the
+//! supervisor's own exact words are privilege-gated. The gate that remains is
+//! [`runtime_gate`], computed from the backend's measured caps — `can_read_state`
+//! measures true here because the `/proc` derivation answers, and
+//! `can_read_exact_state` measures false because the exact half is root-only —
+//! so the runtime answer and this table can never disagree.
 
 /// The compiled schema file ID, read from `service.capnp`'s `@0x…` line. The
 /// matrix can never describe a contract the build did not compile.
@@ -165,7 +172,22 @@ pub const SERVICE_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real(
         "getState",
         2,
-        "l3_linux_service::get_state_parses_the_supervise_status_natively",
+        "l3_linux_service::state_is_derived_from_proc_truth_for_every_uid",
+    ),
+    // ── The privileged exact half of the state read ─────────────────────────
+    MethodAvailability::degraded(
+        "readSuperviseStat",
+        0xFFFC,
+        "l3_linux_service::the_exact_supervise_read_is_code_complete",
+        "the supervisor's own EXACT state read (/run/runit/supervise.<name>/stat: its own state \
+         word, its own transition clock, its want up/down flags) is PHYSICALLY privilege-gated on \
+         this host — every supervise.* directory is drwx------ root, so uid 1000 gets EACCES. The \
+         code path is complete and proven on both sides (a readable tree and a denied one), and the \
+         live states are served for EVERY uid by the /proc derivation this same path falls back to \
+         (the runsv process, its live children, the service's own pid file, the process start \
+         clock). The exact half's live bring-back is the founder command: \
+         `sudo ./target/debug/examples/service-state-probe --state-root /run/runit` (or \
+         `sudo ./target/debug/smart service status`), both committed and ready.",
     ),
     MethodAvailability::real(
         "resolve",
@@ -400,6 +422,11 @@ pub fn method_availability_for(name: &str) -> Option<&'static MethodAvailability
 /// measured caps (`supervision_caps()`), so a backend that *can* read the
 /// supervisor's state pays no gate at all and one that cannot reports the
 /// exact class the row's reason promises.
+///
+/// A runit host with a root-only supervise tree passes this gate: the state
+/// reads are served by the `/proc` derivation (`can_read_state` measures true),
+/// and only the exact half is gated — published as the `readSuperviseStat`
+/// row, with the founder's privileged command.
 ///
 /// | method family | `can_read_state` false | `can_control` false |
 /// |---|---|---|

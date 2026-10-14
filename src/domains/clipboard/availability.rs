@@ -293,6 +293,30 @@ pub const CLIPBOARD_AVAILABILITY: &[MethodAvailability] = &[
          once over the native transport; the mapping is mock-proven and the live bring-back is \
          founder-run",
     ),
+    // ── The wlr-data-control arm: protocol-complete, seat-proven ────────────
+    //
+    // The arm is written to protocol completeness — connect, the registry
+    // globals, the data-control device, the source and selection offers, the
+    // MIME-type offers, the fd-passing read and the set path — and proven
+    // against a scripted compositor (a real wayland-server peer) over the real
+    // wire protocol. It is not live-proven on the build box because no
+    // compositor runs here, which is a physical fact about the host, not a
+    // gap in the code: the row says exactly that instead of hiding in
+    // Unavailable.
+    MethodAvailability::degraded(
+        "waylandDataControl",
+        0xFFFE,
+        "l3_linux_clipboard::the_wayland_seat_is_protocol_proven_end_to_end",
+        "the wlr-data-control Wayland arm is protocol-complete and seat-proven (the registry \
+         global, the source set, the selection event, the MIME-type offers and the fd-passing read \
+         and write, all exercised against a scripted compositor over the real protocol). \
+         live-proven: no — no Wayland compositor runs on this host, so the live bring-back is the \
+         first compositor box (a seat without the manager answers with the protocol reason). \
+         protocol-proven: yes. The transport is decided per session by measurement: a Wayland seat \
+         speaks this protocol natively, an X11 session speaks the ICCCM selection protocol over \
+         x11rb (the live-proven arm on this host), and a box with both prefers the native Wayland \
+         seat and falls back to X11 only when the manager global is absent",
+    ),
 ];
 
 /// The Linux platform token for this matrix.

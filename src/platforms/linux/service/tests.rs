@@ -10,7 +10,7 @@ extern crate std;
 
 use alloc::ffi::CString;
 use alloc::format;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use std::fs;
@@ -21,7 +21,7 @@ use super::NativeSupervision;
 use super::{Cell, LinuxServiceBackend};
 use crate::core::ids::ServiceId;
 use crate::core::ErrorCode;
-use crate::domains::service::availability::{claimed_l3_tests, SERVICE_AVAILABILITY};
+use crate::domains::service::availability::{claimed_l3_tests, runtime_gate, SERVICE_AVAILABILITY};
 use crate::domains::service::backend::{
     LifecycleVerb, PresentedCapability, ServiceBackend, ServiceLifecycle,
 };
@@ -40,6 +40,10 @@ fn temp_root(tag: &str) -> PathBuf {
 /// A scripted runit supervision tree: the layout this host actually has, in a
 /// temp directory. Returns the backend and the root (so a test can extend the
 /// tree mid-test and clean it up afterwards).
+///
+/// The tree models the world a **root** caller sees: the supervise `stat`
+/// files are readable, so the exact read answers (and there is no `/proc`
+/// fixture — the unprivileged path is proven by `state_is_derived_from_proc_truth`).
 fn runit_tree() -> (RunitBackend, PathBuf) {
     let root = temp_root("runit");
     let _ = fs::remove_dir_all(&root);
@@ -70,7 +74,13 @@ fn runit_tree() -> (RunitBackend, PathBuf) {
         std::os::unix::fs::symlink(declared.join(name), scan.join(name)).unwrap();
     }
 
-    let backend = RunitBackend::with_roots(scan, declared, state);
+    let backend = RunitBackend::with_roots(
+        scan,
+        declared,
+        state,
+        root.join("no-proc"),
+        root.join("no-pidfiles"),
+    );
     (backend, root)
 }
 
@@ -110,6 +120,357 @@ fn resolve_id(backend: &LinuxServiceBackend, name: &str) -> ServiceId {
     let (id, present) = backend.resolve(name).expect("resolve");
     assert!(present, "{name} must resolve on the scripted tree");
     id
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// The /proc-derived supervision truth — a fabricated /proc tree the test
+// builds itself, so the unprivileged path is proven hermetically (charter
+// law #8: no host process is inspected by a test).
+// ═══════════════════════════════════════════════════════════════════════
+
+/// One `/proc/<pid>/stat` line, with the fields the supervisor-truth scan
+/// reads (state, ppid, starttime) at their kernel field positions.
+fn fake_stat(pid: u64, comm: &str, ppid: u64, state: char, starttime_ticks: u64) -> String {
+    format!(
+        "{pid} ({comm}) {state} {ppid} {pid} {pid} 0 -1 4194560 100 0 0 0 10 5 0 0 20 0 1 0 \
+         {starttime_ticks} 100 200 10 0 0 0 0"
+    )
+}
+
+/// A fixture `/proc` process: its stat line and, when named, its cmdline.
+fn fake_process(proc_root: &Path, pid: u64, comm: &str, ppid: u64, state: char, starttime: u64, cmdline: Option<&str>) {
+    let dir = proc_root.join(pid.to_string());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("stat"), format!("{}\n", fake_stat(pid, comm, ppid, state, starttime)))
+        .unwrap();
+    if let Some(args) = cmdline {
+        fs::write(dir.join("cmdline"), args).unwrap();
+    }
+}
+
+/// The world this host actually presents to **uid 1000**: the supervise state
+/// directories exist (they are stat-able), their `stat` files are root-only
+/// (mode 000, so the fixture's own owner cannot read them either — the same
+/// EACCES the host serves), and the supervised process truth in `/proc` is
+/// fully readable. The tree's services are the host's own shape: a running
+/// service with a logger, a running one without, a down one with a dead pid
+/// file, a multi-process one, a process running outside the supervisor, a
+/// zombie child, an empty slot and a cold declaration.
+fn root_only_tree() -> (RunitBackend, PathBuf) {
+    let root = temp_root("runit-proc");
+    let _ = fs::remove_dir_all(&root);
+    let declared = root.join("etc/sv");
+    let scan = root.join("var/service");
+    let state = root.join("run/runit");
+    let proc = root.join("proc");
+    let pidfiles = root.join("run");
+    fs::create_dir_all(&declared).unwrap();
+    fs::create_dir_all(&scan).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&proc).unwrap();
+    fs::create_dir_all(&pidfiles).unwrap();
+
+    // The kernel's own two clocks: the boot time and the uptime.
+    fs::write(proc.join("stat"), "cpu  100 0 100 1000 0 0 0 0 0 0\nbtime 1760000000\n").unwrap();
+    fs::write(proc.join("uptime"), "86400.00 172800.00\n").unwrap();
+
+    // runsvdir, the parent of every runsv (the host's pid 677).
+    fake_process(&proc, 677, "runsvdir", 1, 'S', 500, Some("runsvdir\0/run/runit/runsvdir/current\0"));
+
+    // sshd: runsv 702, a log child (725) and the service child (726). The
+    // service's own pid file names the same pid the process tree does.
+    declare(&declared, "sshd", "#!/bin/sh\nexec /usr/bin/sshd -D\n");
+    declare_logger(&declared, "sshd", "#!/bin/sh\nexec vlogger -t sshd -p daemon\n");
+    supervise_denied(&state, "sshd");
+    fake_process(&proc, 702, "runsv", 677, 'S', 900, Some("runsv\0sshd\0"));
+    fake_process(&proc, 725, "vlogger", 702, 'S', 901, Some("vlogger\0-t sshd\0-p daemon\0"));
+    fake_process(&proc, 726, "sshd", 702, 'S', 901, Some("sshd: /usr/bin/sshd\0-D\0"));
+    fs::write(pidfiles.join("sshd.pid"), "726\n").unwrap();
+
+    // elogind: runsv 699 supervises it, only its logger is alive, and its own
+    // pid file names a process /proc no longer lists.
+    declare(&declared, "elogind", "#!/bin/sh\nexec elogind\n");
+    declare_logger(&declared, "elogind", "#!/bin/sh\nexec vlogger -t elogind -p daemon\n");
+    supervise_denied(&state, "elogind");
+    fake_process(&proc, 699, "runsv", 677, 'S', 905, Some("runsv\0elogind\0"));
+    fake_process(&proc, 719, "vlogger", 699, 'S', 906, Some("vlogger\0-t elogind\0-p daemon\0"));
+    fs::write(pidfiles.join("elogind.pid"), "1337\n").unwrap();
+
+    // dbus: runsv 696, a log child and the daemon child.
+    declare(&declared, "dbus", "#!/bin/sh\nexec dbus-daemon --system --nofork --nopidfile\n");
+    declare_logger(&declared, "dbus", "#!/bin/sh\nexec vlogger -t dbus -p daemon\n");
+    supervise_denied(&state, "dbus");
+    fake_process(&proc, 696, "runsv", 677, 'S', 910, Some("runsv\0dbus\0"));
+    fake_process(&proc, 720, "vlogger", 696, 'S', 911, Some("vlogger\0-t dbus\0-p daemon\0"));
+    fake_process(&proc, 723, "dbus-daemon", 696, 'S', 911, Some("dbus-daemon\0--system\0--nofork\0--nopidfile\0"));
+
+    // agetty-tty1: one child, no log script at all — the single child is the
+    // service process without any script parsing.
+    declare(&declared, "agetty-tty1", "#!/bin/sh\nexec chpst -P agetty tty1 38400 linux\n");
+    supervise_denied(&state, "agetty-tty1");
+    fake_process(&proc, 693, "runsv", 677, 'S', 915, Some("runsv\0agetty-tty1\0"));
+    fake_process(&proc, 710, "agetty", 693, 'S', 916, Some("agetty\0--noclear\0tty1\038400\0linux\0"));
+
+    // alsa: the run script execs through chpst (`chpst -b alsa pause`), so the
+    // service process's argv[0] is `pause` and the logger is the vlogger.
+    declare(&declared, "alsa", "#!/bin/sh\nset -e\nalsactl restore\nexec chpst -b alsa pause\n");
+    declare_logger(&declared, "alsa", "#!/bin/sh\nexec vlogger -t alsa -p daemon\n");
+    supervise_denied(&state, "alsa");
+    fake_process(&proc, 685, "runsv", 677, 'S', 920, Some("runsv\0alsa\0"));
+    fake_process(&proc, 704, "vlogger", 685, 'S', 921, Some("vlogger\0-t alsa\0-p daemon\0"));
+    fake_process(&proc, 708, "pause", 685, 'S', 921, Some("alsa\0"));
+
+    // forky: two service children and no log script — a wrapper run script,
+    // so /proc cannot say which child is the main one.
+    declare(&declared, "forky", "#!/bin/sh\nmy-app --worker &\nmy-app --server &\n");
+    supervise_denied(&state, "forky");
+    fake_process(&proc, 800, "runsv", 677, 'S', 925, Some("runsv\0forky\0"));
+    fake_process(&proc, 801, "my-app", 800, 'S', 926, Some("my-app\0--worker\0"));
+    fake_process(&proc, 802, "my-app", 800, 'S', 926, Some("my-app\0--server\0"));
+
+    // zombied: the supervisor's child exists but is a zombie — a process that
+    // has exited, which is NOT a running service.
+    declare(&declared, "zombied", "#!/bin/sh\nexec zombied -D\n");
+    supervise_denied(&state, "zombied");
+    fake_process(&proc, 810, "runsv", 677, 'S', 930, Some("runsv\0zombied\0"));
+    fake_process(&proc, 811, "zombied", 810, 'Z', 931, Some("zombied\0-D\0"));
+
+    // strayd: no runsv supervises it and the supervisor has no state dir for
+    // it, but its own pid file names a live process — it runs outside the
+    // supervisor, and the answer says exactly that.
+    declare(&declared, "strayd", "#!/bin/sh\nexec strayd\n");
+    fs::write(pidfiles.join("strayd.pid"), "850\n").unwrap();
+    fake_process(&proc, 850, "strayd", 1, 'S', 935, Some("strayd\0"));
+
+    // gone: the supervisor's state directory exists but no runsv process for
+    // it is in /proc, and its pid file names a dead process.
+    declare(&declared, "gone", "#!/bin/sh\nexec gone -D\n");
+    supervise_denied(&state, "gone");
+    fs::write(pidfiles.join("gone.pid"), "4242\n").unwrap();
+
+    // netdep: its own script declares the dependency, and the dependency is
+    // running on this tree — so the dependency edge measures SATISFIED from
+    // the /proc truth, with no stat file readable anywhere.
+    declare(&declared, "netdep", "#!/bin/sh\nsv check dbus >/dev/null || exit 1\nexec netdep -D\n");
+    supervise_denied(&state, "netdep");
+    fake_process(&proc, 820, "runsv", 677, 'S', 945, Some("runsv\0netdep\0"));
+    fake_process(&proc, 821, "netdep", 820, 'S', 946, Some("netdep\0-D\0"));
+
+    // cold: declared, not linked, no state dir, no runsv, no pid file.
+    declare(&declared, "cold", "#!/bin/sh\nexec /bin/true\n");
+
+    // A runsv whose service the tree does not declare — a phantom supervisor
+    // that must not become a service.
+    fake_process(&proc, 900, "runsv", 677, 'S', 940, Some("runsv\0phantom\0"));
+
+    // Link the enabled ones, the way the host's scan dir does.
+    for name in [
+        "sshd", "elogind", "dbus", "agetty-tty1", "alsa", "forky", "zombied", "gone", "netdep",
+    ] {
+        std::os::unix::fs::symlink(declared.join(name), scan.join(name)).unwrap();
+    }
+
+    let backend = RunitBackend::with_roots(scan, declared, state, proc, pidfiles);
+    (backend, root)
+}
+
+/// Declare one service's log script (the program whose argv[0] is how the log
+/// child is told from the service child in /proc).
+fn declare_logger(declared_root: &Path, name: &str, log_script: &str) {
+    let dir = declared_root.join(name).join("log");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("run"), log_script).unwrap();
+}
+
+/// One supervise state directory whose `stat` file is root-only — the host's
+/// own permission layout, reproduced for the fixture's unprivileged reader by
+/// a mode the fixture's owner cannot read either (uid 1000 has no
+/// CAP_DAC_OVERRIDE, so a 0600 file owned by another user is the same EACCES
+/// a root-owned `drwx------ supervise.<name>` serves; mode 000 reproduces the
+/// denial exactly).
+fn supervise_denied(state_root: &Path, name: &str) {
+    let dir = state_root.join(format!("supervise.{name}"));
+    fs::create_dir_all(&dir).unwrap();
+    let stat = dir.join("stat");
+    fs::write(&stat, "run: /etc/sv/nobody: (pid 1) 1s\n").unwrap();
+    std::fs::set_permissions(&stat, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+}
+
+/// The unprivileged runit state read, proven over a fabricated `/proc`: every
+/// supervised service answers a REAL state for a caller who cannot read a
+/// single `supervise.stat` file — up, down, and why.
+#[test]
+fn state_is_derived_from_proc_truth_for_every_uid() {
+    let (runit, root) = root_only_tree();
+    let backend = LinuxServiceBackend::with_cell(Cell::Runit(runit));
+    let page = backend
+        .list_services(Pagination { offset: 0, limit: u32::MAX })
+        .expect("listServices");
+    let by_name = |name: &str| {
+        page.items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("{name} must be enumerated"))
+            .clone()
+    };
+    let state = |name: &str| by_name(name).state;
+
+    // A supervised service with a logger: the service's own child is the main
+    // process, the logger is not mistaken for it, and the supervisor's own pid
+    // and child count travel with the state.
+    let sshd = state("sshd");
+    assert_eq!(sshd.status, ServiceStatus::Active);
+    assert_eq!(sshd.main_pid, 726);
+    assert!(sshd.since_valid, "the process start time is a real observation");
+    assert!(sshd.since > 0 && sshd.since_us > 0, "the boot clock is measured, not invented");
+    let sshd_meta = &by_name("sshd").state.metadata;
+    assert!(sshd_meta.iter().any(|(k, v)| k == "state_source" && v == "proc"));
+    assert!(sshd_meta.iter().any(|(k, v)| k == "runsv" && v == "702"));
+    assert!(sshd_meta.iter().any(|(k, v)| k == "live_children" && v == "2"));
+
+    // dbus: same shape, the daemon child is the main process.
+    assert_eq!(state("dbus").main_pid, 723);
+
+    // agetty-tty1: one child and no log script — no parsing needed.
+    assert_eq!(state("agetty-tty1").main_pid, 710);
+
+    // alsa: `exec chpst -b alsa pause` means the service process is `pause`,
+    // and the vlogger child is the logger — not the service.
+    assert_eq!(state("alsa").main_pid, 708);
+
+    // elogind: supervised, only the logger alive, and its own pid file names
+    // a process /proc no longer lists — the down state with the measured fact.
+    let elogind = state("elogind");
+    assert_eq!(elogind.status, ServiceStatus::Inactive);
+    assert_eq!(elogind.main_pid, 0);
+    assert!(elogind.reason.contains("only its log process is running"), "{}", elogind.reason);
+    assert!(elogind.reason.contains("elogind.pid"), "{}", elogind.reason);
+    assert!(elogind.reason.contains("no longer lists"), "{}", elogind.reason);
+
+    // zombied: a child that has exited is not a running service.
+    let zombied = state("zombied");
+    assert_eq!(zombied.status, ServiceStatus::Inactive);
+    assert!(zombied.reason.contains("no supervised process is running"), "{}", zombied.reason);
+
+    // forky: processes ARE running, and the answer says so without pretending
+    // to know which one is the main process.
+    let forky = state("forky");
+    assert_eq!(forky.status, ServiceStatus::Active);
+    assert_eq!(forky.main_pid, 0, "no main pid is invented for a wrapper script");
+    assert!(forky.reason.contains("2 supervised processes"), "{}", forky.reason);
+
+    // strayd: running outside the supervisor — active, with the reason naming
+    // that no supervisor watches it.
+    let strayd = state("strayd");
+    assert_eq!(strayd.status, ServiceStatus::Active);
+    assert_eq!(strayd.main_pid, 850);
+    assert!(strayd.reason.contains("no runsv process supervises"), "{}", strayd.reason);
+
+    // gone: the supervisor's slot exists, its process does not.
+    let gone = state("gone");
+    assert_eq!(gone.status, ServiceStatus::Inactive);
+    assert!(gone.reason.contains("no runsv process for gone is in /proc"), "{}", gone.reason);
+
+    // cold: no supervision and no process — the honest unknown naming the
+    // denied stat path AND the declaration truth, never a fabricated state.
+    let cold = state("cold");
+    assert_eq!(cold.status, ServiceStatus::Unknown);
+    assert!(cold.reason.contains("supervise.cold/stat"), "{}", cold.reason);
+    assert!(cold.reason.contains("not linked into the supervisor's scan dir"), "{}", cold.reason);
+
+    // The phantom runsv is not a service.
+    assert!(!page.items.iter().any(|i| i.name == "phantom"));
+
+    // A dependency the service's own script declares is measured satisfied
+    // from the same /proc truth (dbus runs on this tree), with no readable
+    // stat file anywhere — an unprivileged caller still measures the edge.
+    let netdep = backend
+        .get_dependencies(resolve_id(&backend, "netdep"))
+        .expect("getDependencies");
+    assert_eq!(netdep.len(), 1);
+    assert_eq!(netdep[0].service_id, resolve_id(&backend, "dbus"));
+    assert!(netdep[0].satisfied, "dbus is running on this tree, and /proc says so");
+
+    // A dependency that is not running measures unsatisfied — never assumed.
+    declare(&root.join("etc/sv"), "needsgone", "#!/bin/sh\nsv check gone >/dev/null || exit 1\nexec needsgone\n");
+    let needsgone = backend
+        .get_dependencies(resolve_id(&backend, "needsgone"))
+        .expect("getDependencies");
+    assert_eq!(needsgone.len(), 1);
+    assert!(!needsgone[0].satisfied, "gone is not running, so its edge is not satisfied");
+
+    // The published caps are the measurements of this world: real states for
+    // every uid, the exact (privileged) half measured false, control false.
+    let caps = backend.supervision_caps();
+    assert!(caps.can_read_state, "the /proc truth answers for this unprivileged caller");
+    assert!(!caps.can_read_exact_state, "every stat file was denied on this tree");
+    assert!(!caps.can_control, "no control fifo exists on this tree");
+
+    // So the state reads are ungated at runtime: nothing is parked unknown.
+    for method in ["listServices", "getService", "getState", "getHealth", "listHealth"] {
+        assert_eq!(runtime_gate(&caps, method), None, "{method} answers for this uid");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The privileged exact read (`supervise.stat`) is code-complete and proven:
+/// the founder's helper prints exactly this over the engine's own path.
+#[test]
+fn the_exact_supervise_read_is_code_complete() {
+    let root = temp_root("runit-exact");
+    let _ = fs::remove_dir_all(&root);
+    let declared = root.join("etc/sv");
+    let scan = root.join("var/service");
+    let state = root.join("run/runit");
+    fs::create_dir_all(&declared).unwrap();
+    fs::create_dir_all(&scan).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    // readable: `runsv` is up with the supervisor's own pid and clock.
+    declare(&declared, "up", "");
+    supervise(&state, "up", "run: /etc/sv/up: (pid 4242) 5678s, normally up");
+    // denied: the host's own root-only layout, reproduced for an unprivileged
+    // reader.
+    declare(&declared, "denied", "");
+    supervise_denied(&state, "denied");
+    // absent: the supervisor has no state file for it.
+    declare(&declared, "absent", "");
+    for name in ["up", "denied", "absent"] {
+        std::os::unix::fs::symlink(declared.join(name), scan.join(name)).unwrap();
+    }
+    let backend =
+        RunitBackend::with_roots(scan, declared, state, root.join("no-proc"), root.join("no-pidfiles"));
+
+    let rows = backend.exact_states(None);
+    assert_eq!(rows.len(), 3, "exactly the tree's services");
+    let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap().clone();
+
+    let up = row("up");
+    assert_eq!(up.status, Some(ServiceStatus::Active));
+    assert_eq!(up.main_pid, 4242);
+    assert_eq!(up.since_us, 5_678_000_000);
+    assert!(up.stat.as_deref().is_some_and(|s| s.contains("normally up")));
+    assert!(up.reason.is_none());
+
+    let denied = row("denied");
+    assert!(denied.stat.is_none());
+    let reason = denied.reason.as_deref().unwrap_or_default();
+    assert!(reason.starts_with("no-privilege:"), "{reason}");
+    assert!(reason.contains("supervise.denied/stat"), "{reason}");
+
+    let absent = row("absent");
+    assert!(absent.reason.as_deref().is_some_and(|r| r.starts_with("not-found:")), "{:?}", absent.reason);
+
+    // A name filter narrows the probe (the founder's per-service check).
+    assert_eq!(backend.exact_states(Some("up")).len(), 1);
+
+    // The render is the engine's own, so the helper binary is pure arg parsing.
+    let report = super::runit::render_exact_states(&rows);
+    assert!(report.starts_with("runit exact state read: 3 service(s)"), "{report}");
+    assert!(report.contains("up"), "{report}");
+    assert!(report.contains("(pid 4242) 5678s"), "{report}");
+    assert!(report.contains("unreadable"), "{report}");
+    assert!(report.contains("supervise.denied/stat"), "{report}");
+    let _ = fs::remove_dir_all(&root);
 }
 
 /// `listServices` is served natively: the scripted tree's services, their
@@ -361,13 +722,17 @@ fn a_state_subscription_observes_the_supervision_tree() {
 
     let first = backend.pull_state(sub, u32::MAX).expect("pullState");
     assert_eq!(first.len(), 6, "the first pull reports what exists");
-    // Every service the supervisor reports a state for carries the supervisor's
-    // own transition clock; the one with no state file at all is the honest
-    // `since_valid == false` (never a fabricated timestamp).
-    assert!(first
-        .iter()
-        .filter(|s| s.status != ServiceStatus::Unknown)
-        .all(|s| s.since_valid));
+    // A state that carries a timestamp carries a MEASURED one: the exact read
+    // uses the supervisor's own clock, and the /proc derivation uses the
+    // process start time. A state with no observed transition is the honest
+    // `since_valid == false` paired with a reason — never a fabricated clock.
+    for state in first.iter() {
+        if state.since_valid {
+            assert!(state.since > 0, "{}: a valid since is measured", state.reason);
+        } else {
+            assert!(!state.reason.is_empty(), "a state without a clock names why");
+        }
+    }
 
     // With nothing changed, the next pull is an empty batch — not an invented
     // event.
@@ -544,7 +909,13 @@ fn the_control_byte_writes_through_a_real_fifo() {
     fs::create_dir_all(declared.join("scripted")).unwrap();
     std::os::unix::fs::symlink(declared.join("scripted"), scan.join("scripted")).unwrap();
 
-    let backend = RunitBackend::with_roots(scan, declared, state);
+    let backend = RunitBackend::with_roots(
+        scan,
+        declared,
+        state,
+        root.join("no-proc"),
+        root.join("no-pidfiles"),
+    );
     // The reader lives in a thread, so the write is not a host daemon: the
     // FIFO is this test's own temp file.
     let reader = {
@@ -601,7 +972,8 @@ fn every_claimed_test_exists() {
     let tests: Vec<&str> = alloc::vec![
         "l3_linux_service::list_services_enumerates_the_supervision_tree_natively",
         "l3_linux_service::get_service_reads_one_entry_natively",
-        "l3_linux_service::get_state_parses_the_supervise_status_natively",
+        "l3_linux_service::state_is_derived_from_proc_truth_for_every_uid",
+        "l3_linux_service::the_exact_supervise_read_is_code_complete",
         "l3_linux_service::resolve_maps_a_name_to_an_identity",
         "l3_linux_service::health_reports_the_lifecycle_and_declares_the_probe_unrun",
         "l3_linux_service::quarantine_is_an_honest_empty_on_a_host_supervisor",
@@ -651,19 +1023,23 @@ fn live_reads_this_hosts_runit_supervision_natively() {
     };
     std::eprintln!("live services: {} enumerated", page.total);
     for info in page.items.iter() {
-        let supervised = info
-            .state
-            .metadata
-            .iter()
-            .find(|(k, _)| k == "supervised")
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("?");
+        let meta = |key: &str| {
+            info.state
+                .metadata
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("-")
+        };
         std::eprintln!(
-            "  {:<16} {:<10} enabled={:<5} supervised={:<5} {}",
+            "  {:<24} {:<8} pid={:<7} enabled={:<5} supervised={:<5} runsv={:<6} source={:<14} {}",
             info.name,
             info.state.status.as_token(),
+            info.state.main_pid,
             info.enabled,
-            supervised,
+            meta("supervised"),
+            meta("runsv"),
+            meta("state_source"),
             if info.state.reason.is_empty() { "-" } else { &info.state.reason }
         );
     }

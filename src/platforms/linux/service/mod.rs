@@ -51,6 +51,8 @@ use crate::domains::service::types::{
 pub mod tests;
 #[path = "openrc.rs"]
 pub mod openrc;
+#[path = "proc.rs"]
+pub mod proc;
 #[path = "runit.rs"]
 pub mod runit;
 #[path = "systemd.rs"]
@@ -100,6 +102,28 @@ pub struct NativeObservation {
     pub state: Option<NativeState>,
     pub state_reason: String,
     pub dependencies: Vec<NativeDep>,
+    /// The measured facts the unprivileged runit path derives from `/proc`,
+    /// published beside the state so a caller can see where it came from.
+    /// All three are zero/empty on the cells that measure no such thing
+    /// (systemd, openrc, sysvinit) rather than fabricated.
+    pub proc_facts: NativeProcFacts,
+}
+
+/// The `/proc`-derived supervision truth for one service, measured on the
+/// runit cell (the only cell whose supervisor truth is visible in `/proc`).
+/// Zero values are the honest "not measured" — the cell that does not measure
+/// them leaves them at zero and never fills them with a guess.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NativeProcFacts {
+    /// The `runsv` pid supervising this service (zero = none is in `/proc`).
+    pub runsv_pid: u64,
+    /// How many live children that `runsv` has (the service plus its logger).
+    pub live_children: usize,
+    /// Where the reported state came from: `supervise.stat` (the privileged
+    /// exact read), `proc` (the `/proc` derivation), or empty (none).
+    pub state_source: &'static str,
+    /// The measured pid-file fact, spelled out for the reason a caller reads.
+    pub pidfile: String,
 }
 
 /// The internal native-supervision seam every cell implements: what the
@@ -158,7 +182,7 @@ fn service_id_for(name: &str) -> ServiceId {
 
 /// Nanoseconds since the epoch (the contract's `T.Timestamp` unit). A zero
 /// means "the clock could not be read" — never fabricated.
-fn now_nanos() -> u64 {
+pub(crate) fn now_nanos() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -380,6 +404,7 @@ impl LinuxServiceBackend {
                     // Measured: not one state file was readable, because
                     // sysvinit has no portable one to read.
                     can_read_state: false,
+                    can_read_exact_state: false,
                     can_control: false,
                 },
             ),
@@ -526,14 +551,30 @@ impl LinuxServiceBackend {
 
     /// The measured facts that travel beside a state: which supervisor read
     /// it, and whether the service is declared/linked/supervised. Ordered, so
-    /// two renders of the same answer never differ.
+    /// two renders of the same answer never differ. On the runit cell the
+    /// `/proc`-derived supervision truth travels with it too (the `runsv` pid,
+    /// the live child count, where the state came from, the pid-file reading),
+    /// because that is what an unprivileged caller's state is actually made of.
     fn metadata_of(&self, observation: &NativeObservation) -> Metadata {
-        alloc::vec![
+        let mut facts = alloc::vec![
             ("supervisor".to_string(), self.identity.supervisor.clone()),
             ("declared".to_string(), observation.declared.to_string()),
             ("linked".to_string(), observation.enabled.to_string()),
             ("supervised".to_string(), observation.supervised.to_string()),
-        ]
+        ];
+        if observation.proc_facts.runsv_pid != 0 {
+            facts.push(("runsv".to_string(), observation.proc_facts.runsv_pid.to_string()));
+        }
+        if !observation.proc_facts.state_source.is_empty() {
+            facts.push(("state_source".to_string(), observation.proc_facts.state_source.to_string()));
+        }
+        if observation.proc_facts.live_children != 0 {
+            facts.push(("live_children".to_string(), observation.proc_facts.live_children.to_string()));
+        }
+        if !observation.proc_facts.pidfile.is_empty() {
+            facts.push(("pidfile".to_string(), observation.proc_facts.pidfile.clone()));
+        }
+        facts
     }
 
     /// The discovery-view health of one observation: the lifecycle is measured,

@@ -605,6 +605,9 @@ fn the_runtime_gate_follows_the_measured_caps() {
         supervisor: "runit".to_string(),
         can_enumerate: true,
         can_read_state: true,
+        // The exact half is separately measured: a runit tree whose
+        // supervise files are readable has it, a root-only one does not.
+        can_read_exact_state: true,
         can_control: true,
     };
     for method in ["listServices", "getService", "getState", "getHealth", "listHealth"] {
