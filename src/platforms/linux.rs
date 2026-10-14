@@ -26,3 +26,11 @@ pub mod netlink;
 #[cfg(feature = "domain-clipboard")]
 #[path = "linux/clipboard.rs"]
 pub mod clipboard;
+
+// The service domain's supervision backend (law #9): the supervisor's own
+// state read natively — runit's supervise tree, systemd's system bus over the
+// `dbus` crate, openrc's state files — behind the `NativeSupervision` seam, so
+// no path forks `sv`/`systemctl`/`rc-service` (the archive body's P5 shellout).
+#[cfg(feature = "domain-service")]
+#[path = "linux/service/mod.rs"]
+pub mod service;

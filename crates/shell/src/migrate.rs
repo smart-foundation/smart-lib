@@ -57,13 +57,13 @@ pub struct Domain {
     pub count: &'static str,
 }
 
-/// The queue. The order is the recon's value order: the domains whose old
-/// bodies were real end-to-end first (clipboard 3/3, queue 8/8, service 8/8),
-/// then the partial ones by real-method ratio (media 8/13, database 8/14,
-/// files 8/17), then the thin ones (audio 6/7, power 4/7, process 4/13),
-/// then the multi-backend domains (window 10/36 across four WMs, package's 19
-/// managers, compositor's 9 backends) — each of those is its own wave with its
-/// own live proof in the shell.
+/// The queue. The order is the recon's value order, past the three real-today
+/// domains (network, clipboard, service): queue 8/8, then the partial ones by
+/// real-method ratio (media 8/13, database 8/14, files 8/17), then the thin
+/// ones (audio 6/7, power 4/7, process 4/13), then the multi-backend domains
+/// (window 10/36 across four WMs, package's 19 managers, compositor's 9
+/// backends) — each of those is its own wave with its own live proof in the
+/// shell.
 pub const QUEUE: &[Domain] = &[
     Domain {
         name: "network",
@@ -90,71 +90,72 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "service",
-        status: Status::MigratedPending,
-        order: Some(2),
-        archive: "platforms/linux/service/ (systemd, openrc, sysvinit, runit — 5 files)",
-        count: "8/8 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the supervisor's own state read natively — runit's supervise tree (live-proven on this host), systemd's system bus over the dbus crate, openrc's own state files — no sv/systemctl/rc-service shellout",
+        count: "native · 7 REAL / 11 DEGRADED / 10 UNAVAILABLE",
     },
     Domain {
         name: "media",
         status: Status::MigratedPending,
-        order: Some(3),
+        order: Some(2),
         archive: "platforms/linux/media.rs (real body, 95 lines)",
         count: "8/13 methods",
     },
     Domain {
         name: "database",
         status: Status::MigratedPending,
-        order: Some(4),
+        order: Some(3),
         archive: "platforms/linux/database.rs (real body, 99 lines)",
         count: "8/14 methods",
     },
     Domain {
         name: "files",
         status: Status::MigratedPending,
-        order: Some(5),
+        order: Some(4),
         archive: "platforms/linux/files.rs (real body, 110 lines)",
         count: "8/17 methods",
     },
     Domain {
         name: "audio",
         status: Status::MigratedPending,
-        order: Some(6),
+        order: Some(5),
         archive: "platforms/linux/audio.rs (real body, 173 lines)",
         count: "6/7 methods",
     },
     Domain {
         name: "power",
         status: Status::MigratedPending,
-        order: Some(7),
+        order: Some(6),
         archive: "platforms/linux/power.rs (real body, 294 lines)",
         count: "4/7 methods",
     },
     Domain {
         name: "process",
         status: Status::MigratedPending,
-        order: Some(8),
+        order: Some(7),
         archive: "platforms/linux/process.rs (real body, 102 lines)",
         count: "4/13 methods",
     },
     Domain {
         name: "window",
         status: Status::MigratedPending,
-        order: Some(9),
+        order: Some(8),
         archive: "platforms/linux/window.rs (real body, 412 lines)",
         count: "10/36 methods",
     },
     Domain {
         name: "package",
         status: Status::MigratedPending,
-        order: Some(10),
+        order: Some(9),
         archive: "platforms/linux/package/ (19 managers: apt, dnf, pacman, …)",
         count: "19 managers",
     },
     Domain {
         name: "compositor",
         status: Status::MigratedPending,
-        order: Some(11),
+        order: Some(10),
         archive: "platforms/linux/compositor/ (9 backends: sway, hyprland, i3, …)",
         count: "9 backends",
     },
@@ -508,11 +509,11 @@ pub fn render_queue(format: &crate::OutputFormat) -> String {
             out.push_str(&table.render());
             out.push('\n');
             out.push_str(&format!(
-                "\n  {} The order is the recon's value order, now past clipboard (real):\n",
+                "\n  {} The order is the recon's value order, now past service (real):\n",
                 "●".blue().bold()
             ));
-            out.push_str("    queue 8/8, service 8/8 (whole bodies first), then the partial\n");
-            out.push_str("    ones by real-method ratio (media 8/13, database 8/14, files 8/17),\n");
+            out.push_str("    queue 8/8 (a whole body next), then the partial ones by\n");
+            out.push_str("    real-method ratio (media 8/13, database 8/14, files 8/17),\n");
             out.push_str("    then the thin ones (audio 6/7, power 4/7, process 4/13), then the\n");
             out.push_str("    multi-backend domains (window 10/36 across four WMs, package's 19\n");
             out.push_str("    managers, compositor's 9 backends). Each migration is its own wave\n");

@@ -7,3 +7,6 @@ pub mod network;
 
 #[cfg(feature = "domain-clipboard")]
 pub mod clipboard;
+
+#[cfg(feature = "domain-service")]
+pub mod service;

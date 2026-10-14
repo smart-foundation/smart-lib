@@ -26,9 +26,23 @@ impl Completer {
             "disconnect".into(), "forget".into(), "on".into(), "off".into(),
         ]);
         subcommands.insert("migrate".into(), vec![]);
+        #[cfg(feature = "domain-service")]
+        subcommands.insert("service".into(), vec![
+            "status".into(), "inspect".into(), "health".into(), "deps".into(),
+            "resolve".into(), "watch".into(), "controls".into(), "metrics".into(),
+            "allocation".into(), "check".into(), "logs".into(),
+            "start".into(), "stop".into(), "restart".into(),
+        ]);
 
         Completer {
-            domains: vec!["network".into(), "migrate".into()],
+            domains: vec![
+                "network".into(),
+                #[cfg(feature = "domain-clipboard")]
+                "clipboard".into(),
+                #[cfg(feature = "domain-service")]
+                "service".into(),
+                "migrate".into(),
+            ],
             subcommands,
             keywords: vec![
                 "help".into(), "exit".into(), "quit".into(),
@@ -43,6 +57,10 @@ impl Completer {
                 "for".into(), "in".into(), "fn".into(),
                 "true".into(), "false".into(), "null".into(),
                 "@network".into(),
+                #[cfg(feature = "domain-clipboard")]
+                "@clipboard".into(),
+                #[cfg(feature = "domain-service")]
+                "@service".into(),
             ],
         }
     }
@@ -135,7 +153,14 @@ mod tests {
         assert!(c.complete("wat").contains(&"watch".to_string()));
         // A domain that is only in the migration queue is not offered: help
         // and completion list what is real.
-        assert!(c.complete("clip").is_empty());
+        for queued in ["aud", "med", "fil", "pow"] {
+            assert!(c.complete(queued).is_empty(), "{queued} is still queued");
+        }
+        // The migrated domains are offered when the engine carries them.
+        #[cfg(feature = "domain-clipboard")]
+        assert!(c.complete("clip").contains(&"clipboard".to_string()));
+        #[cfg(feature = "domain-service")]
+        assert!(c.complete("serv").contains(&"service".to_string()));
     }
 
     #[test]
@@ -154,6 +179,23 @@ mod tests {
         for sub in ["list", "scan", "connect", "disconnect", "forget", "on", "off"] {
             assert!(matches.contains(&sub.to_string()), "wifi completes {sub}");
         }
+    }
+
+    /// The service domain's own grammar completes: the observation subcommands
+    /// and the host-mutating verbs alike (the verbs are gated at execution, not
+    /// hidden from completion).
+    #[test]
+    #[cfg(feature = "domain-service")]
+    fn completes_the_service_subcommands() {
+        let c = Completer::new();
+        let matches = c.complete("service ");
+        for sub in ["status", "inspect", "health", "deps", "resolve", "watch", "controls", "logs"] {
+            assert!(matches.contains(&sub.to_string()), "service completes {sub}");
+        }
+        for verb in ["start", "stop", "restart"] {
+            assert!(matches.contains(&verb.to_string()), "service completes {verb}");
+        }
+        assert!(c.complete("service st").contains(&"status".to_string()));
     }
 
     #[test]

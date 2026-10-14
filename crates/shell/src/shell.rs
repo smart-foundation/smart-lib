@@ -39,6 +39,8 @@ use crate::{OutputFormat, SmartError, SmartResult};
 use crate::domains::network::Backend;
 #[cfg(feature = "domain-clipboard")]
 use crate::domains::clipboard::Backend as ClipboardBackend;
+#[cfg(feature = "domain-service")]
+use crate::domains::service::Backend as ServiceBackend;
 
 #[derive(Debug, Clone)]
 pub enum ShellCommand {
@@ -115,6 +117,8 @@ pub struct Shell {
     pub backend: Box<Backend>,
     #[cfg(feature = "domain-clipboard")]
     pub clipboard: Box<ClipboardBackend>,
+    #[cfg(feature = "domain-service")]
+    pub service: Box<ServiceBackend>,
 }
 
 impl Shell {
@@ -126,6 +130,8 @@ impl Shell {
             backend,
             #[cfg(feature = "domain-clipboard")]
             clipboard: Box::new(smart_lib::platforms::linux::clipboard::LinuxClipboardBackend::solid()),
+            #[cfg(feature = "domain-service")]
+            service: Box::new(smart_lib::platforms::linux::service::LinuxServiceBackend::native_connect()),
         }
     }
 
@@ -143,7 +149,17 @@ impl Shell {
             #[cfg(feature = "domain-network")]
             backend,
             clipboard,
+            #[cfg(feature = "domain-service")]
+            service: Box::new(smart_lib::platforms::linux::service::LinuxServiceBackend::native_connect()),
         }
+    }
+
+    /// Connect this shell's service backend to the host's supervisor (measured:
+    /// runit on this box). Every read is the supervisor's own native path.
+    #[cfg(feature = "domain-service")]
+    pub fn connect_service(&mut self) {
+        self.service =
+            Box::new(smart_lib::platforms::linux::service::LinuxServiceBackend::native_connect());
     }
 
     /// Connect this shell's clipboard backend to the live native transport,
@@ -182,6 +198,11 @@ impl Shell {
                     let root = crate::domains::clipboard::selector_root(self.clipboard.as_ref())?;
                     return Ok(selector::resolve(root, &sel));
                 }
+                #[cfg(feature = "domain-service")]
+                if domain == "service" {
+                    let root = crate::domains::service::selector_root(self.service.as_ref())?;
+                    return Ok(selector::resolve(root, &sel));
+                }
                 match domain {
                     #[cfg(not(feature = "domain-network"))]
                     "network" => {
@@ -195,6 +216,13 @@ impl Shell {
                         return Err(SmartError::unavailable(
                             "the shell was built without the domain-clipboard feature — the \
                              @clipboard selector needs the engine's clipboard domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-service"))]
+                    "service" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-service feature — the \
+                             @service selector needs the engine's service domain",
                         ))
                     }
                     other => Err(SmartError::Failed(migrate::pending_reason(other))),
@@ -362,6 +390,8 @@ impl Shell {
             "network" => self.exec_network(args, render),
             #[cfg(feature = "domain-clipboard")]
             "clipboard" => self.exec_clipboard(args, render),
+            #[cfg(feature = "domain-service")]
+            "service" => self.exec_service(args, render),
             "migrate" => {
                 if render {
                     print!("{}", migrate::render_queue(&OutputFormat::Human));
@@ -436,6 +466,30 @@ impl Shell {
             Ok(Value::Null)
         } else {
             clipboard::evaluate(&cmd, self.clipboard.as_ref(), guard)
+        }
+    }
+
+    /// The service domain: parse its command with the same clap grammar the
+    /// one-shot binary uses and route it to the supervisor's native read path,
+    /// in-process. Host-mutating verbs are gated (allowed: false here; the REPL
+    /// prompts and one-shot `--force` opens the gate).
+    #[cfg(feature = "domain-service")]
+    fn exec_service(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::service::{self, ServiceCmd};
+        // `Parser` in scope for the same clap grammar the one-shot binary uses
+        // (a feature-only build has no other module importing it).
+        use clap::Parser;
+
+        let mut argv: Vec<String> = vec!["service".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = ServiceCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = service::WriteGuard { allowed: false };
+        if render {
+            service::run(&cmd, &OutputFormat::Human, self.service.as_ref(), guard)?;
+            Ok(Value::Null)
+        } else {
+            service::evaluate(&cmd, self.service.as_ref(), guard)
         }
     }
 
@@ -703,6 +757,41 @@ impl Shell {
                 println!("    @network/status               Per-interface status records");
                 println!("    @network/networking           The master switch");
             }
+            #[cfg(feature = "domain-clipboard")]
+            Some("clipboard") => {
+                println!("  {} clipboard — Commands:", "?".blue());
+                println!("    clipboard                     The current selection (transport + content)");
+                println!("    clipboard get [--mime T]      Read the selection");
+                println!("    clipboard set <text>          Write it (host-mutating, gate-routed)");
+                println!("    clipboard clear               Empty the selection (host-mutating)");
+                println!("    clipboard history [sub]       The engine-side ledger of this process's copies");
+                println!("    clipboard types|limits|preview|validate|convert");
+                println!();
+                println!("  Selectors:");
+                println!("    @clipboard/content            The current selection");
+                println!("    @clipboard/transport          The native transport in use");
+                println!("    @clipboard/mimes              The targets the owner offers");
+            }
+            #[cfg(feature = "domain-service")]
+            Some("service") => {
+                println!("  {} service — Commands:", "?".blue());
+                println!("    service                       Every service the supervisor serves");
+                println!("    service status [name]         The table, or one service's state");
+                println!("    service inspect <name>        One service's state + health");
+                println!("    service health [--quarantined] The health listing");
+                println!("    service deps <name>           The dependencies it declares");
+                println!("    service resolve <name>        A name to an identity");
+                println!("    service watch [name] [-c N]   Bounded state-change events");
+                println!("    service controls [verb]       The one gated surface's honest status");
+                println!("    service metrics|allocation|check <name>");
+                println!("                                   What a supervisor does not own (honest)");
+                println!("    service logs <name>           The log surface (logging.capnp's)");
+                println!("    service start|stop|restart <name>  Host-mutating (gate-routed)");
+                println!();
+                println!("  Selectors:");
+                println!("    @service/services             The service records");
+                println!("    @service/supervisor           The supervisor's identity + caps");
+            }
             Some(other) => {
                 println!("  {} {} — {}", "◌".dimmed(), other, migrate::pending_reason(other));
             }
@@ -710,6 +799,13 @@ impl Shell {
                 println!("  {} Smart Shell v0.2.0 — Commands:", "●".blue().bold());
                 println!();
                 println!("    {:<24} {}", "network", "Network connectivity (real)");
+                #[cfg(feature = "domain-clipboard")]
+                println!("    {:<24} {}", "clipboard", "The clipboard (native selections)");
+                #[cfg(feature = "domain-service")]
+                println!(
+                    "    {:<24} {}",
+                    "service", "The services the supervisor runs (native supervision read)"
+                );
                 println!("    {:<24} {}", "migrate", "The domain migration queue");
                 println!();
                 println!("  {} Special:", "●".blue().bold());
@@ -1092,6 +1188,8 @@ pub fn run_shell(backend: Box<Backend>) {
     let mut shell = Shell::new(backend);
     #[cfg(feature = "domain-clipboard")]
     shell.connect_clipboard();
+    #[cfg(feature = "domain-service")]
+    shell.connect_service();
     let aliases = alias::load_aliases();
 
     println!();

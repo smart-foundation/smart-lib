@@ -164,7 +164,7 @@ domain-sandbox = []
 domain-screenlock = []
 domain-secret = []
 domain-sensor = []
-domain-service = []
+domain-service = ["dep:dbus"]
 domain-session = []
 domain-settings = []
 domain-shell = []
@@ -223,6 +223,30 @@ netlink-sys = "0.9.0"
 # `src/platforms/linux/clipboard.rs` (a scripted host in tests, the real X
 # server in production), so no hermetic test touches a display.
 x11rb = { version = "0.13.2", default-features = false, optional = true }
+
+# The service domain's native systemd read/write path (charter law #9): the
+# maintained `dbus` crate — a from-scratch Rust reimplementation of the D-Bus
+# client protocol (libdbus's wire format), no C library, so it links and runs
+# on this build box. It replaces the archive body's `Command::new("systemctl")`
+# fork-per-query shellout with the same native-D-Bus standard the network
+# domain met with its hand-rolled NetworkManager marshaller: the manager's
+# `ListUnits`/`ListUnitFiles`/`Properties.Get` for reads, `StartUnit`/
+# `StopUnit`/`RestartUnit` for the (founder-run, gate-routed) control verbs.
+# `optional = true` because the feature `domain-service` turns it on, so a
+# build that does not enable the service domain never pays for it.
+#
+# The runit and openrc cells need no crate at all: their native paths are the
+# supervisor's own files, read with std's fs API behind the `NativeSupervision`
+# seam in src/platforms/linux/service/.
+dbus = { version = "0.9", default-features = false, optional = true }
+
+# The service domain's hermetic control-path test proves the runit control
+# write-through against a REAL fifo (the supervisor's control protocol is a
+# fifo, and `std::os::unix::fs::mkfifo` is still unstable on this toolchain).
+# libc is already in the graph through the network domain's netlink-sys, and
+# it is dev-only here: a build of the library never links it.
+[dev-dependencies]
+libc = "0.2"
 
 [build-dependencies]
 # The codegen half of the triad (capnpc 0.27.0 — pure-Rust schema compiler that

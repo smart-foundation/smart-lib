@@ -9,6 +9,8 @@ use std::fmt;
 use shell::domains::network::NetworkCmd;
 #[cfg(feature = "domain-clipboard")]
 use shell::domains::clipboard::ClipboardCmd;
+#[cfg(feature = "domain-service")]
+use shell::domains::service::ServiceCmd;
 use shell::migrate;
 use shell::shell::run_shell;
 use shell::{OutputFormat, SmartError};
@@ -27,7 +29,7 @@ pub struct Cli {
     pub interactive: bool,
     /// Accept the host write a mutating verb performs (the live bring-back
     /// proof is founder-run; charter law #8).
-    #[arg(long, global = true, help = "Accept host-mutating verbs (network wifi on/off, clipboard set, apply)")]
+    #[arg(long, global = true, help = "Accept host-mutating verbs (network wifi on/off, clipboard set, service start/stop/restart, apply)")]
     pub force: bool,
     /// Run one shell-language line and exit (selectors, pipes, conditionals).
     #[arg(short = 'c', long = "command", value_name = "LINE")]
@@ -42,6 +44,9 @@ pub enum DomainCommand {
     /// The system clipboard — the native selection read/write path.
     #[cfg(feature = "domain-clipboard")]
     Clipboard(ClipboardCmd),
+    /// The services the host's supervisor runs — observed, not shelled out to.
+    #[cfg(feature = "domain-service")]
+    Service(ServiceCmd),
     /// The domain migration queue, as data.
     Migrate {
         #[command(subcommand)]
@@ -62,6 +67,8 @@ impl fmt::Debug for DomainCommand {
             DomainCommand::Network(_) => write!(f, "DomainCommand::Network(...)"),
             #[cfg(feature = "domain-clipboard")]
             DomainCommand::Clipboard(_) => write!(f, "DomainCommand::Clipboard(...)"),
+            #[cfg(feature = "domain-service")]
+            DomainCommand::Service(_) => write!(f, "DomainCommand::Service(...)"),
             DomainCommand::Migrate { .. } => write!(f, "DomainCommand::Migrate(...)"),
         }
     }
@@ -97,6 +104,8 @@ fn main() {
         let mut shell = shell::shell::Shell::new(backend);
         #[cfg(feature = "domain-clipboard")]
         shell.connect_clipboard();
+        #[cfg(feature = "domain-service")]
+        shell.connect_service();
         shell::shell::eval_line(&mut shell, line);
         return;
     }
@@ -122,6 +131,19 @@ fn main() {
                 });
             let guard = clipboard::WriteGuard { allowed: cli.force };
             match clipboard::run(cmd, &cli.output, &clipboard_backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
+            }
+        }
+        #[cfg(feature = "domain-service")]
+        Some(DomainCommand::Service(cmd)) => {
+            use shell::domains::service;
+            // The host's supervisor, measured at construction (runit on this
+            // box): every read is its own native path, never a `sv`/`systemctl`
+            // subprocess.
+            let backend = smart_lib::platforms::linux::service::LinuxServiceBackend::native_connect();
+            let guard = service::WriteGuard { allowed: cli.force };
+            match service::run(cmd, &cli.output, &backend, guard) {
                 Ok(_) => {}
                 Err(e) => report(e),
             }

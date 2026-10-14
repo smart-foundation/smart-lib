@@ -28,21 +28,25 @@ fn every_domain_the_original_shell_hosted_is_in_the_queue() {
 }
 
 #[test]
-fn two_domains_are_real_today() {
+fn three_domains_are_real_today() {
     let real: Vec<&Domain> = QUEUE.iter().filter(|d| d.status == Status::RealToday).collect();
-    assert_eq!(real.len(), 2);
+    assert_eq!(real.len(), 3);
     let names: Vec<&str> = real.iter().map(|d| d.name).collect();
     assert!(names.contains(&"network"), "the live-proven engine domain");
     assert!(names.contains(&"clipboard"), "clipboard migrated C2 on the native selection path");
+    assert!(
+        names.contains(&"service"),
+        "service migrated C3 on the supervisor's own native read path"
+    );
 }
 
 #[test]
-fn the_queue_order_is_the_recons_value_order_past_clipboard() {
+fn the_queue_order_is_the_recons_value_order_past_service() {
     let ordered: Vec<u16> = QUEUE.iter().filter_map(|d| d.order).collect();
     let mut sorted = ordered.clone();
     sorted.sort_unstable();
     assert_eq!(ordered, sorted, "the positions are the order");
-    assert_eq!(ordered, (1..=11).collect::<Vec<u16>>(), "eleven queued domains, contiguous");
+    assert_eq!(ordered, (1..=10).collect::<Vec<u16>>(), "ten queued domains, contiguous");
 }
 
 #[test]
@@ -74,6 +78,8 @@ fn the_pending_reason_is_generated_from_the_table() {
     // A domain that is real today is never told it is pending — honesty both ways.
     let clipboard = migrate::pending_reason("clipboard");
     assert!(clipboard.contains("real today"), "{clipboard}");
+    let service = migrate::pending_reason("service");
+    assert!(service.contains("real today"), "{service}");
     // A domain the queue never knew answers as unknown, never as a lie.
     let reason = migrate::pending_reason("telepathy");
     assert!(reason.contains("unknown domain"), "{reason}");

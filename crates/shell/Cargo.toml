@@ -29,7 +29,7 @@ name = "shell"
 path = "src/lib.rs"
 
 [features]
-default = ["domain-network", "domain-clipboard"]
+default = ["domain-network", "domain-clipboard", "domain-service"]
 # The network domain's engine half. With it off the shell still builds (the
 # engine crate compiles without the schema), but the network commands answer
 # honestly that the engine was built without the domain.
@@ -38,6 +38,12 @@ domain-network = ["smart-lib/domain-network"]
 # With it off the shell still builds, but the clipboard commands answer honestly
 # that the engine was built without the domain-clipboard feature.
 domain-clipboard = ["smart-lib/domain-clipboard"]
+# The service domain's engine half — the supervisor's own state read natively
+# (runit's supervise tree here; systemd's system bus and openrc's state files on
+# the hosts that run them). With it off the shell still builds, but the service
+# commands answer honestly that the engine was built without the domain-service
+# feature.
+domain-service = ["smart-lib/domain-service"]
 
 [dependencies]
 # The engine, in-process. `default-features = false` keeps the zero-cost law:
