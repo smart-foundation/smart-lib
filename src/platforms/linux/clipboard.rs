@@ -557,10 +557,12 @@ pub use x11::X11SelectionHost;
 // zwlr_data_control_manager_v1), the data-control device, the source and
 // selection offers, the mime-type offers and the fd-passing read — every one
 // of them over the real wire protocol through `wayland-client`, never a
-// wl-paste/xclip subprocess. It is proven against a scripted compositor (a
-// real wayland-server peer in the tests) because this box runs no compositor,
-// and the availability rows say exactly that: protocol-proven here,
-// live-proven on the first box with a compositor.
+// wl-paste/xclip subprocess. Offers are destroyed when they are replaced (the
+// protocol makes the client the offer's owner), so a long-lived seat leaks
+// nothing. It is proven against a scripted compositor (a real wayland-server
+// peer in the tests) because this box runs no compositor, and the availability
+// rows say exactly that: protocol-proven here, live-proven on the first box
+// with a compositor.
 // ═══════════════════════════════════════════════════════════════════════
 mod wayland {
     // Edition-2021 `extern crate` is module-local; this nested std backend needs
@@ -612,6 +614,11 @@ mod wayland {
         /// protocol id (pruned to the selection and primary selection, so a
         /// long-lived seat cannot grow this without bound).
         offer_mimes: HashMap<u32, Vec<String>>,
+        /// Every offer object this client currently holds. The protocol makes
+        /// the CLIENT the owner of an offer's lifetime (the compositor never
+        /// destroys one), so a replaced or never-selected offer is destroyed
+        /// here rather than leaked for the connection's life.
+        offers: HashMap<u32, ZwlrDataControlOfferV1>,
         /// The current selection's offer — the fd-passing read target.
         selection: Option<ZwlrDataControlOfferV1>,
         /// The primary selection's offer, when the protocol version carries it.
@@ -631,6 +638,26 @@ mod wayland {
             offer
                 .and_then(|o| self.offer_mimes.get(&o.id().protocol_id()).cloned())
                 .unwrap_or_default()
+        }
+
+        /// Destroy every live offer that is neither named. The protocol's own
+        /// lifecycle rule: the client owns its offers (the compositor never
+        /// sends an offer a destroy event), so a replaced selection, a replaced
+        /// primary selection or an offer that never became either is destroyed
+        /// here — a long-lived seat leaks no objects.
+        fn reap_offers(&mut self, keep_a: Option<u32>, keep_b: Option<u32>) {
+            let dead: Vec<u32> = self
+                .offers
+                .keys()
+                .copied()
+                .filter(|pid| Some(*pid) != keep_a && Some(*pid) != keep_b)
+                .collect();
+            for pid in dead {
+                if let Some(offer) = self.offers.remove(&pid) {
+                    offer.destroy();
+                }
+                self.offer_mimes.remove(&pid);
+            }
         }
 
         /// Create the data-control device once both globals it needs are bound
@@ -697,22 +724,25 @@ mod wayland {
                 // A new offer arrives; its MIME types follow as `offer` events
                 // on the offer itself, then the selection event names it.
                 zwlr_data_control_device_v1::Event::DataOffer { id } => {
-                    state.offer_mimes.insert(id.id().protocol_id(), Vec::new());
+                    let pid = id.id().protocol_id();
+                    state.offer_mimes.insert(pid, Vec::new());
+                    state.offers.insert(pid, id);
                 }
                 zwlr_data_control_device_v1::Event::Selection { id } => {
-                    // The previous selection's offer is dead: prune to what is
-                    // still live so a long session cannot grow the map.
-                    let keep: Vec<u32> = [
-                        id.as_ref().map(|o| o.id().protocol_id()),
-                        state.primary_selection.as_ref().map(|o| o.id().protocol_id()),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect();
-                    state.offer_mimes.retain(|k, _| keep.contains(k));
+                    // The previous selection's offer is dead: destroy every
+                    // live offer that is neither the new selection nor the
+                    // primary selection (the protocol's own lifecycle rule,
+                    // since the client owns its offers), so a long session
+                    // leaks no objects and the map stays bounded.
+                    let keep_selection = id.as_ref().map(|o| o.id().protocol_id());
+                    let keep_primary = state.primary_selection.as_ref().map(|o| o.id().protocol_id());
+                    state.reap_offers(keep_selection, keep_primary);
                     state.selection = id;
                 }
                 zwlr_data_control_device_v1::Event::PrimarySelection { id } => {
+                    let keep_selection = state.selection.as_ref().map(|o| o.id().protocol_id());
+                    let keep_primary = id.as_ref().map(|o| o.id().protocol_id());
+                    state.reap_offers(keep_selection, keep_primary);
                     state.primary_selection = id;
                 }
                 zwlr_data_control_device_v1::Event::Finished => {
@@ -988,7 +1018,7 @@ mod wayland {
 
         fn claim(&self, offers: Vec<(String, Vec<u8>)>) -> std::result::Result<(), String> {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            let queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             let qh = queue.handle();
             // Each claim starts a fresh source: offering after set_selection is
             // a protocol error, so the previous source is destroyed first.
@@ -1970,10 +2000,8 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
     mod wayland_seat {
         use super::*;
-        use crate::core::ErrorCode;
         use std::collections::HashMap;
-        use std::io::{Read as _, Write as _};
-        use std::os::fd::AsFd as _;
+        use std::io::Read as _;
         use std::os::unix::net::UnixStream;
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         use std::sync::{Arc, Mutex};
@@ -2135,7 +2163,11 @@ mod tests {
                         let mut file = std::fs::File::from(fd);
                         let _ = file.write_all(&payload);
                     }
-                    zwlr_data_control_offer_v1::Request::Destroy => {}
+                    // The client owns its offers (the protocol's lifecycle
+                    // rule): a replaced or unselected offer is destroyed.
+                    zwlr_data_control_offer_v1::Request::Destroy => {
+                        state.log.push("offer destroy".to_string());
+                    }
                     _ => {}
                 }
             }
@@ -2193,6 +2225,8 @@ mod tests {
             display: Arc<Mutex<Display<Seat>>>,
             seat: Arc<Mutex<Seat>>,
             stop: Arc<AtomicBool>,
+            /// Held so the seat's pump thread outlives the borrows it clones.
+            #[allow(dead_code)]
             pump: std::thread::JoinHandle<()>,
         }
 
@@ -2201,8 +2235,8 @@ mod tests {
             /// advertises both; a seat with no data-control manager is the
             /// honest-negative case the arm must name rather than fake).
             fn start(root: &std::path::Path, globals: &[&str]) -> (RunningSeat, String) {
-                let mut display = Display::<Seat>::new().expect("the scripted seat starts");
-                let mut handle = display.handle();
+                let display = Display::<Seat>::new().expect("the scripted seat starts");
+                let handle = display.handle();
                 for global in globals {
                     match *global {
                         "zwlr_data_control_manager_v1" => {
@@ -2227,7 +2261,7 @@ mod tests {
                         let deadline = Instant::now() + Duration::from_secs(20);
                         while !stop.load(AtomicOrdering::Relaxed) && Instant::now() < deadline {
                             if let Ok(Some(stream)) = socket.accept() {
-                                let mut d = display.lock().unwrap();
+                                let d = display.lock().unwrap();
                                 if let Err(e) = d.handle().insert_client(stream, Arc::new(SeatClient)) {
                                     std::eprintln!("PUMP insert_client failed: {e}");
                                 } else {
@@ -2448,6 +2482,27 @@ mod tests {
                 SelectionRead::Empty => {}
                 other => panic!("expected the honest empty, got {other:?}"),
             }
+            // The object lifecycle, over the wire: the client owns its offers
+            // (the compositor never destroys one), so the offers replaced by
+            // the cleared selection were destroyed by the client.
+            let destroyed = {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    if seat.log().iter().any(|l| l == "offer destroy") {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    host.serve_pending();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            };
+            assert!(
+                destroyed,
+                "the client destroyed its replaced offers: {:?}",
+                seat.log()
+            );
 
             // The backend over this seat publishes the real transport.
             let backend = LinuxClipboardBackend::with_host(
@@ -2458,6 +2513,7 @@ mod tests {
             );
             assert_eq!(backend.clipboard_caps(), ("wayland".to_string(), true, true));
             drop(backend);
+            let _ = std::fs::remove_dir_all(&root);
         }
 
         /// The engine's own decision when a Wayland seat speaks no data-control
