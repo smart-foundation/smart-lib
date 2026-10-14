@@ -128,3 +128,55 @@ fn json_output_is_contract_shaped() {
     let value = evaluate(&cmd(&["clipboard", "get"]), &backend, refused()).unwrap();
     assert_eq!(shell::value::to_json(&value), "null");
 }
+
+/// The Wayland arm is rendered from the engine's OWN availability matrix: the
+/// status token and the measured reason travel in the value tree, so the shell
+/// asserts nothing about this host that the engine did not measure.
+#[test]
+fn the_wayland_arm_is_the_engines_own_availability_row() {
+    let backend = MockClipboard::seat();
+    let value = evaluate(&cmd(&["clipboard"]), &backend, refused()).unwrap();
+    assert_eq!(
+        value.field_str("wayland_status"),
+        "degraded",
+        "on a host with no compositor the engine's matrix reports DEGRADED-with-reason"
+    );
+    let reason = value.field_str("wayland_reason");
+    assert!(reason.contains("wlr-data-control"), "{reason}");
+    assert!(
+        reason.contains("no Wayland compositor runs on this host"),
+        "the physical limit is named: {reason}"
+    );
+    let rendered = shell::domains::clipboard::render::render_action(
+        &cmd(&["clipboard"]),
+        &value,
+        shell::OutputFormat::Human,
+    );
+    assert!(rendered.contains("wlr-data-control"), "{rendered}");
+    assert!(rendered.contains("degraded"), "{rendered}");
+}
+
+/// The content preview is one line, whatever the seat holds: a payload with
+/// newlines in it must not break the tree it is rendered into.
+#[test]
+fn the_content_preview_is_one_line_whatever_the_seat_holds() {
+    let backend = MockClipboard::seat();
+    backend
+        .set_content(smart_lib::domains::clipboard::types::ClipboardContent {
+            mime_type: "text/plain".into(),
+            data: b"line one\nline two\nline three".to_vec(),
+        })
+        .unwrap();
+    let value = evaluate(&cmd(&["clipboard", "get"]), &backend, refused()).unwrap();
+    let rendered = shell::domains::clipboard::render::render_action(
+        &cmd(&["clipboard", "get"]),
+        &value,
+        shell::OutputFormat::Human,
+    );
+    assert_eq!(
+        rendered.lines().count(),
+        4,
+        "header plus three rows, never a wrapped tree: {rendered}"
+    );
+    assert!(rendered.contains("line one line two"), "{rendered}");
+}

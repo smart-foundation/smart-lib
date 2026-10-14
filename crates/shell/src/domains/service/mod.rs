@@ -15,11 +15,16 @@
 //! honest answer — the supervisor's control tree is root-only for uid 1000.
 //!
 //! What this host cannot serve is answered in the shell's own aesthetic:
-//! a root-only supervise tree answers `○ unknown` with the measured reason
-//! naming the denied path, the registry-config surface (quota, health-check
-//! configuration, metrics) answers `✗ unavailable` with the contract's own
-//! reason class, and sysvinit-only concepts answer with the supervisor's name
-//! and its absence. Never a fake empty, never a fabricated state.
+//! a service that is declared but not linked into the supervisor's scan dir
+//! answers `○ unknown` with the measured reason naming the stat path it did
+//! not find and both supervision facts (a real /proc-derived state for EVERY
+//! uid, not a privilege wall), the registry-config surface (quota,
+//! health-check configuration, metrics) answers `✗ unavailable` with the
+//! contract's own reason class, and sysvinit-only concepts answer with the
+//! supervisor's name and its absence. The ONE physically-privileged half is
+//! the supervisor's own exact stat words, reachable with
+//! `sudo ./target/debug/examples/service-state-probe --state-root /run/runit`.
+//! Never a fake empty, never a fabricated state.
 
 use clap::{Parser, Subcommand};
 

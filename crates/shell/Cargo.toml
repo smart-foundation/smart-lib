@@ -56,3 +56,13 @@ dirs = "5"
 toml = "0.8"
 atty = "0.2"
 serde = { version = "1", features = ["derive"] }
+# The terminal's own width table: East_Asian_Width + the emoji/zero-width
+# classes, per Unicode release. This is the genuinely heavy half — data, not
+# logic — and `console`/`tabled`/`ratatui` all measure with it, so the shell's
+# cells measure the same columns the ecosystem's do. A hand-rolled range list
+# went stale here (it drew `⛔` two columns, so a blocked radio's row outgrew
+# its own border), and no range list written once stays right across releases.
+# `width()` is the Western rule (Ambiguous = 1), `width_cjk()` the CJK rule
+# (Ambiguous = 2); the renderer picks between them per locale
+# (`widgets::ambiguous_width`). `no_std`, ~40 KiB.
+unicode-width = "0.2"

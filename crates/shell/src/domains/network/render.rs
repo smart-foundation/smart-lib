@@ -6,12 +6,18 @@
 
 use crate::color::ColorExt;
 use crate::selector::Value;
-use crate::widgets::Table;
+use crate::widgets::{pad_to, Cell, Sgr, Table};
 use crate::OutputFormat;
 
 use smart_lib::domains::network::types::{
     ConnStatus, InterfaceSnapshot, KnownWifiNetwork, RadioState, WifiNetwork,
 };
+
+/// The widest a radio's state cell can be — `⛔ hard-blocked`, measured as the
+/// terminal draws it (the mark is Wide, the rest ASCII: 14 columns). The
+/// state column is padded to this, so a blocked radio and an idle one put
+/// their `hard=` / `soft=` boxes on the same columns.
+const RADIO_STATE_COLUMN: usize = 14;
 
 /// The value a `network` / `network interfaces` command hands the pipe engine.
 pub fn interfaces_value(items: &[InterfaceSnapshot]) -> Result<Value, crate::error::SmartError> {
@@ -151,7 +157,7 @@ fn render_human(cmd: &super::NetworkCmd, value: &Value) -> String {
                     .unwrap_or_default()
             };
             let mut out = String::new();
-            out.push_str(&format!("  {} {}\n", "🔌".cyan(), name.cyan().bold()));
+            out.push_str(&format!("  {} {} {}\n", "🔌".blue().bold(), name.blue().bold(), "— interface".dimmed()));
             out.push_str(&format!("  ├─ Type          {}\n", field("type")));
             out.push_str(&format!("  ├─ Connected     {}\n", yes_no(value.field_bool("connected"))));
             out.push_str(&format!(
@@ -191,7 +197,7 @@ fn render_human(cmd: &super::NetworkCmd, value: &Value) -> String {
                     .unwrap_or(false);
                 format!(
                     "  {} wifi radio — {}\n  ├─ enabled      {}\n  ├─ hard-blocked {}\n  └─ soft-blocked {}",
-                    "📶".cyan(),
+                    "📶".blue().bold(),
                     if hard {
                         "⛔ hard-blocked".red()
                     } else if enabled {
@@ -349,20 +355,25 @@ pub fn render_status_view(value: &Value) -> String {
             let hard = radio.field_bool("hard_blocked");
             let soft = radio.field_bool("soft_blocked");
             let enabled = radio.field_bool("enabled");
+            // The state is a (content, style) cell padded on its CONTENT to
+            // the widest state there is. A `{:<9}` on the styled string would
+            // count the escape bytes AND never fire (the shortest state is
+            // already 9 columns of content), so a blocked radio's row pushed
+            // the hard=/soft= columns out of the frame.
             let state = if hard {
-                "⛔ hard-blocked".red()
+                Cell::styled("⛔ hard-blocked", Sgr::Red)
             } else if soft {
-                "⛔ soft-blocked".red()
+                Cell::styled("⛔ soft-blocked", Sgr::Red)
             } else if enabled {
-                "◉ enabled".green()
+                Cell::styled("◉ enabled", Sgr::Green)
             } else {
-                "○ disabled".dimmed()
+                Cell::styled("○ disabled", Sgr::Dimmed)
             };
             out.push_str(&format!(
                 "  │  {} {:<9} {} hard={} soft={}\n",
                 branch,
-                radio.field_str("name"),
-                state,
+                pad_to(&radio.field_str("name"), 9),
+                pad_to(&state.to_string(), RADIO_STATE_COLUMN),
                 if hard { "yes".red().to_string() } else { "no".dimmed().to_string() },
                 if soft { "yes".red().to_string() } else { "no".dimmed().to_string() },
             ));
@@ -372,11 +383,14 @@ pub fn render_status_view(value: &Value) -> String {
     if let Value::List(interfaces) = value.field("interfaces") {
         for (i, iface) in interfaces.iter().enumerate() {
             let branch = if i + 1 == interfaces.len() { "└─" } else { "├─" };
+            // Padded on DISPLAY width, not on `chars().count()`: the name and
+            // the type are host text, and an escape or a wide mark in either
+            // would otherwise push the hostState column out of the frame.
             out.push_str(&format!(
-                "     {} {:<16} {:<9} {} hostState {} ({})\n",
+                "     {} {} {} {} hostState {} ({})\n",
                 branch,
-                iface.field_str("name"),
-                iface.field_str("type"),
+                pad_to(&iface.field_str("name"), 16),
+                pad_to(&iface.field_str("type"), 9),
                 if iface.field_bool("connected") { "◉".to_string() } else { "○".to_string() },
                 iface.field_str("host_state"),
                 iface.field_str("host_state_source").dimmed(),

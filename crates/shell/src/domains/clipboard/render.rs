@@ -6,7 +6,14 @@
 
 use crate::color::ColorExt;
 use crate::selector::Value;
-use crate::widgets::Table;
+use crate::widgets::{truncate_to, Table};
+
+/// The widest the history ledger's TEXT column may grow: 40 display columns of
+/// content, then an ellipsis that says it was cut.
+const TEXT_COLUMN: usize = 40;
+/// How much of the Wayland row's measured reason the status view prints; the
+/// full sentence is in the JSON and raw doors.
+const WAYLAND_COLUMN: usize = 78;
 use crate::OutputFormat;
 
 use smart_lib::domains::clipboard::types::{ClipboardSizeLimits, Pagination};
@@ -32,15 +39,44 @@ pub fn status_value(backend: &dyn ClipboardBackend) -> Result<Value, crate::erro
     };
 
     let history = history_value(backend, Pagination { offset: 0, limit: u32::MAX })?;
+    let (wayland_status, wayland_reason) = wayland_arm();
 
     Ok(Value::Object(vec![
         ("transport".into(), Value::String(transport)),
         ("available".into(), Value::Bool(can_read)),
         ("writable".into(), Value::Bool(can_write)),
+        ("wayland_status".into(), Value::String(wayland_status)),
+        ("wayland_reason".into(), Value::String(wayland_reason)),
         ("content".into(), content),
         ("mimes".into(), mimes),
         ("history".into(), history),
     ]))
+}
+
+/// The Wayland arm exactly as the engine's own availability matrix reports it:
+/// the row's status token and its measured reason. The shell renders the row it
+/// is handed rather than asserting what this host can do — on a box with no
+/// compositor the row is DEGRADED-with-physical-reason, and that is what the
+/// status view says.
+fn wayland_arm() -> (String, String) {
+    use smart_lib::domains::clipboard::availability::{
+        AvailStatus, CLIPBOARD_AVAILABILITY,
+    };
+    match CLIPBOARD_AVAILABILITY
+        .iter()
+        .find(|row| row.name == "waylandDataControl")
+    {
+        Some(row) => (
+            match row.status {
+                AvailStatus::Real => "real",
+                AvailStatus::Degraded => "degraded",
+                AvailStatus::Unavailable => "unavailable",
+            }
+            .to_string(),
+            row.reason.to_string(),
+        ),
+        None => ("unavailable".to_string(), String::new()),
+    }
 }
 
 /// One content value (a `get`/`convert`/`content` result): the MIME type, the
@@ -168,6 +204,25 @@ fn render_status_view(value: &Value) -> String {
         "  ├─ Transport   {}\n",
         transport_state(value.field_str("transport").as_str(), value.field_bool("available"))
     ));
+    // The Wayland arm, as the engine's own availability matrix reports it: the
+    // status token and the measured reason, never the shell's own guess.
+    let wayland_status = value.field_str("wayland_status");
+    let wayland_reason = value.field_str("wayland_reason");
+    let wayland_glyph = match wayland_status.as_str() {
+        "real" => "◉".green(),
+        "degraded" => "◐".yellow(),
+        _ => "○".dimmed(),
+    };
+    out.push_str(&format!(
+        "  ├─ Wayland     {} {} · wlr-data-control\n",
+        wayland_glyph, wayland_status
+    ));
+    if !wayland_reason.is_empty() {
+        out.push_str(&format!(
+            "  │  └─ {}\n",
+            truncate_to(&wayland_reason, WAYLAND_COLUMN).dimmed()
+        ));
+    }
     out.push_str(&format!(
         "  ├─ Readable    {}\n",
         if value.field_bool("available") {
@@ -193,8 +248,29 @@ fn render_status_view(value: &Value) -> String {
 
 fn render_content(value: &Value, title: &str) -> String {
     match value {
-        Value::Null => format!("  {} {} — ○ empty (the clipboard holds nothing)", "📋".cyan(), title),
-        obj => format!("  {} {}\n{}", "📋".cyan(), title, render_content_block(obj, "  ├─ ")),
+        Value::Null => format!(
+            "  {} {} — ○ empty (the clipboard holds nothing)",
+            "📋".blue().bold(),
+            title
+        ),
+        obj => {
+            // The size is part of the header only when the value carries one (a
+            // `get`/`convert` result does; a preview names its original size
+            // below instead).
+            let size = obj.field_str("size_bytes");
+            let size = if size.is_empty() {
+                String::new()
+            } else {
+                format!("({size} bytes)").dimmed().to_string()
+            };
+            format!(
+                "  {} {} {}\n{}",
+                "📋".blue().bold(),
+                title,
+                size,
+                render_content_block(obj, "  ├─ ")
+            )
+        }
     }
 }
 
@@ -202,8 +278,14 @@ fn render_content_block(content: &Value, indent: &str) -> String {
     let mime = content.field_str("mime_type");
     let size = content.field_str("size_bytes");
     let text = content.field_str("text");
-    let head: String = text.chars().take(60).collect();
-    let shown = if text.chars().count() > 60 { format!("{head}…") } else { head };
+    // One line, always: a payload the seat holds with newlines in it must not
+    // break the tree it is rendered into (the shell never wraps).
+    let flat: String = text
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .take(60)
+        .collect();
+    let shown = if text.chars().count() > 60 { format!("{flat}…") } else { flat };
     out_block(indent, &format!("mime {mime}"), &format!("{size} bytes"))
         + &out_line(indent, &format!("text {shown}"))
 }
@@ -251,7 +333,10 @@ fn render_history(value: &Value) -> String {
             f("size_bytes"),
             if item.field_bool("pinned") { "◉".to_string() } else { "○".to_string() },
             mimes,
-            f("text"),
+            // The ledger's text is bounded to a column so one long copy cannot
+            // blow the table open; the full payload is one door away
+            // (`--output raw`), never hidden.
+            truncate_to(&f("text"), TEXT_COLUMN),
         ]);
     }
     out.push_str(&table.render());
@@ -267,7 +352,12 @@ fn render_types(value: &Value) -> String {
         ),
         Value::List(items) => {
             let mut out = String::new();
-            out.push_str(&format!("  {} {}\n", "🏷️".cyan(), "Offered MIME types".blue().bold()));
+            out.push_str(&format!(
+        "  {} {} {}\n",
+        "🏷️".blue().bold(),
+        "Offered MIME types".blue().bold(),
+        format!("({})", items.len()).dimmed()
+    ));
             for item in items {
                 out.push_str(&format!("  ├─ {}\n", item.display()));
             }
@@ -284,7 +374,7 @@ fn render_limits(value: &Value) -> String {
     let f = |k: &str| value.field_str(k);
     format!(
         "  {} Size Limits (this backend's own policy — DEGRADED, not a host fact)\n  ├─ max item     {}\n  ├─ max history  {}\n  └─ max count    {}",
-        "📐".cyan(),
+        "📐".blue().bold(),
         f("max_item_size"),
         f("max_history_size"),
         f("max_history_count"),

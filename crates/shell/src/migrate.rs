@@ -77,8 +77,8 @@ pub const QUEUE: &[Domain] = &[
         status: Status::RealToday,
         order: None,
         archive:
-            "engine: native X11 CLIPBOARD selection over x11rb (live-proven) + wlr-data-control on Wayland — no wl-paste/xclip shellout",
-        count: "native · 8 REAL / 10 DEGRADED",
+            "engine: native X11 CLIPBOARD selection over x11rb (live-proven) + wlr-data-control on Wayland (seat-proven over a real wayland-server peer) — no wl-paste/xclip shellout",
+        count: "native · 5 REAL / 15 DEGRADED / 0 UNAVAILABLE",
     },
     // ── the ordered queue (C2: one dispatch per domain, in this order) ──
     Domain {
@@ -93,7 +93,7 @@ pub const QUEUE: &[Domain] = &[
         status: Status::RealToday,
         order: None,
         archive:
-            "engine: the supervisor's own state read natively — runit's supervise tree plus the /proc-derived supervision truth (live states for every uid on this host), systemd's system bus over the dbus crate, openrc's own state files — no sv/systemctl/rc-service shellout",
+            "engine: the supervisor's own state read natively — runit's supervise tree plus the /proc-derived supervision truth (live states with pids and clocks for EVERY uid on this host), systemd's system bus over the dbus crate, openrc's own state files — no sv/systemctl/rc-service shellout. The one physically-privileged half is the supervisor's exact stat words: sudo ./target/debug/examples/service-state-probe --state-root /run/runit",
         count: "native · 7 REAL / 12 DEGRADED / 10 UNAVAILABLE",
     },
     Domain {
@@ -456,7 +456,10 @@ pub fn queue_value() -> crate::selector::Value {
 /// body lives. Human is the aesthetic; Json is the same data for agents.
 pub fn render_queue(format: &crate::OutputFormat) -> String {
     use crate::color::ColorExt;
-    use crate::widgets::Table;
+    use crate::widgets::{truncate_to, Table};
+
+    /// The widest the ARCHIVE BODY column may grow before the cut is marked.
+    const ARCHIVE_COLUMN: usize = 72;
 
     match format {
         crate::OutputFormat::Json => crate::value::to_json(&queue_value()),
@@ -503,11 +506,19 @@ pub fn render_queue(format: &crate::OutputFormat) -> String {
                     d.name.to_string(),
                     format!("{} {}", d.status.glyph(), d.status.token()),
                     d.count.to_string(),
-                    d.archive.to_string(),
+                    // The archive body is bounded to a column (never wrapped, the
+                    // cut is marked) — the full sentence is one door away in the
+                    // JSON and raw forms.
+                    truncate_to(d.archive, ARCHIVE_COLUMN),
                 ]);
             }
             out.push_str(&table.render());
             out.push('\n');
+            out.push_str(&format!(
+                "\n  {} the full archive body of any row: {}\n",
+                "●".blue().bold(),
+                "smart migrate -o json".dimmed()
+            ));
             out.push_str(&format!(
                 "\n  {} The order is the recon's value order, now past service (real):\n",
                 "●".blue().bold()

@@ -8,7 +8,7 @@
 use crate::color::ColorExt;
 use crate::error::SmartResult;
 use crate::selector::Value;
-use crate::widgets::Table;
+use crate::widgets::{Cell, Sgr, Table};
 use crate::OutputFormat;
 
 use smart_lib::domains::service::ServiceBackend;
@@ -454,26 +454,33 @@ fn honest_error_value(reason: &str) -> Value {
 }
 
 // ── the aesthetic ─────────────────────────────────────────────────────────
+//
+// Every cell here is CONTENT plus a STYLE (`Cell`), never a pre-styled string:
+// the table measures the content, and applies the colour after the column
+// widths are fixed. That is what keeps the state glyph's width out of the
+// measurement entirely — the failure this table shipped with was exactly a
+// pre-styled `"\x1b[32m◉\x1b[0m"` cell, whose green escape is one byte longer
+// than the dim escape a `○` row carries, measured inconsistently.
 
-fn state_glyph(status: ServiceStatus) -> String {
+fn state_glyph(status: ServiceStatus) -> Cell {
     match status {
-        ServiceStatus::Active => "◉".green().to_string(),
-        ServiceStatus::Inactive => "○".dimmed().to_string(),
-        ServiceStatus::Failed => "✗".red().to_string(),
+        ServiceStatus::Active => Cell::styled("◉", Sgr::Green),
+        ServiceStatus::Inactive => Cell::styled("○", Sgr::Dimmed),
+        ServiceStatus::Failed => Cell::styled("✗", Sgr::Red),
         ServiceStatus::Reloading | ServiceStatus::Activating | ServiceStatus::Deactivating => {
-            "◐".yellow().to_string()
+            Cell::styled("◐", Sgr::Yellow)
         }
-        ServiceStatus::Unknown | ServiceStatus::Custom => "○".dimmed().to_string(),
+        ServiceStatus::Unknown | ServiceStatus::Custom => Cell::styled("○", Sgr::Dimmed),
     }
 }
 
-fn health_glyph(state: HealthState) -> String {
+fn health_glyph(state: HealthState) -> Cell {
     match state {
-        HealthState::Online => "◉".green().to_string(),
-        HealthState::Offline => "○".dimmed().to_string(),
-        HealthState::Degraded => "◐".yellow().to_string(),
-        HealthState::Starting | HealthState::Maintenance => "◐".yellow().to_string(),
-        HealthState::Unknown | HealthState::Custom => "○".dimmed().to_string(),
+        HealthState::Online => Cell::styled("◉", Sgr::Green),
+        HealthState::Offline => Cell::styled("○", Sgr::Dimmed),
+        HealthState::Degraded => Cell::styled("◐", Sgr::Yellow),
+        HealthState::Starting | HealthState::Maintenance => Cell::styled("◐", Sgr::Yellow),
+        HealthState::Unknown | HealthState::Custom => Cell::styled("○", Sgr::Dimmed),
     }
 }
 
@@ -523,7 +530,13 @@ fn render_services(value: &Value) -> String {
     let Value::List(services) = value else {
         return String::new();
     };
-    out.push_str(&format!("  {} {}\n", "⚙".blue().bold(), "Services".blue().bold()));
+    out.push_str(&format!(
+        "  {} {} {} {}\n",
+        "⚙".blue().bold(),
+        "Services".blue().bold(),
+        format!("({})", services.len()).dimmed(),
+        "— the supervisor's own state, read natively".dimmed()
+    ));
     if services.is_empty() {
         out.push_str(&format!(
             "  └─ {} the supervisor serves no services (an honest empty — the supervisor was read \n     and answered with none)\n",
@@ -541,19 +554,31 @@ fn render_services(value: &Value) -> String {
     ]);
     for service in services {
         table = table.row(vec![
-            service.field_str("name"),
-            state_glyph(service_status(service)).to_string() + &service.field_str("state"),
-            service.field_str("pid"),
+            service.field_str("name").into(),
+            // The glyph and its word in the state's own colour: the content is
+            // plain text, so the column measures "◉ active" — never the escape
+            // that colours it.
+            state_glyph(service_status(service))
+                .with_text(&format!(" {}", service.field_str("state"))),
+            service.field_str("pid").into(),
             yes_no(service.field_bool("enabled")),
             yes_no(service.field_bool("supervised")),
-            since_label(service),
+            since_label(service).into(),
         ]);
     }
     out.push_str(&table.render());
     out.push('\n');
-    // One line naming the reason any service answered `unknown` with, so the
-    // table never shows a bare question mark.
-    let unknown: Vec<String> = services
+    // The summary line reports every state including the not-supervised ones,
+    // so nothing hides behind a single "running" count.
+    let active = services
+        .iter()
+        .filter(|s| s.field_str("state") == "active")
+        .count();
+    let failed = services
+        .iter()
+        .filter(|s| s.field_str("state") == "failed")
+        .count();
+    let unknown = services
         .iter()
         .filter(|s| s.field_str("state") == "unknown")
         .filter_map(|s| {
@@ -564,18 +589,66 @@ fn render_services(value: &Value) -> String {
                 Some(format!("{}: {}", s.field_str("name"), reason))
             }
         })
-        .collect();
+        .collect::<Vec<String>>();
+    let supervised = services
+        .iter()
+        .filter(|s| s.field_bool("supervised"))
+        .count();
+    out.push_str(&format!(
+        "\n  {} active · {} supervised · {} failed — {} row(s) not supervised on this host\n",
+        active,
+        supervised,
+        failed,
+        services.len().saturating_sub(supervised)
+    ));
+    // One block naming WHY the rows that answered `unknown` did, in the
+    // supervisor's own measured class: a credential wall is named as one, and
+    // a host that simply does not supervise the service is named as that.
+    // Neither is a fabrication and neither is hidden.
     if !unknown.is_empty() {
+        let blocked = unknown
+            .iter()
+            .filter(|l| l.contains("no-privilege:"))
+            .count();
+        let unsup = unknown
+            .iter()
+            .filter(|l| l.contains("not-found:"))
+            .count();
+        if blocked > 0 {
+            out.push_str(&format!(
+                "\n  {} the supervisor's run state is not readable by this caller — {} row(s)\n",
+                "●".blue().bold(),
+                blocked
+            ));
+            out.push_str("     answered with a measured no-privilege reason (below).\n");
+        }
+        if unsup > 0 {
+            out.push_str(&format!(
+                "\n  {} real states for every uid — no row above is blocked by privilege.\n",
+                "●".blue().bold()
+            ));
+            out.push_str(
+                "     These services are not supervised on this host: the supervisor's own read\n",
+            );
+            out.push_str(
+                "     found no supervise tree for them and no process serving them — the reason\n",
+            );
+            out.push_str("     each one did not find is measured, per row, below.\n");
+        }
+        out.push_str(
+            "     The one physically-privileged half is the supervisor's own exact stat words\n",
+        );
+        out.push_str("     (its supervise tree is root-only for this uid):\n");
         out.push_str(&format!(
-            "\n  {} the supervisor's run state is not readable by this caller —\n",
-            "●".blue().bold()
+            "       {}\n",
+            "sudo ./target/debug/examples/service-state-probe --state-root /run/runit".dimmed()
         ));
         for line in unknown.iter().take(3) {
-            out.push_str(&format!("    {}\n", line));
+            out.push_str(&format!("       {}\n", line));
         }
         if unknown.len() > 3 {
             out.push_str(&format!(
-                "    … and {} more service(s) with the same measured reason\n",
+                "       … and {} more service(s) with the same measured reason\n",
                 unknown.len() - 3
             ));
         }
@@ -606,11 +679,11 @@ fn service_health_state(service: &Value) -> HealthState {
     }
 }
 
-fn yes_no(yes: bool) -> String {
+fn yes_no(yes: bool) -> Cell {
     if yes {
-        "◉".green().to_string()
+        Cell::styled("◉", Sgr::Green)
     } else {
-        "○".dimmed().to_string()
+        Cell::styled("○", Sgr::Dimmed)
     }
 }
 
@@ -712,13 +785,23 @@ fn service_health_state_of(token: &str) -> HealthState {
 fn render_health(value: &Value) -> String {
     let mut out = String::new();
     if let Some(error) = error_field(value) {
-        out.push_str(&format!("  ❤ Health\n  └─ {} {}\n", "✗".red(), error));
+        out.push_str(&format!(
+            "  {} Health\n  └─ {} {}\n",
+            "❤".blue().bold(),
+            "✗".red(),
+            error
+        ));
         return out.trim_end().to_string();
     }
     let Value::List(services) = value else {
         return String::new();
     };
-    out.push_str(&format!("  {} {}\n", "❤".red().bold(), "Health".red().bold()));
+    out.push_str(&format!(
+        "  {} {} {}\n",
+        "❤".blue().bold(),
+        "Health".blue().bold(),
+        format!("({})", services.len()).dimmed()
+    ));
     if services.is_empty() {
         out.push_str(&format!("  └─ {} no service to report on\n", "○".dimmed()));
         return out.trim_end().to_string();
@@ -732,15 +815,17 @@ fn render_health(value: &Value) -> String {
     ]);
     for service in services {
         table = table.row(vec![
-            service.field_str("name"),
-            health_glyph(service_health_state(service)).to_string() + &service.field_str("state"),
+            service.field_str("name").into(),
+            health_glyph(service_health_state(service))
+                .with_text(&format!(" {}", service.field_str("state"))),
             yes_no(service.field_bool("quarantined")),
             if service.field_bool("last_check_passed") {
                 "◉ passed".to_string()
             } else {
                 "○ not run".to_string()
-            },
-            service.field_str("fault_count"),
+            }
+            .into(),
+            service.field_str("fault_count").into(),
         ]);
     }
     out.push_str(&table.render());
@@ -751,8 +836,8 @@ fn render_quarantined(value: &Value) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "  {} {}\n",
-        "🚧".yellow(),
-        "Quarantined".yellow().bold()
+        "🚧".blue().bold(),
+        "Quarantined".blue().bold()
     ));
     let Value::Object(fields) = value else {
         return out.trim_end().to_string();
@@ -776,13 +861,13 @@ fn render_quarantined(value: &Value) -> String {
 fn render_deps(value: &Value) -> String {
     let mut out = String::new();
     if let Some(error) = error_field(value) {
-        out.push_str(&format!("  {} Dependencies\n  └─ {} {}\n", "🔗".cyan(), "✗".red(), error));
+        out.push_str(&format!("  {} Dependencies\n  └─ {} {}\n", "🔗".blue().bold(), "✗".red(), error));
         return out.trim_end().to_string();
     }
     let Value::List(deps) = value else {
         return String::new();
     };
-    out.push_str(&format!("  {} {}\n", "🔗".cyan(), "Dependencies".cyan().bold()));
+    out.push_str(&format!("  {} {} {}\n", "🔗".blue().bold(), "Dependencies".blue().bold(), format!("({})", deps.len()).dimmed()));
     if deps.is_empty() {
         out.push_str(&format!(
             "  └─ {} the supervisor declares none for this service (its own facts, not an omission)\n",
@@ -807,7 +892,7 @@ fn render_resolve(value: &Value) -> String {
     let id = value.field_str("service_id");
     format!(
         "  {} resolve {:<20} {} {}",
-        "🔎".cyan(),
+        "🔎".blue().bold(),
         name,
         if present {
             "◉".green().to_string()
@@ -827,12 +912,12 @@ fn render_metrics(value: &Value) -> String {
     // with the answer rather than a table of zeros a reader could mistake for
     // "nothing was measured because nothing happened".
     if let Some(reason) = error_field(value) {
-        return format!("  {} Metrics — {} {}", "📈".cyan(), "✗".red(), reason);
+        return format!("  {} Metrics — {} {}", "📈".blue().bold(), "✗".red(), reason);
     }
     let f = |k: &str| value.field_str(k);
     format!(
         "  {} Metrics — measured over {} ns\n  ├─ requests  {}\n  ├─ errors    {}\n  └─ p99       {} ns",
-        "📈".cyan(),
+        "📈".blue().bold(),
         f("window_ns"),
         f("request_count"),
         f("error_count"),
@@ -854,8 +939,8 @@ fn render_watch(value: &Value) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "  {} {} — {} event(s) bounded\n",
-        "⟳".cyan(),
-        "Service events".cyan().bold(),
+        "⟳".blue().bold(),
+        "Service events".blue().bold(),
         events.len()
     ));
     if events.is_empty() {
@@ -883,8 +968,8 @@ fn render_controls(value: &Value) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "  {} {} — the one gated surface, and what it honestly answers here\n",
-        "🔒".yellow(),
-        "ServiceControl".yellow().bold()
+        "🔒".blue().bold(),
+        "ServiceControl".blue().bold()
     ));
     for verb in verbs {
         let class = verb.field_str("reason_class");
@@ -909,7 +994,7 @@ fn render_logs(value: &Value) -> String {
     let service = value.field_str("service");
     let reason = value.field_str("reason");
     let mut out = String::new();
-    out.push_str(&format!("  {} {} logs\n", "📜".cyan(), service));
+    out.push_str(&format!("  {} {} logs\n", "📜".blue().bold(), service));
     out.push_str(&format!("  └─ {} {}\n", "○".dimmed(), reason));
     out.trim_end().to_string()
 }
