@@ -19,12 +19,6 @@ use smart_lib::domains::logging::LoggingBackend;
 use super::{domain_value, entry_value, filter_of, sink_value};
 use super::{LoggingAction as A, LoggingCmd};
 
-/// The most rows one human table draws, and the line that names the cut.
-const MAX_ROWS: usize = 40;
-
-/// The most rows one human LINE view draws.
-const MAX_LINES: usize = 40;
-
 /// The engine's own published reason for one contract method, so a degraded row
 /// is answered with the matrix's own measured words.
 fn matrix_reason(method: &str) -> Option<String> {
@@ -272,16 +266,17 @@ fn render_sinks(value: &Value) -> String {
         ));
         return out.trim_end().to_string();
     }
-    let hidden = sinks.len().saturating_sub(MAX_ROWS);
-    let shown = &sinks[..sinks.len().min(MAX_ROWS)];
     let mut table = Table::new(vec![
         "".into(),
         "SINK".into(),
         "PATH".into(),
         "READABLE".into(),
         "MEASURED REASON".into(),
-    ]);
-    for sink in shown {
+    ])
+    .cap(1, 28)
+    .cap(2, 44)
+    .cap(4, 40);
+    for sink in &sinks {
         let readable = sink.field_bool("readable");
         table = table.row(vec![
             if readable {
@@ -300,13 +295,6 @@ fn render_sinks(value: &Value) -> String {
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more sink(s) the host's own scan found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.push_str(&format!(
         "\n  {} {}\n",
         "●".blue().bold(),
@@ -341,15 +329,15 @@ fn render_domains(value: &Value) -> String {
         ));
         return out.trim_end().to_string();
     }
-    let hidden = domains.len().saturating_sub(MAX_ROWS);
-    let shown = &domains[..domains.len().min(MAX_ROWS)];
     let mut table = Table::new(vec![
         "DOMAIN".into(),
         "LEVEL".into(),
         "SAMPLING".into(),
         "WHAT IT IS".into(),
-    ]);
-    for domain in shown {
+    ])
+    .cap(0, 30)
+    .cap(3, 52);
+    for domain in &domains {
         let rate = domain.field("sampling_rate").as_f64().unwrap_or(1.0);
         table = table.row(vec![
             truncate_to(&domain.field_str("name"), 30).into(),
@@ -360,13 +348,6 @@ fn render_domains(value: &Value) -> String {
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more domain(s)\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
@@ -392,22 +373,13 @@ fn render_tail(value: &Value, domain: &str) -> String {
         ));
         return out.trim_end().to_string();
     }
-    let hidden = entries.len().saturating_sub(MAX_LINES);
-    let shown = &entries[..entries.len().min(MAX_LINES)];
-    for entry in shown {
+    for entry in &entries {
         out.push_str(&format!(
             "  {} {:<7} {:<24} {}\n",
             level_glyph(&entry.field_str("level")),
             entry.field_str("level"),
-            entry.field_str("domain"),
+            truncate_to(&entry.field_str("domain"), 24).dimmed(),
             entry.field_str("message")
-        ));
-    }
-    if hidden > 0 {
-        out.push_str(&format!(
-            "  {} … and {} more line(s) this sink carries\n",
-            "…".dimmed(),
-            hidden
         ));
     }
     let reason = value.field_str("reason");
@@ -439,22 +411,13 @@ fn render_entries(value: &Value) -> String {
         ));
         return out.trim_end().to_string();
     }
-    let hidden = entries.len().saturating_sub(MAX_LINES);
-    let shown = &entries[..entries.len().min(MAX_LINES)];
-    for entry in shown {
+    for entry in &entries {
         out.push_str(&format!(
             "  {} {:<7} {:<18} {}\n",
             level_glyph(&entry.field_str("level")),
             entry.field_str("level"),
-            entry.field_str("domain"),
+            truncate_to(&entry.field_str("domain"), 18).dimmed(),
             entry.field_str("message")
-        ));
-    }
-    if hidden > 0 {
-        out.push_str(&format!(
-            "  {} … and {} more retained entr(y|ies)\n",
-            "…".dimmed(),
-            hidden
         ));
     }
     out.trim_end().to_string()

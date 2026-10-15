@@ -442,6 +442,20 @@ pub fn counts() -> (usize, usize, usize) {
     (real, pending, archive)
 }
 
+/// The domains that are LIVE on the engine today, in the board's own order.
+///
+/// This is the single source the REPL's `help` lists from: the list is the
+/// board's (a domain appears because its status is `RealToday`, not because a
+/// help string remembered to mention it), so `help` can never again claim 3 of
+/// 9 live domains while six answer real commands in the same session.
+pub fn live_domains() -> Vec<&'static str> {
+    QUEUE
+        .iter()
+        .filter(|d| d.status == Status::RealToday)
+        .map(|d| d.name)
+        .collect()
+}
+
 /// The queue as a value, so the shell language can pipe it
 /// (`migrate | where status == migrated-pending | count`).
 pub fn queue_value() -> crate::selector::Value {

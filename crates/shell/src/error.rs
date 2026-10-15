@@ -23,8 +23,9 @@ pub enum SmartError {
     NotSupported(String),
     /// A host/filesystem error.
     Io(String),
-    /// The operator cancelled.
-    Cancelled,
+    /// The operator cancelled — with the question they declined, so a log
+    /// says what was refused and by whom, never a bare "cancelled".
+    Cancelled(String),
 }
 
 impl SmartError {
@@ -43,6 +44,9 @@ impl SmartError {
     pub fn io(reason: impl Into<String>) -> Self {
         SmartError::Io(reason.into())
     }
+    pub fn cancelled(reason: impl Into<String>) -> Self {
+        SmartError::Cancelled(reason.into())
+    }
 }
 
 impl fmt::Display for SmartError {
@@ -54,12 +58,53 @@ impl fmt::Display for SmartError {
             SmartError::Unavailable(m) => write!(f, "{m}"),
             SmartError::NotSupported(m) => write!(f, "{m}"),
             SmartError::Io(m) => write!(f, "{m}"),
-            SmartError::Cancelled => write!(f, "cancelled"),
+            SmartError::Cancelled(reason) => write!(f, "{reason}"),
         }
     }
 }
 
 impl std::error::Error for SmartError {}
+
+/// The error's stable kind, the token a script's JSON answer carries. It is
+/// the shell's own vocabulary, and it is the ONLY thing a machine consumes:
+/// the message beside it is for the operator who reads it.
+pub fn kind(e: &SmartError) -> &'static str {
+    match e {
+        SmartError::NotFound(_) => "not_found",
+        SmartError::Failed(_) => "failed",
+        SmartError::InvalidArgument(_) => "invalid_argument",
+        SmartError::Unavailable(_) => "unavailable",
+        SmartError::NotSupported(_) => "not_supported",
+        SmartError::Io(_) => "io",
+        SmartError::Cancelled(_) => "cancelled",
+    }
+}
+
+/// A script-mode answer as JSON: the standard error kind plus the reason.
+/// `--json` / piped / non-TTY refusals answer this way — deterministic, never
+/// a prose line a parser would have to guess at, and never a silent exit 0.
+pub fn json_error(e: &SmartError) -> String {
+    let mut out = String::from("{\"error\":{\"kind\":\"");
+    out.push_str(kind(e));
+    out.push_str("\",\"message\":");
+    let message = e.to_string();
+    let mut escaped = String::new();
+    for c in message.chars() {
+        match c {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if (c as u32) < 0x20 => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    out.push('"');
+    out.push_str(&escaped);
+    out.push_str("\"}}");
+    out
+}
 
 impl From<smart_lib::core::Error> for SmartError {
     /// The engine's error maps one-for-one: the code, the message and the

@@ -32,23 +32,12 @@ fn exact(value: u64) -> Value {
     Value::String(value.to_string())
 }
 
-/// The most rows one human table draws. The host's own records can carry
-/// hundreds of entries (`recently-used.xbel` on this host carries 300+), and a
-/// table 300 rows tall is not the aesthetic — but hiding the rest would be a
-/// lie about how much there is. So the shell draws this many and says, on the
-/// line under the table, exactly how many more the host's own read found.
-const MAX_ROWS: usize = 24;
-
-/// The rows a human table draws, and how many the host's own read found beyond
-/// them (0 when there was nothing to cut).
-fn bounded(mut rows: Vec<Value>) -> (Vec<Value>, usize) {
-    if rows.len() <= MAX_ROWS {
-        return (rows, 0);
-    }
-    let hidden = rows.len() - MAX_ROWS;
-    rows.truncate(MAX_ROWS);
-    (rows, hidden)
-}
+/// The rows a human table draws: exactly what the caller asked for. The row
+/// count is the CALLER'S decision — the shell's own `| take 5` / `--limit` is
+/// the answer, never a renderer's guess. The 24-row peephole that used to live
+/// here hid the host's own read behind a cap the caller never asked for; what
+/// remains is the WIDTH policy (every cell bounded by [`DEFAULT_CELL_CAP`],
+/// the cut marked), which is the renderer's business.
 
 /// The engine's own published reason for one contract method, so a degraded or
 /// unavailable row is answered with the matrix's own measured words rather than
@@ -901,6 +890,7 @@ fn render_human(cmd: &FilesCmd, value: &Value) -> String {
         Some(A::Store { .. }) => render_store(value),
         Some(A::Dedupe { path }) => render_dedupe(value, path),
         Some(A::Watch { path, .. }) => render_watch(value, path),
+        Some(A::Watches) => render_watches(value),
         Some(A::Special { token }) => render_special(value, token),
         Some(A::Trash) => render_trash(value),
         Some(A::Recents) => render_recents(value),
@@ -933,10 +923,10 @@ fn kind_glyph(kind: &str) -> Cell {
 }
 
 fn render_ls(value: &Value) -> String {
-    let (entries, hidden) = bounded(match value {
+    let entries = match value {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     let mut out = String::new();
     if entries.is_empty() {
         out.push_str(&format!(
@@ -968,28 +958,21 @@ fn render_ls(value: &Value) -> String {
     for entry in &entries {
         table = table.row(vec![
             kind_glyph(&entry.field_str("kind")),
-            entry.field_str("name").into(),
+            Cell::path(entry.field_str("name")),
             entry.field_str("kind").into(),
             human_bytes(entry.field("size").as_f64().unwrap_or(0.0) as u64).into(),
             stamp_label(entry.field_str("modified")).into(),
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more entr(y|ies) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
 fn render_find(value: &Value, path: &str) -> String {
-    let (hits, hidden) = bounded(match value {
+    let hits = match value {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     let mut out = String::new();
     out.push_str(&format!(
         "  {} {} {} {}\n",
@@ -1009,27 +992,20 @@ fn render_find(value: &Value, path: &str) -> String {
     for hit in &hits {
         table = table.row(vec![
             kind_glyph(&hit.field_str("kind")),
-            hit.field_str("path").into(),
+            Cell::path(hit.field_str("path")),
             hit.field_str("kind").into(),
             human_bytes(hit.field("size").as_f64().unwrap_or(0.0) as u64).into(),
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more hit(s) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
 fn render_tree(value: &Value, path: &str, depth: u32) -> String {
-    let (rows, hidden) = bounded(match value {
+    let rows = match value {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     let mut out = String::new();
     out.push_str(&format!(
         "  {} {} {} {}\n",
@@ -1057,13 +1033,6 @@ fn render_tree(value: &Value, path: &str, depth: u32) -> String {
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more row(s) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
@@ -1329,10 +1298,10 @@ fn render_locks(value: &Value, path: Option<&str>) -> String {
         "Locks".blue().bold(),
         path.map(|p| p.to_string()).unwrap_or_else(|| "every path".to_string()).bold()
     ));
-    let (locks, hidden) = bounded(match value.field("locks") {
+    let locks = match value.field("locks") {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     if locks.is_empty() {
         let reason = value.field_str("reason");
         out.push_str(&format!(
@@ -1346,19 +1315,12 @@ fn render_locks(value: &Value, path: Option<&str>) -> String {
     for lock in &locks {
         table = table.row(vec![
             Cell::plain(lock.field_str("lock_id")),
-            lock.field_str("path").into(),
+            Cell::path(lock.field_str("path")),
             lock.field_str("owner").into(),
             stamp_label(lock.field_str("acquired_at")).into(),
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more lock(s) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.push_str(&format!(
         "\n  {} the kernel's own fcntl(F_SETLK) advisory locks — this process's table\n",
         "●".blue().bold()
@@ -1392,10 +1354,10 @@ fn render_versions(value: &Value, path: &str) -> String {
         "Versions".blue().bold(),
         path.bold()
     ));
-    let (versions, hidden) = bounded(match value.field("versions") {
+    let versions = match value.field("versions") {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     if versions.is_empty() {
         let reason = value.field_str("reason");
         out.push_str(&format!(
@@ -1423,13 +1385,6 @@ fn render_versions(value: &Value, path: &str) -> String {
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more version(s) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
@@ -1441,10 +1396,10 @@ fn render_branches(value: &Value, path: &str) -> String {
         "Branches".blue().bold(),
         path.bold()
     ));
-    let (branches, hidden) = bounded(match value.field("branches") {
+    let branches = match value.field("branches") {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     if branches.is_empty() {
         out.push_str(&format!(
             "  └─ {} the store holds no branch for {path} (a stable zero total, never a fake)\n",
@@ -1467,13 +1422,6 @@ fn render_branches(value: &Value, path: &str) -> String {
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more branch(es) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
@@ -1536,11 +1484,126 @@ fn render_dedupe(value: &Value, path: &str) -> String {
 }
 
 /// `watch`: the kernel's own inotify records, each one a real event.
-fn render_watch(value: &Value, path: &str) -> String {
-    let (events, hidden) = bounded(match value {
+/// The subscription ledger, as a value: one record per row, with the measured
+/// ownership beside it. The engine has no list-watches verb, so this is the
+/// session's own surface — and it never claims an event: an inotify queue is
+/// the fd's, and the fd dies with the process that armed it.
+pub fn watches_value(session: &crate::session::WatchSession) -> Value {
+    let rows = session.rows();
+    let live = rows
+        .iter()
+        .filter(|r| r.ownership == crate::session::WatchOwnership::Live)
+        .count();
+    let owned = rows
+        .iter()
+        .filter(|r| r.ownership == crate::session::WatchOwnership::Owned)
+        .count();
+    let gone = rows
+        .iter()
+        .filter(|r| r.ownership == crate::session::WatchOwnership::Gone)
+        .count();
+    let watches = Value::List(
+        rows.iter()
+            .map(|row| {
+                Value::Object(vec![
+                    ("path".into(), Value::String(row.record.path.clone())),
+                    ("pid".into(), Value::Number(u64::from(row.record.pid) as f64)),
+                    (
+                        "started_at".into(),
+                        Value::String(row.record.started_at_nanos.to_string()),
+                    ),
+                    (
+                        "ownership".into(),
+                        Value::String(
+                            match row.ownership {
+                                crate::session::WatchOwnership::Live => "live",
+                                crate::session::WatchOwnership::Owned => "owned",
+                                crate::session::WatchOwnership::Gone => "gone",
+                            }
+                            .to_string(),
+                        ),
+                    ),
+                ])
+            })
+            .collect(),
+    );
+    Value::Object(vec![
+        ("watches".into(), watches),
+        ("total".into(), Value::Number(rows.len() as f64)),
+        ("live".into(), Value::Number(live as f64)),
+        ("owned".into(), Value::Number(owned as f64)),
+        ("gone".into(), Value::Number(gone as f64)),
+        (
+            "reason".into(),
+            Value::String(
+                "an inotify queue belongs to the fd that armed it: live rows are this session's                  (the events are theirs to pull), owned rows belong to a live sibling process, and                  a gone row's owner exited so its queue was dropped. No event is ever replayed,                  and no row is invented for a watch nobody armed."
+                    .to_string(),
+            ),
+        ),
+    ])
+}
+
+/// The ledger's human table: ownership is the measured column.
+fn render_watches(value: &Value) -> String {
+    let rows = match value.field("watches") {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
+    let counts = format!(
+        "({} live · {} owned · {} gone)",
+        value.field("live").as_f64().unwrap_or(0.0) as u64,
+        value.field("owned").as_f64().unwrap_or(0.0) as u64,
+        value.field("gone").as_f64().unwrap_or(0.0) as u64
+    );
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  {} {} {} {}\n",
+        "\u{1f441}".blue().bold(),
+        "Watches".blue().bold(),
+        counts.dimmed(),
+        "— the session's ledger; a queue dies with the process that armed it".dimmed()
+    ));
+    if rows.is_empty() {
+        out.push_str(&format!(
+            "  └─ {} no session armed a watch and the shared ledger holds none (an honest empty)\n",
+            "\u{25cb}".dimmed()
+        ));
+        return out.trim_end().to_string();
+    }
+    let mut table = Table::new(vec!["".into(), "PATH".into(), "PID".into(), "OWNERSHIP".into()]);
+    for row in &rows {
+        let ownership = row.field_str("ownership");
+        let pid = row.field("pid").as_f64().unwrap_or(0.0) as u32;
+        let (glyph, words) = match ownership.as_str() {
+            "live" => (
+                Cell::styled("\u{25c9}", Sgr::Green),
+                "live — this session holds the fd".to_string(),
+            ),
+            "owned" => (
+                Cell::styled("\u{25d0}", Sgr::Yellow),
+                format!("owned by pid {pid} (alive)"),
+            ),
+            _ => (
+                Cell::styled("\u{25cb}", Sgr::Dimmed),
+                format!("gone — pid {pid} exited, the queue was dropped"),
+            ),
+        };
+        table = table.row(vec![
+            glyph,
+            crate::widgets::Cell::path(row.field_str("path")),
+            Cell::plain(pid.to_string()),
+            Cell::plain(words),
+        ]);
+    }
+    out.push_str(&table.render());
+    out.trim_end().to_string()
+}
+
+fn render_watch(value: &Value, path: &str) -> String {
+    let events = match value {
+        Value::List(items) => items.clone(),
+        _ => Vec::new(),
+    };
     let mut out = String::new();
     out.push_str(&format!(
         "  {} {} {} {} — the kernel's own inotify records, no polling thread\n",
@@ -1579,13 +1642,6 @@ fn render_watch(value: &Value, path: &str) -> String {
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more event(s) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
@@ -1603,10 +1659,10 @@ fn render_special(value: &Value, token: &str) -> String {
 
 fn render_trash(value: &Value) -> String {
     let mut out = String::new();
-    let (entries, hidden) = bounded(match value.field("entries") {
+    let entries = match value.field("entries") {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     out.push_str(&format!(
         "  {} {} {} — the host's own freedesktop trash\n",
         "🗑".blue().bold(),
@@ -1635,22 +1691,15 @@ fn render_trash(value: &Value) -> String {
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more entr(y|ies) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
 fn render_recents(value: &Value) -> String {
     let mut out = String::new();
-    let (files, hidden) = bounded(match value.field("files") {
+    let files = match value.field("files") {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     out.push_str(&format!(
         "  {} {} {} — the host's own recently-used record\n",
         "🕘".blue().bold(),
@@ -1672,19 +1721,15 @@ fn render_recents(value: &Value) -> String {
     ]);
     for file in &files {
         table = table.row(vec![
-            Cell::plain(file.field_str("path")),
+            // The XBEL record's `file://` URIs run to 250+ characters; the
+            // column is capped and the cut keeps head+basename, so the row
+            // stays a panel the terminal can draw.
+            Cell::path(file.field_str("path")),
             file.field_str("mime_type").into(),
             stamp_label(file.field_str("timestamp")).into(),
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more file(s) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 
@@ -1716,10 +1761,10 @@ fn render_app(value: &Value, mime: &str) -> String {
 
 fn render_grep(value: &Value, path: &str, query: &str) -> String {
     let mut out = String::new();
-    let (hits, hidden) = bounded(match value.field("hits") {
+    let hits = match value.field("hits") {
         Value::List(items) => items.clone(),
         _ => Vec::new(),
-    });
+    };
     out.push_str(&format!(
         "  {} {} {} {} {} — real lines, read natively\n",
         "🧵".blue().bold(),
@@ -1739,19 +1784,12 @@ fn render_grep(value: &Value, path: &str, query: &str) -> String {
     for hit in &hits {
         table = table.row(vec![
             Cell::plain("·"),
-            hit.field_str("path").into(),
+            Cell::path(hit.field_str("path")),
             hit.field_str("line").into(),
             crate::widgets::truncate_to(&hit.field_str("snippet"), 72).into(),
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more hit(s) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
 }
 

@@ -20,11 +20,6 @@ use smart_lib::domains::process::types::{Page, ProcessInfo, ProcessStats, Quota,
 use super::{exit_status_words, info_summary, table_filter, wait_timeout};
 use super::{ProcessAction as A, ProcessCmd};
 
-/// The most rows one human table draws, and the line that names the cut — the
-/// same rule every domain table holds (a host runs hundreds of processes, and
-/// hiding the rest would be a lie about how many there are).
-const MAX_ROWS: usize = 40;
-
 /// A 64-bit value that must not be rounded: `T.Timestamp` is nanoseconds since
 /// the epoch, beyond `f64`'s exact integer range, so it travels as its exact
 /// decimal text.
@@ -596,25 +591,25 @@ pub fn cpu_label(nanos: u64) -> String {
 }
 
 /// The process table: the kernel's own enumeration, every number measured.
+///
+/// The row count is the caller's: `process | take 5` asks for five, and this
+/// renderer draws every row it is handed — the 40-row peephole that used to
+/// cap 374 live processes to forty and print "334 more below the cut" is gone.
+/// The WIDTH is the renderer's: every cell is bounded by the table's column
+/// cap and the cut is marked (`pool_workqueue_rele…worker`, both ends kept),
+/// with the full value in `-o json`.
 fn render_table(value: &Value) -> String {
     let mut out = String::new();
     let Value::List(rows) = value else {
         return String::new();
     };
-    let mut rows = rows.clone();
-    let hidden = rows.len().saturating_sub(MAX_ROWS);
-    rows.truncate(MAX_ROWS);
     out.push_str(&format!(
         "  {} {} {} {} {}\n",
         "🧮".blue().bold(),
         "Processes".blue().bold(),
         format!("({})", value_length(value)).dimmed(),
         "— /proc/<pid> read natively, every value measured".dimmed(),
-        if hidden > 0 {
-            format!("· {} more below the cut", hidden).dimmed().to_string()
-        } else {
-            String::new()
-        }
+        "— every row the read found: `| take N` narrows it".dimmed(),
     ));
     if rows.is_empty() {
         out.push_str(&format!(
@@ -632,10 +627,10 @@ fn render_table(value: &Value) -> String {
         "CPU".into(),
         "THR".into(),
     ]);
-    for row in &rows {
+    for row in rows {
         table = table.row(vec![
             Cell::plain(row.field_str("pid")),
-            truncate_name(row.field_str("name")).into(),
+            row.field_str("name").into(),
             state_glyph(&row.field_str("state")).with_text(&format!(" {}", row.field_str("state"))),
             Cell::plain(row.field_str("uid")),
             human_bytes(row.field("mem").as_f64().unwrap_or(0.0) as u64).into(),
@@ -643,26 +638,18 @@ fn render_table(value: &Value) -> String {
             Cell::plain(row.field_str("threads")),
         ]);
     }
-    out.push_str(&table.render());
+    // The NAME column's ceiling: a name longer than this is middle-cut with
+    // the ellipsis that says so (both ends kept), the full value one door away
+    // in `-o json` / `-o raw`. The ceiling is a WIDTH, never a row count — the
+    // 40-row peephole that used to cap 374 processes is gone, and `| take N`
+    // is how an operator narrows the list.
+    out.push_str(&table.cap(1, 32).render());
     out.push_str(&format!(
         "\n  {} memory is the kernel's own resident pages; CPU is the kernel's own utime+stime \
          scaled by this host's clock-tick rate — never the archive body's hardcoded pair\n",
         "●".blue().bold()
     ));
-    if hidden > 0 {
-        out.push_str(&format!(
-            "  {} … and {} more process(es) the host's own read found\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.trim_end().to_string()
-}
-
-/// The name column: a kernel `comm` is bounded, so a long one is marked as cut
-/// rather than wrapping the row.
-fn truncate_name(name: String) -> String {
-    crate::widgets::truncate_to(&name, 20)
 }
 
 fn value_length(value: &Value) -> usize {
@@ -832,7 +819,7 @@ fn render_threads(value: &Value) -> String {
     for thread in &threads {
         table = table.row(vec![
             Cell::plain(thread.field_str("tid")),
-            truncate_name(thread.field_str("name")).into(),
+            thread.field_str("name").into(),
             state_glyph(&thread.field_str("state"))
                 .with_text(&format!(" {}", thread.field_str("state"))),
             Cell::plain("0".to_string()),

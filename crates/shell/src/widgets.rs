@@ -73,6 +73,17 @@ pub fn make_bar(value: f32) -> String {
     "█".repeat(filled) + &"░".repeat(empty)
 }
 
+/// The widest one cell of a table draws before the cut is marked.
+///
+/// This is a CEILING, never a floor: a column whose content is narrower draws
+/// its natural width, and a column whose content is wider is middle-truncated
+/// to this with an ellipsis that says so. The row-count peepholes this crate
+/// used to carry (40 rows here, 24 there) are gone with it — the caller decides
+/// how many rows it asks for (`| take 5`, `--limit`), and the renderer decides
+/// only how wide one cell may be. The full value is one door away in `-o json`,
+/// and the pipe-ready text is one door away in `-o raw`.
+pub const DEFAULT_CELL_CAP: usize = 48;
+
 /// The style a [`Cell`] wears.
 ///
 /// One style per cell, applied by the renderer once the column widths are
@@ -112,6 +123,19 @@ impl Sgr {
     }
 }
 
+/// How a cell's content is cut when it outgrows its column: the plain middle
+/// ellipsis for ordinary text, or the path rule for a filesystem path — where
+/// the TAIL is the identity (the basename is what an operator looks for), so
+/// the head keeps its leading directories and the basename survives whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CellShape {
+    /// Ordinary text: the middle is cut and the cut is marked.
+    #[default]
+    Text,
+    /// A filesystem path: head + basename survive, the middle is cut.
+    Path,
+}
+
 /// One table cell: its **content** — the text the terminal draws, and the only
 /// thing any width is measured on — and the **style** it wears, applied after
 /// the column widths are known.
@@ -125,6 +149,7 @@ impl Sgr {
 pub struct Cell {
     content: String,
     style: Sgr,
+    shape: CellShape,
 }
 
 impl Cell {
@@ -133,6 +158,7 @@ impl Cell {
         Cell {
             content: content.into(),
             style: Sgr::Plain,
+            shape: CellShape::Text,
         }
     }
 
@@ -142,6 +168,18 @@ impl Cell {
         Cell {
             content: content.into(),
             style,
+            shape: CellShape::Text,
+        }
+    }
+
+    /// A cell holding a filesystem path: when it outgrows its column the
+    /// middle is cut and the BASENAME survives — the tail is the identity, the
+    /// head keeps just enough leading directories to say where it lives.
+    pub fn path(content: impl Into<String>) -> Cell {
+        Cell {
+            content: content.into(),
+            style: Sgr::Plain,
+            shape: CellShape::Path,
         }
     }
 
@@ -153,6 +191,11 @@ impl Cell {
     /// The style the cell wears when the table prints it.
     pub fn style(&self) -> Sgr {
         self.style
+    }
+
+    /// How this cell is cut when it outgrows its column.
+    pub fn shape(&self) -> CellShape {
+        self.shape
     }
 
     /// Append to the content (the style still covers the whole cell). The
@@ -170,15 +213,21 @@ impl Cell {
 
     /// The cell as the terminal should draw it: the style opens, the content
     /// prints, the style ends where the text ends, and the pad follows the
-    /// reset (so a coloured cell's padding is never coloured).
+    /// reset (so a coloured cell's padding is never coloured). Content wider
+    /// than `width` is cut first — by its shape — so a row never outgrows its
+    /// column and never hides that it was cut.
     fn print(&self, width: usize) -> String {
-        let pad = width.saturating_sub(display_width(&self.content));
+        let content = match self.shape {
+            CellShape::Text => truncate_middle(&self.content, width),
+            CellShape::Path => truncate_path(&self.content, width),
+        };
+        let pad = width.saturating_sub(display_width(&content));
         match self.style {
-            Sgr::Plain => format!("{}{}", self.content, " ".repeat(pad)),
+            Sgr::Plain => format!("{content}{}", " ".repeat(pad)),
             style => format!(
                 "{}{}{}{}",
                 style.open(),
-                self.content,
+                content,
                 Sgr::RESET,
                 " ".repeat(pad)
             ),
@@ -225,14 +274,28 @@ impl From<String> for Cell {
 pub struct Table {
     pub headers: Vec<String>,
     rows: Vec<Vec<Cell>>,
+    /// The widest each column draws before its cells are cut. Defaults to
+    /// [`DEFAULT_CELL_CAP`] for every column — every table inherits the bound,
+    /// and a caller that knows its column may set its own.
+    caps: Vec<usize>,
 }
 
 impl Table {
     pub fn new(headers: Vec<String>) -> Self {
         Table {
+            caps: vec![DEFAULT_CELL_CAP; headers.len()],
             headers,
             rows: Vec::new(),
         }
+    }
+
+    /// The most one column draws: its cells are cut to this width, the cut
+    /// marked, and the hidden rest lives in `-o json` and `-o raw`.
+    pub fn cap(mut self, column: usize, max: usize) -> Self {
+        if column < self.caps.len() {
+            self.caps[column] = max;
+        }
+        self
     }
 
     /// Add a row. Anything that becomes a [`Cell`] — plain `String`s, `&str`s,
@@ -257,6 +320,12 @@ impl Table {
                 }
             }
         }
+        // The caller's ceiling: a column never draws wider than its cap, and
+        // the cells in it are cut to the width that remains (see `Cell::print`).
+        for (i, w) in widths.iter_mut().enumerate() {
+            let cap = self.caps.get(i).copied().unwrap_or(DEFAULT_CELL_CAP);
+            *w = (*w).min(cap);
+        }
         widths
     }
 
@@ -272,7 +341,7 @@ impl Table {
                 .headers
                 .iter()
                 .enumerate()
-                .map(|(i, h)| pad_to(h, widths.get(i).copied().unwrap_or(0)))
+                .map(|(i, h)| pad_to(&truncate_to(h, widths.get(i).copied().unwrap_or(0)), widths.get(i).copied().unwrap_or(0)))
                 .collect::<Vec<_>>()
                 .join(" │ "),
         );
@@ -350,6 +419,128 @@ pub fn truncate_to(cell: &str, width: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// The STRATEGY of a width-bounded cut: keep both ends, cut the middle, and
+/// mark the cut — never a re-flow, never a silent drop, and never wider than
+/// the bound.
+///
+/// * **width-exact** — the result's display width is `width` (or the
+///   string's own, whichever is smaller) under the terminal-faithful measure
+///   ([`display_width`]: Wide/Fullwidth two, ambiguous one, ANSI stripped by a
+///   correct CSI skipper). A boundary landing between two two-column glyphs can
+///   leave one column short; it never leaves the bound exceeded.
+/// * **both ends survive** — a name reads from its head and its tail:
+///   `pool_workqueue_rele…worker` beats `pool_workqueue_rele…`, which was the
+///   name-column rot this replaces.
+/// * **the style survives** — an escape inside the cell is copied through, not
+///   measured, exactly as [`truncate_to`] does.
+pub fn truncate_middle(cell: &str, width: usize) -> String {
+    if display_width(cell) <= width {
+        return cell.to_string();
+    }
+    let mark = display_width("…");
+    let budget = width.saturating_sub(mark);
+    // The head keeps a little over half the room: the tail is what an operator
+    // scans for, and it gets the whole basename when the cell is a path.
+    let head_budget = budget.div_ceil(2);
+    let tail_budget = budget - head_budget;
+
+    // The head, walked forward: escapes are copied through and never measured,
+    // exactly as truncate_to copies them.
+    let mut head = String::new();
+    let mut used_head = 0usize;
+    let mut chars = cell.chars().peekable();
+    let mut visible = 0usize;
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            head.push(c);
+            copy_escape(&mut chars, &mut head);
+            continue;
+        }
+        let cw = char_width(c);
+        if used_head + cw > head_budget {
+            break;
+        }
+        used_head += cw;
+        visible += 1;
+        head.push(c);
+    }
+    // The cell's visible characters, so the tail can be walked from the end
+    // without re-parsing the escapes the head already consumed.
+    let tail_source: String = cell.chars().skip(visible).collect();
+    let graphemes: Vec<char> = tail_source.chars().collect();
+    let mut tail = String::new();
+    let mut used_tail = 0usize;
+    let mut j = graphemes.len();
+    while j > 0 {
+        let c = graphemes[j - 1];
+        if c == '\u{1b}' {
+            // A style re-opened at the very tail: stop rather than copy half a
+            // sequence into the result.
+            break;
+        }
+        let cw = char_width(c);
+        if used_tail + cw > tail_budget {
+            break;
+        }
+        used_tail += cw;
+        tail.insert(0, c);
+        j -= 1;
+    }
+    if tail.is_empty() {
+        // The head alone holds the room: the same cut truncate_to would make.
+        return truncate_to(cell, width);
+    }
+    format!("{head}…{tail}")
+}
+
+/// The path rule: when a path outgrows its column the MIDDLE is cut, the
+/// BASENAME survives whole (the tail is the identity), and the head keeps as
+/// many leading directories as the room allows. A basename longer than the
+/// whole width is itself middle-cut, with its own head kept — the extension
+/// and the name's start are what an operator reads.
+///
+/// ```
+/// use shell::widgets::truncate_path;
+/// let cut = truncate_path("/home/lufuno/Pictures/Vacation 2026/photo.jpg", 24);
+/// assert_eq!(shell::widgets::display_width(&cut), 24);
+/// assert!(cut.ends_with("photo.jpg"), "{cut}");
+/// assert!(cut.starts_with("/home"), "{cut}");
+/// ```
+pub fn truncate_path(cell: &str, width: usize) -> String {
+    if display_width(cell) <= width {
+        return cell.to_string();
+    }
+    let (dir, base) = match cell.rfind('/') {
+        Some(i) => (&cell[..=i], &cell[i + 1..]),
+        None => ("", cell),
+    };
+    // The basename is the identity: give it the room it needs, and only then
+    // does the head take what is left. A basename too long for the whole width
+    // is cut on its own middle.
+    let base_width = display_width(base);
+    if base_width + 1 > width {
+        return truncate_middle(base, width);
+    }
+    let mark = display_width("…");
+    let head_budget = width
+        .saturating_sub(base_width)
+        .saturating_sub(mark);
+    let mut head = String::new();
+    let mut used = 0usize;
+    for c in dir.chars() {
+        let cw = char_width(c);
+        if used + cw > head_budget {
+            break;
+        }
+        used += cw;
+        head.push(c);
+    }
+    // The trailing separator rides with the head when it fits: the cut reads
+    // as a directory boundary, not a mid-word break.
+    let head = head.trim_end_matches('/');
+    format!("{head}…{base}")
 }
 
 /// A human size: the host's own bytes, scaled with the binary prefixes the

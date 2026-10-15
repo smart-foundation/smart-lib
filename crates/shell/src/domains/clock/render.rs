@@ -167,19 +167,30 @@ pub fn timer_value(
                 ])),
             }
         }
-        TA::List => Ok(Value::Object(vec![
-            ("timers".into(), Value::List(Vec::new())),
-            ("total".into(), Value::Number(0.0)),
-            (
-                "reason".into(),
-                Value::String(
-                    "the timers this process armed are held by the kernel's own timerfds; the \
-                     subscribe surface (clock watch) is the contract's own way to observe them, \
-                     and the persisted list is a store this host does not carry (named per row)"
-                        .to_string(),
+        TA::List => {
+            // The engine offers no list-timers verb, and this host does not
+            // carry a timer-persistence store, so the rows a session armed are
+            // visible to THAT session only. A caller with no session ledger
+            // (the library path) is told the limit; the session surface
+            // (`evaluate_session`) is the one that answers with rows.
+            Ok(Value::Object(vec![
+                ("timers".into(), Value::List(Vec::new())),
+                ("total".into(), Value::Number(0.0)),
+                (
+                    "reason".into(),
+                    Value::String(
+                        "the engine exposes no list-timers verb and this host does not carry a \
+                         timer-persistence store (its own persistTimer/listPersistedTimers are \
+                         DEGRADED for exactly that reason), so the timers a process armed belong \
+                         to that process's session: the REPL's `clock timer list`, or \
+                         `smart clock timer list`, answers with the session's own rows plus the \
+                         ones earlier sessions left in the shared ledger. This call carries no \
+                         session ledger, so it names the limit rather than inventing rows."
+                            .to_string(),
+                    ),
                 ),
-            ),
-        ])),
+            ]))
+        }
         TA::Cancel { id } => {
             super::guard_host_write(guard, &format!("clock timer cancel {id}"))?;
             let handle = TimerHandle {
@@ -193,6 +204,161 @@ pub fn timer_value(
             ]))
         }
     }
+}
+
+/// The session's timer ledger as a value: the rows this session armed (live,
+/// checkable here), then the rows earlier processes left — each with the
+/// measured ownership beside it. A timerfd belongs to its arming process, so a
+/// firing never survives a process; the ledger names armings and owners, and
+/// `clock timer check <id>` answers the kernel's own count inside the owning
+/// session. Never a fabricated fire.
+pub fn timer_list_value(session: &crate::session::ClockSession) -> Value {
+    let rows = session.rows();
+    let live = rows
+        .iter()
+        .filter(|r| r.ownership == crate::session::TimerOwnership::Live)
+        .count();
+    let owned = rows
+        .iter()
+        .filter(|r| r.ownership == crate::session::TimerOwnership::Owned)
+        .count();
+    let gone = rows
+        .iter()
+        .filter(|r| r.ownership == crate::session::TimerOwnership::Gone)
+        .count();
+    let timers = Value::List(
+        rows.iter()
+            .map(|row| {
+                Value::Object(vec![
+                    ("id".into(), Value::Number(row.record.id as f64)),
+                    ("pid".into(), Value::Number(u64::from(row.record.pid) as f64)),
+                    ("label".into(), Value::String(row.record.label.clone())),
+                    (
+                        "after_ms".into(),
+                        Value::Number(row.record.after_ms as f64),
+                    ),
+                    (
+                        "interval_ms".into(),
+                        Value::Number(row.record.interval_ms as f64),
+                    ),
+                    ("clock".into(), Value::String(row.record.clock.clone())),
+                    (
+                        "armed_at".into(),
+                        Value::String(row.record.armed_at_nanos.to_string()),
+                    ),
+                    (
+                        "ownership".into(),
+                        Value::String(
+                            match row.ownership {
+                                crate::session::TimerOwnership::Live => "live",
+                                crate::session::TimerOwnership::Owned => "owned",
+                                crate::session::TimerOwnership::Gone => "gone",
+                            }
+                            .to_string(),
+                        ),
+                    ),
+                ])
+            })
+            .collect(),
+    );
+    Value::Object(vec![
+        ("timers".into(), timers),
+        ("total".into(), Value::Number(rows.len() as f64)),
+        ("live".into(), Value::Number(live as f64)),
+        ("owned".into(), Value::Number(owned as f64)),
+        ("gone".into(), Value::Number(gone as f64)),
+        (
+            "reason".into(),
+            Value::String(
+                "a timerfd is held by the process that armed it: the rows above are the session's \
+                 own ledger (live — checkable here with `clock timer check`), the rows earlier \
+                 sessions left in the shared state file (owned — a live sibling holds the fd; \
+                 gone — the owner exited and the fd died with it). The engine's own \
+                 `persistTimer`/`listPersistedTimers` are DEGRADED precisely because this host \
+                 does not carry a timer-persistence store, so the ledger records the FACT of a \
+                 row and never claims a firing: a firing cannot outlive the process that owns \
+                 the timer."
+                    .to_string(),
+            ),
+        ),
+    ])
+}
+
+/// The ledger's human table: ownership is the measured column.
+fn render_timer_list(value: &Value) -> String {
+    let rows = match value.field("timers") {
+        Value::List(items) => items.clone(),
+        _ => Vec::new(),
+    };
+    let mut out = String::new();
+    let counts = format!(
+        "({} live · {} owned · {} gone)",
+        value.field("live").as_f64().unwrap_or(0.0) as u64,
+        value.field("owned").as_f64().unwrap_or(0.0) as u64,
+        value.field("gone").as_f64().unwrap_or(0.0) as u64
+    );
+    out.push_str(&format!(
+        "  {} {} {} {}\n",
+        "⏱".blue().bold(),
+        "Timers".blue().bold(),
+        counts.dimmed(),
+        "— the session's ledger; a firing cannot outlive the process that owns the timer".dimmed()
+    ));
+    if rows.is_empty() {
+        out.push_str(&format!(
+            "  └─ {} this session armed no timer and the shared ledger holds none (an honest empty)\n",
+            "○".dimmed()
+        ));
+        return out.trim_end().to_string();
+    }
+    let mut table = Table::new(vec![
+        "ID".into(),
+        "LABEL".into(),
+        "EVERY".into(),
+        "CLOCK".into(),
+        "OWNER".into(),
+        "STATE".into(),
+    ]);
+    for row in &rows {
+        let ownership = row.field_str("ownership");
+        let pid = row.field("pid").as_f64().unwrap_or(0.0) as u32;
+        let (glyph, words) = match ownership.as_str() {
+            "live" => (
+                Cell::styled("◉", Sgr::Green),
+                "live — checkable in this session".to_string(),
+            ),
+            "owned" => (
+                Cell::styled("◐", Sgr::Yellow),
+                format!("owned by pid {pid} (alive)"),
+            ),
+            _ => (
+                Cell::styled("○", Sgr::Dimmed),
+                format!("gone — pid {pid} exited, the fd died with it"),
+            ),
+        };
+        let interval = row.field("interval_ms").as_f64().unwrap_or(0.0) as u64;
+        let after = row.field("after_ms").as_f64().unwrap_or(0.0) as u64;
+        table = table.row(vec![
+            Cell::plain(row.field_str("id")),
+            row.field_str("label").into(),
+            Cell::plain(match (after, interval) {
+                (0, 0) => "once".to_string(),
+                (0, every) => format!("every {}", duration_label(every * 1_000_000)),
+                (delay, 0) => format!("once, in {}", duration_label(delay * 1_000_000)),
+                (delay, every) => format!(
+                    "every {}, first in {}",
+                    duration_label(every * 1_000_000),
+                    duration_label(delay * 1_000_000)
+                ),
+            }),
+            row.field_str("clock").into(),
+            Cell::plain(pid.to_string()),
+            glyph.with_text(&format!(" {words}")),
+        ]);
+    }
+    out.push_str(&table.render());
+    out.push_str(&format!("\n  {} {}\n", "●".blue().bold(), value.field_str("reason")));
+    out.trim_end().to_string()
 }
 
 /// One `TimerSpec` as a record.
@@ -743,17 +909,7 @@ fn render_timer(value: &Value, action: &TA) -> String {
             .trim_end()
             .to_string()
         }
-        TA::List => {
-            let mut out = String::new();
-            out.push_str(&format!(
-                "  {} {} {} — this process's own timers\n",
-                "⏲".blue().bold(),
-                "Timers".blue().bold(),
-                format!("({})", value.field_str("total")).dimmed()
-            ));
-            out.push_str(&format!("  └─ {}\n", value.field_str("reason")));
-            out.trim_end().to_string()
-        }
+        TA::List => render_timer_list(value),
         TA::Cancel { .. } => format!(
             "  {} {} {} {}\n",
             "✎".green(),
@@ -943,6 +1099,7 @@ fn render_caps(value: &Value) -> String {
 /// A duration in the shell's own words: days, hours, minutes, seconds.
 pub fn duration_label(nanos: u64) -> String {
     let secs = nanos / 1_000_000_000;
+    let millis = (nanos % 1_000_000_000) / 1_000_000;
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3_600;
     let minutes = (secs % 3_600) / 60;
@@ -953,8 +1110,14 @@ pub fn duration_label(nanos: u64) -> String {
         format!("{hours}h {minutes}m {seconds}s")
     } else if minutes > 0 {
         format!("{minutes}m {seconds}s")
-    } else {
+    } else if secs > 0 {
         format!("{seconds}s")
+    } else if millis > 0 {
+        // Sub-second is where a one-shot timer's delay actually lives: a 10 ms
+        // anchor labelled "0s" would be a rounding, not a presentation.
+        format!("{millis} ms")
+    } else {
+        format!("{nanos} ns")
     }
 }
 

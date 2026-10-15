@@ -188,6 +188,10 @@ pub enum FilesAction {
         #[arg(long, default_value = "500")]
         interval: u64,
     },
+    /// The subscription ledger: whose watches the host's own `/proc` can still
+    /// see. The engine offers no list-watches verb, so the session's own
+    /// ledger answers it — the same shape `clock timer list` answers with.
+    Watches,
     /// An XDG special path, resolved by the host (`getSpecialPath`).
     Special {
         /// The token: home, documents, downloads, music, pictures, videos,
@@ -381,6 +385,13 @@ pub fn evaluate(cmd: &FilesCmd, backend: &Backend, guard: WriteGuard) -> SmartRe
             count,
             interval,
         }) => render::watch_value(backend, path, *count, *interval),
+        // The ledger is a SESSION surface, answered by `evaluate_session`
+        // (the plain `evaluate` has no session to read). It answers here too,
+        // so a library caller never sees an uncovered arm: the session-less
+        // answer is the honest empty.
+        Some(FilesAction::Watches) => Ok(render::watches_value(
+            &crate::session::WatchSession::hermetic(),
+        )),
         Some(FilesAction::Special { token }) => render::special_value(backend, token),
         Some(FilesAction::Trash) => render::trash_value(backend),
         Some(FilesAction::Recents) => render::recents_value(backend),
@@ -481,17 +492,151 @@ pub fn run(cmd: &FilesCmd, format: &OutputFormat, backend: &Backend, guard: Writ
     Ok(value)
 }
 
+/// Run the command with the session's watch ledger visible — the path both the
+/// REPL and the one-shot binary take. A `files watch` records the
+/// subscription's FACT for as long as the command holds the fd (the kernel
+/// object dies with the process, so the row is retired the moment the command
+/// ends), and `files watches` names this session's live rows beside the ones
+/// earlier processes left, each measured against `/proc`.
+pub fn run_session(
+    cmd: &FilesCmd,
+    format: &OutputFormat,
+    backend: &Backend,
+    guard: WriteGuard,
+    session: &mut crate::session::WatchSession,
+) -> SmartResult<Value> {
+    let value = evaluate_session(cmd, backend, guard, session)?;
+    if *format != OutputFormat::Raw {
+        println!("{}", render::render_action(cmd, &value, *format));
+    }
+    Ok(value)
+}
+
+/// The data half of [`run_session`], which is what pipes consume.
+pub fn evaluate_session(
+    cmd: &FilesCmd,
+    backend: &Backend,
+    guard: WriteGuard,
+    session: &mut crate::session::WatchSession,
+) -> SmartResult<Value> {
+    use FilesAction as F;
+    match &cmd.action {
+        Some(F::Watches) => Ok(render::watches_value(session)),
+        Some(F::Watch {
+            path,
+            count,
+            interval,
+        }) => {
+            let started = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            session.begin(path, started);
+            let value = render::watch_value(backend, path, *count, *interval);
+            session.retire(path);
+            value
+        }
+        _ => evaluate(cmd, backend, guard),
+    }
+}
+
 pub mod render;
 
+/// The host write this command performs, when it performs one: the verb (the
+/// word the confirmation prompt leads with — `delete`, `move`, `copy`…) and
+/// the target as the command named it. Read-only commands answer `None`, and
+/// a caller with an `None` intent never prompts.
+///
+/// The words are the founder's standard: a removal asks `delete <path>?`,
+/// never a phrase about "refusing".
+pub fn write_intent(cmd: &FilesCmd) -> Option<(String, String)> {
+    use FilesAction as F;
+    Some(match &cmd.action {
+        Some(F::Mkdir { path, .. }) => ("create directory".into(), path.clone()),
+        Some(F::Touch { path }) => ("create empty file".into(), path.clone()),
+        Some(F::Rm { path, recursive }) => (
+            "delete".into(),
+            if *recursive { format!("{path} (recursive)") } else { path.clone() },
+        ),
+        Some(F::Mv { src, dst }) => ("move".into(), format!("{src} → {dst}")),
+        Some(F::Cp { src, dst }) => ("copy".into(), format!("{src} → {dst}")),
+        Some(F::Write { path, .. }) => ("write".into(), path.clone()),
+        Some(F::Link { target, link, hard }) => (
+            if *hard { "hard-link" } else { "symlink" }.into(),
+            format!("{target} → {link}"),
+        ),
+        Some(F::Lock { path, .. }) => ("lock".into(), path.clone()),
+        Some(F::Unlock { lock_id }) => ("unlock".into(), format!("lock {lock_id}")),
+        _ => return None,
+    })
+}
+
+/// The CONTEXT the confirmation prompt shows: a live READ of the target (law
+/// #8 — reading is free), so the operator sees what the write would touch
+/// before answering. A removal shows the type, size and mtime of the target
+/// (and, for a recursive removal, the entry count under it); a move or copy
+/// shows old → new; a write shows the size of the content about to land.
+pub fn write_context(cmd: &FilesCmd, backend: &dyn FilesBackend) -> String {
+    use FilesAction as F;
+    let stamp = |path: &str| -> String {
+        use smart_lib::domains::files::types::FileInfoResult;
+        match backend.stat_file(path) {
+            Ok(FileInfoResult::Info(info)) => format!(
+                "{}, {}, modified {}",
+                info.kind.as_token(),
+                crate::widgets::human_bytes(info.size),
+                crate::domains::files::render::stamp_label(info.modified.as_nanos().to_string())
+            ),
+            _ => "no entry there yet".to_string(),
+        }
+    };
+    match &cmd.action {
+        Some(F::Rm { path, recursive }) => {
+            let base = stamp(path);
+            if !recursive {
+                return base;
+            }
+            let count = backend
+                .list_directory(
+                    path,
+                    &listing_filter(Vec::new(), true, SortField::Name, SortOrder::Ascending, true),
+                )
+                .map(|page| page.total)
+                .unwrap_or(0);
+            format!("{base}; {count} entries below it")
+        }
+        // A move and a copy show the OLD — the new: what the source is now,
+        // what the destination is now, so the operator sees both halves of the
+        // change the question names.
+        Some(F::Mv { src, dst }) => format!("{} → {}", stamp(src), stamp(dst)),
+        Some(F::Cp { src, dst }) => format!("{} → {}", stamp(src), stamp(dst)),
+        Some(F::Write { text, .. }) => {
+            format!("{} of content", crate::widgets::human_bytes(text.len() as u64))
+        }
+        Some(F::Mkdir { path, .. }) => stamp(path),
+        Some(F::Touch { path }) => stamp(path),
+        Some(F::Link { target, .. }) => format!("target {}", stamp(target)),
+        Some(F::Lock { path, .. }) => stamp(path),
+        Some(F::Unlock { lock_id }) => {
+            let _ = lock_id;
+            String::new()
+        }
+        _ => String::new(),
+    }
+}
+
 /// The host-write gate (law #8, the C1 shape): a mutating verb proceeds only
-/// when the caller accepted the write.
+/// when the caller accepted the write. The shell asks through the
+/// confirmation path before the command is ever evaluated; this is the
+/// backstop for a library caller that passes an unaccepted guard straight in.
 fn guard_host_write(guard: WriteGuard, verb: &str) -> SmartResult<()> {
     if guard.allowed {
         return Ok(());
     }
     Err(SmartError::not_supported(format!(
-        "refusing to run `{verb}`: it CHANGES host state. In the REPL confirm the prompt, or pass \
-         --force once you accept the write (the live bring-back proof is founder-run)."
+        "refusing to run `{verb}`: it CHANGES host state. The interactive `(y/N)` prompt asks \\
+         with the target's type/size/mtime beside it; a piped `y` line answers it, or `--force` \\
+         accepts the write explicitly (the live bring-back proof is founder-run)."
     )))
 }
 

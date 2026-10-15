@@ -363,6 +363,34 @@ fn evaluate_network(
     }
 }
 
+/// The host write this command performs, when it performs one: the verb and
+/// the target the confirmation prompt shows. Read-only commands (`status`,
+/// `wifi scan`, `wifi list`, the privilege probe) answer `None`.
+pub fn write_intent(cmd: &NetworkCmd) -> Option<(String, String)> {
+    use WifiAction as W;
+    Some(match &cmd.action {
+        Some(NetworkAction::Wifi { action: Some(W::Connect { ssid, .. }) }) => {
+            ("join wifi network".into(), ssid.clone())
+        }
+        Some(NetworkAction::Wifi { action: Some(W::Disconnect) }) => {
+            ("disconnect wifi".into(), "the active connection".into())
+        }
+        Some(NetworkAction::Wifi { action: Some(W::Forget { ssid }) }) => {
+            ("forget wifi network".into(), ssid.clone())
+        }
+        Some(NetworkAction::Wifi { action: Some(W::On) }) => {
+            ("enable the wifi radio".into(), String::new())
+        }
+        Some(NetworkAction::Wifi { action: Some(W::Off) }) => {
+            ("disable the wifi radio".into(), String::new())
+        }
+        Some(NetworkAction::Wifi {
+            action: Some(W::Join { payload, .. }),
+        }) => ("join wifi network".into(), format!("from payload {payload}")),
+        _ => return None,
+    })
+}
+
 /// A stable, non-reversible reference for a credential: the shell hands the
 /// engine a `SecretKeyId` and keeps no password itself. The reference is
 /// derived from the SSID (deterministic across calls) — it names the secret
@@ -393,8 +421,9 @@ fn guard_host_write(guard: WriteGuard, verb: &str, target: &str) -> SmartResult<
         format!("{verb} {target}")
     };
     Err(SmartError::not_supported(format!(
-        "refusing to run `{what}`: it CHANGES host state. In the REPL confirm the prompt, or \
-         pass --force once you accept the write (the live bring-back proof is founder-run)."
+        "refusing to run `{what}`: it CHANGES host state. The interactive `(y/N)` prompt asks with the target's \
+         context beside it; a piped `y` line answers it, and `--force` accepts the \
+         write explicitly (the live bring-back proof is founder-run)."
     )))
 }
 

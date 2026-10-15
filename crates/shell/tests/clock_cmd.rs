@@ -313,10 +313,15 @@ fn the_renderings_are_pixel_perfect() {
     ));
 }
 
-/// The duration label is the shell's own words for a measured duration.
+/// The duration label is the shell's own words for a measured duration. A
+/// sub-second duration keeps its own unit: a one-shot timer's 10 ms anchor
+/// labelled "0s" would be a rounding presented as a measurement.
 #[test]
 fn the_duration_label_is_the_shells_own_words() {
-    assert_eq!(render::duration_label(0), "0s");
+    assert_eq!(render::duration_label(0), "0 ns");
+    assert_eq!(render::duration_label(10_000), "10000 ns");
+    assert_eq!(render::duration_label(10_000_000), "10 ms");
+    assert_eq!(render::duration_label(1_500_000_000), "1s");
     assert_eq!(render::duration_label(90_000_000_000), "1m 30s");
     assert_eq!(render::duration_label(3_725_000_000_000), "1h 2m 5s");
     assert_eq!(render::duration_label(183_000_000_000_000), "2d 2h 50m");

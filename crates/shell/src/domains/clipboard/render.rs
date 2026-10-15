@@ -317,7 +317,12 @@ fn render_history(value: &Value) -> String {
         "PINNED".into(),
         "MIME".into(),
         "TEXT".into(),
-    ]);
+    ])
+    // The ledger's text column is capped: one long copy cannot blow the table
+    // open, the cut is a middle ellipsis (both ends survive — the head is the
+    // sentence's start, the tail its end), and the full payload is one door
+    // away in `-o json` / `-o raw`, never hidden.
+    .cap(4, TEXT_COLUMN);
     for item in items {
         let f = |k: &str| item.field_str(k);
         let mimes = match item.field("mime_types") {
@@ -333,10 +338,7 @@ fn render_history(value: &Value) -> String {
             f("size_bytes"),
             if item.field_bool("pinned") { "◉".to_string() } else { "○".to_string() },
             mimes,
-            // The ledger's text is bounded to a column so one long copy cannot
-            // blow the table open; the full payload is one door away
-            // (`--output raw`), never hidden.
-            truncate_to(&f("text"), TEXT_COLUMN),
+            f("text"),
         ]);
     }
     out.push_str(&table.render());

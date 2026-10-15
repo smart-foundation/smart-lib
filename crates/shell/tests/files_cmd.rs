@@ -175,7 +175,9 @@ fn a_watch_pulls_the_kernels_own_events_and_retires() {
 }
 
 /// Every host-mutating verb refuses without the accepted write, names what it
-/// would have changed, and reaches the engine's own code-complete path with it.
+/// would have changed, names the way out (the interactive `(y/N)` prompt, a
+/// piped `y` line, or `--force`), and reaches the engine's own code-complete
+/// path once the gate is open.
 #[test]
 fn every_write_verb_is_gated_and_the_gate_names_the_verb() {
     let verbs: &[&[&str]] = &[
@@ -197,6 +199,11 @@ fn every_write_verb_is_gated_and_the_gate_names_the_verb() {
         };
         let message = error.to_string();
         assert!(message.contains("CHANGES host state"), "{message}");
+        // The refusal names the real way through, never a phantom prompt that
+        // does not exist and never a "type the name" dance.
+        assert!(message.contains("prompt"), "the prompt is named: {message}");
+        assert!(message.contains("--force"), "--force is named: {message}");
+        assert!(!message.contains("type the name"), "no type-the-name: {message}");
         assert!(
             backend.writes.borrow().is_empty(),
             "{} reached the engine: {:?}",

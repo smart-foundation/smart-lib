@@ -361,6 +361,27 @@ pub fn run(cmd: &LoggingCmd, format: &OutputFormat, backend: &Backend, guard: Wr
     Ok(value)
 }
 
+/// The host write this command performs, when it performs one: the verb and
+/// the target the confirmation prompt shows. Most logging verbs are reads;
+/// `emit` writes this process's own bounded store and the one sink it owns
+/// (its stderr — the svlogd input under a runit service).
+pub fn write_intent(cmd: &LoggingCmd) -> Option<(String, String)> {
+    use LoggingAction as L;
+    Some(match &cmd.action {
+        Some(L::Emit { level, message, .. }) => {
+            ("emit".into(), format!("[{level}] {}", message.join(" ")))
+        }
+        Some(L::SetLevel { domain, level }) => {
+            ("set the log level of".into(), format!("{domain} → {level}"))
+        }
+        Some(L::Sampling { domain, set: Some(rate) }) => {
+            ("set the sampling rate of".into(), format!("{domain} → {rate}"))
+        }
+        Some(L::Clear { domain }) => ("clear".into(), domain.clone()),
+        _ => return None,
+    })
+}
+
 pub mod render;
 
 /// The host-write gate (law #8, the C1 shape): a mutating verb proceeds only
@@ -370,9 +391,9 @@ fn guard_host_write(guard: WriteGuard, verb: &str, what: &str) -> SmartResult<()
         return Ok(());
     }
     Err(SmartError::not_supported(format!(
-        "refusing to run `{verb}`: it CHANGES host state ({what}). In the REPL confirm the \
-         prompt, or pass --force once you accept the write (the live bring-back proof is \
-         founder-run)."
+        "refusing to run `{verb}`: it CHANGES host state ({what}). The interactive `(y/N)` \
+         prompt asks with the target's context beside it; a piped `y` line answers it, and \
+         `--force` accepts the write explicitly (the live bring-back proof is founder-run)."
     )))
 }
 

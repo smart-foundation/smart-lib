@@ -29,6 +29,7 @@ pub mod migrate;
 pub mod pipe;
 pub mod progress;
 pub mod selector;
+pub mod session;
 pub mod shell;
 pub mod value;
 pub mod widgets;

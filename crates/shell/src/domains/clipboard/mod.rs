@@ -184,6 +184,29 @@ pub fn run(cmd: &ClipboardCmd, format: &OutputFormat, backend: &Backend, guard: 
     Ok(value)
 }
 
+/// The host write this command performs, when it performs one: the verb and
+/// the target the confirmation prompt shows.
+pub fn write_intent(cmd: &ClipboardCmd) -> Option<(String, String)> {
+    use ClipboardAction as C;
+    use HistoryAction as H;
+    Some(match &cmd.action {
+        Some(C::Set { text, .. }) => {
+            ("place on the clipboard".into(), format!("{} of text", text.chars().count()))
+        }
+        Some(C::Clear) => ("empty the clipboard selection".into(), String::new()),
+        Some(C::History {
+            action: Some(H::Pin { id }),
+        }) => ("pin clipboard item".into(), format!("item {id}")),
+        Some(C::History {
+            action: Some(H::Unpin { id }),
+        }) => ("unpin clipboard item".into(), format!("item {id}")),
+        Some(C::History {
+            action: Some(H::Delete { id }),
+        }) => ("delete clipboard item".into(), format!("item {id}")),
+        _ => return None,
+    })
+}
+
 pub mod render;
 
 /// The host-write gate (law #8, the C1 shape): a mutating verb proceeds only
@@ -193,8 +216,9 @@ fn guard_host_write(guard: WriteGuard, verb: &str) -> SmartResult<()> {
         return Ok(());
     }
     Err(SmartError::not_supported(format!(
-        "refusing to run `{verb}`: it CHANGES host state. In the REPL confirm the prompt, or pass \
-         --force once you accept the write (the live bring-back proof is founder-run)."
+        "refusing to run `{verb}`: it CHANGES host state. The interactive `(y/N)` prompt asks with the target's \
+         context beside it; a piped `y` line answers it, and `--force` accepts the \
+         write explicitly (the live bring-back proof is founder-run)."
     )))
 }
 

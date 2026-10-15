@@ -243,6 +243,18 @@ pub fn run(cmd: &ServiceCmd, format: &OutputFormat, backend: &Backend, guard: Wr
     Ok(value)
 }
 
+/// The host write this command performs, when it performs one: the verb and
+/// the target the confirmation prompt shows.
+pub fn write_intent(cmd: &ServiceCmd) -> Option<(String, String)> {
+    use ServiceAction as S;
+    Some(match &cmd.action {
+        Some(S::Start { name }) => ("start".into(), name.clone()),
+        Some(S::Stop { name }) => ("stop".into(), name.clone()),
+        Some(S::Restart { name }) => ("restart".into(), name.clone()),
+        _ => return None,
+    })
+}
+
 pub mod render;
 
 /// The host-write gate (law #8, the C1 shape): a mutating verb proceeds only
@@ -252,8 +264,9 @@ fn guard_host_write(guard: WriteGuard, verb: &str) -> SmartResult<()> {
         return Ok(());
     }
     Err(SmartError::not_supported(format!(
-        "refusing to run `{verb}`: it CHANGES host state. In the REPL confirm the prompt, or pass \
-         --force once you accept the write (the live bring-back proof is founder-run)."
+        "refusing to run `{verb}`: it CHANGES host state. The interactive `(y/N)` prompt asks with the target's \
+         context beside it; a piped `y` line answers it, and `--force` accepts the \
+         write explicitly (the live bring-back proof is founder-run)."
     )))
 }
 

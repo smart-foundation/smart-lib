@@ -70,6 +70,86 @@ pub fn to_json(value: &Value) -> String {
     out
 }
 
+/// The pipe-ready PLAIN TEXT form — what `-o raw` prints.
+///
+/// Raw is the door to the engine's real pipe seam: one line per record with
+/// tab-separated fields (a header line first, so `column -t`, `awk` and
+/// `sort -k` all work), one line per scalar in a list of scalars, and
+/// `key<TAB>value` lines for a record. Nothing is truncated here — the cut is
+/// the human renderer's business, never the machine's — and an empty answer
+/// prints its shape (the header, or nothing for a scalar list) rather than
+/// zero bytes. The rot this replaces: `-o raw` printed **0 bytes for all nine
+/// domains**, because every `run()` skipped rendering for the Raw format and
+/// the binary dropped the returned value on the floor.
+pub fn to_raw(value: &Value) -> String {
+    let mut out = String::new();
+    write_raw(value, &mut out);
+    // A record's lines carry their own newline discipline; a scalar's does not.
+    out
+}
+
+fn write_raw(value: &Value, out: &mut String) {
+    match value {
+        Value::List(items) => {
+            // A list of records is a table: the first record's keys are the
+            // header, every record a row, a missing field an empty cell.
+            if let Some(Value::Object(first)) = items.first() {
+                let headers: Vec<&str> = first.iter().map(|(k, _)| k.as_str()).collect();
+                out.push_str(&headers.join("\t"));
+                out.push('\n');
+                for item in items {
+                    if let Value::Object(pairs) = item {
+                        let row: Vec<String> = headers
+                            .iter()
+                            .map(|h| {
+                                pairs
+                                    .iter()
+                                    .find(|(k, _)| k == h)
+                                    .map(|(_, v)| raw_scalar(v))
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        out.push_str(&row.join("\t"));
+                        out.push('\n');
+                    }
+                }
+                return;
+            }
+            for item in items {
+                out.push_str(&raw_scalar(item));
+                out.push('\n');
+            }
+        }
+        Value::Object(pairs) => {
+            for (k, v) in pairs {
+                out.push_str(k);
+                out.push('\t');
+                out.push_str(&raw_scalar(v));
+                out.push('\n');
+            }
+        }
+        scalar => {
+            out.push_str(&raw_scalar(scalar));
+            out.push('\n');
+        }
+    }
+}
+
+/// One scalar as its pipe-ready text: a nested value keeps its JSON shape
+/// (a machine consumer parses it), a string travels verbatim.
+fn raw_scalar(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        Value::List(_) | Value::Object(_) => {
+            let mut out = String::new();
+            write_json(value, &mut out);
+            out
+        }
+        scalar => scalar.display(),
+    }
+}
+
 fn write_json(value: &Value, out: &mut String) {
     match value {
         Value::Null => out.push_str("null"),

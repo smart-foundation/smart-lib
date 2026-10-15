@@ -232,6 +232,50 @@ pub fn run(cmd: &SettingsCmd, format: &OutputFormat, backend: &Backend, guard: W
     Ok(value)
 }
 
+/// The host write this command performs, when it performs one: the verb and
+/// the target the confirmation prompt shows.
+pub fn write_intent(cmd: &SettingsCmd) -> Option<(String, String)> {
+    use SettingsAction as S;
+    Some(match &cmd.action {
+        Some(S::Set { domain, key, value }) => {
+            ("set".into(), format!("{domain} {key} = {value}"))
+        }
+        Some(S::BulkSet { domain, entries }) => {
+            ("bulk-set".into(), format!("{domain} ({} keys)", entries.len()))
+        }
+        _ => return None,
+    })
+}
+
+/// The CONTEXT the confirmation prompt shows for `settings set`: the value the
+/// host holds NOW beside the value about to land — the old → new the prompt
+/// owes the operator before a write that overwrites it (a live read of the key,
+/// so it costs nothing and never writes).
+pub fn write_context(cmd: &SettingsCmd, backend: &Backend) -> String {
+    use SettingsAction as S;
+    match &cmd.action {
+        Some(S::Set { domain, key, value }) => {
+            let current = backend
+                .get(domain, key)
+                .ok()
+                .and_then(|result| match result {
+                    smart_lib::domains::settings::types::SettingResult::Value(v) => {
+                        Some(value_words(&v))
+                    }
+                    _ => None,
+                });
+            match current {
+                Some(now) => format!("{domain}/{key}: {now} → {value}"),
+                None => format!("{domain}/{key}: (not set) → {value}"),
+            }
+        }
+        Some(S::BulkSet { domain, entries }) => {
+            format!("{domain}: {} key(s) in one write", entries.len())
+        }
+        _ => String::new(),
+    }
+}
+
 pub mod render;
 
 /// The host-write gate (law #8, the C1 shape): a mutating verb proceeds only
@@ -241,8 +285,9 @@ fn guard_host_write(guard: WriteGuard, verb: &str) -> SmartResult<()> {
         return Ok(());
     }
     Err(SmartError::not_supported(format!(
-        "refusing to run `{verb}`: it CHANGES host state. In the REPL confirm the prompt, or pass \
-         --force once you accept the write (the live bring-back proof is founder-run)."
+        "refusing to run `{verb}`: it CHANGES host state. The interactive `(y/N)` prompt asks with the target's \
+         context beside it; a piped `y` line answers it, and `--force` accepts the \
+         write explicitly (the live bring-back proof is founder-run)."
     )))
 }
 
@@ -261,10 +306,32 @@ pub fn selector_root(backend: &Backend) -> SmartResult<Value> {
     ]))
 }
 
-/// One `SettingValue`'s own words, through the engine's own renderer (the
-/// contract's value model, printed as the host spells it).
+/// One `SettingValue`'s own words.
+///
+/// The engine's own `render_value` answers a list with `[N items]` and a dict
+/// with `{N entries}` — a count where the host's dconf holds the real items.
+/// The engine is read-only for this wave, so the COUNT is not the shell's
+/// answer: scalars ride the engine's own spelling, and every structured value
+/// is rendered here as its content (`"a", "b"` / `key: value`), width-bounded
+/// by the table that prints it, with the machine doors (`-o json`) carrying
+/// the whole thing. A binary payload reports its byte count — bytes are not
+/// text, and a lossy replacement would be a fabrication.
 pub(crate) fn value_words(value: &SettingValue) -> String {
-    render_value(value)
+    match value {
+        SettingValue::List(items) => {
+            let parts: Vec<String> = items.iter().map(value_words).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        SettingValue::Dict(entries) => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", value_words(v)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+        SettingValue::Data(bytes) => format!("<{} bytes>", bytes.len()),
+        scalar => render_value(scalar),
+    }
 }
 
 /// One `SchemaInfo` as a record.

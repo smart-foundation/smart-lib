@@ -288,8 +288,8 @@ fn the_table_is_pixel_perfect() {
         rows: vec![common::MockProcessRow {
             pid: 5,
             ppid: 1,
-            name: "a-process-name-far-longer-than-the-column".to_string(),
-            command: "a-process-name-far-longer-than-the-column".to_string(),
+            name: "a-process-name-far-longer-than-the-column-and-then-some-more".to_string(),
+            command: "a-process-name-far-longer-than-the-column-and-then-some-more".to_string(),
             state: smart_lib::domains::process::types::ExecutionState::Active,
             uid: 1000,
             threads: 1,
@@ -308,6 +308,24 @@ fn the_table_is_pixel_perfect() {
             .filter(|line| line.contains('│'))
             .all(|line| display_width(line) <= 100),
         "a table row never runs away: {rendered}"
+    );
+    // Both ends survive: the middle cut keeps the head AND the tail, and the
+    // NAME column holds the whole width the cut was given.
+    let cut = rendered
+        .lines()
+        .find(|line| line.contains("…"))
+        .expect("a row carries the cut");
+    let name_cell = cut.split('│').nth(2).expect("the NAME column");
+    assert!(name_cell.starts_with(" a-process"), "the head survives: {cut}");
+    assert!(
+        name_cell.trim_end().ends_with("-more"),
+        "the tail survives: {cut}"
+    );
+    // The full name is one door away, never lost: the JSON shape carries it whole.
+    let json = render::render_action(&cmd(&["process"]), &value, OutputFormat::Json);
+    assert!(
+        json.contains("a-process-name-far-longer-than-the-column-and-then-some-more"),
+        "the uncut value survives: {json}"
     );
 }
 

@@ -177,7 +177,8 @@ pub enum TimerAction {
         /// The timer id.
         id: u64,
     },
-    /// The timers this process armed (this process's own table).
+    /// The session's timers: the rows this process armed plus the rows
+    /// earlier processes left in the shared ledger (owned / gone).
     List,
     /// Disarm and retire a timer (`cancelTimer` — removal, gated).
     Cancel {
@@ -439,6 +440,100 @@ pub fn run(cmd: &ClockCmd, format: &OutputFormat, backend: &Backend, guard: Writ
     Ok(value)
 }
 
+/// Run with the session's timer ledger visible.
+///
+/// This is the path both the REPL and the one-shot binary take: a `timer
+/// create` is recorded in the session (and, for a persistent session, in the
+/// shared state file the next process reads), a `timer cancel` retires the
+/// row, and `timer list` names the session's LIVE timers — each armed through
+/// the engine, each checkable here — plus the ledger rows earlier processes
+/// left, each with the measured ownership (a live sibling owns its fd; a dead
+/// owner's fd died with it). The engine itself offers no list-timers verb, so
+/// the shell's session ledger IS the surface, and it never claims a firing it
+/// cannot read.
+pub fn run_session(
+    cmd: &ClockCmd,
+    format: &OutputFormat,
+    backend: &Backend,
+    guard: WriteGuard,
+    session: &mut crate::session::ClockSession,
+) -> SmartResult<Value> {
+    let value = evaluate_session(cmd, backend, guard, session)?;
+    if *format != OutputFormat::Raw {
+        println!("{}", render::render_action(cmd, &value, *format));
+    }
+    Ok(value)
+}
+
+/// The data half of [`run_session`]: the ledger-aware evaluation, which is
+/// what pipes consume.
+pub fn evaluate_session(
+    cmd: &ClockCmd,
+    backend: &Backend,
+    guard: WriteGuard,
+    session: &mut crate::session::ClockSession,
+) -> SmartResult<Value> {
+    // `timer list` is the session's own surface: the engine has no
+    // list-timers verb, so the ledger answers it.
+    if matches!(
+        &cmd.action,
+        Some(ClockAction::Timer { action: TimerAction::List })
+    ) {
+        return Ok(render::timer_list_value(session));
+    }
+    let value = evaluate(cmd, backend, guard)?;
+    match &cmd.action {
+        Some(ClockAction::Timer {
+            action: TimerAction::Create { after_ms, interval_ms, label, clock },
+        }) => {
+            // The engine's own answer carries the id it minted; the spec is
+            // the one this command built. The row is recorded in the session
+            // (and shared through the state file when the session persists) —
+            // the delay and the interval both travel, so a later process reads
+            // the spec this one actually armed.
+            let id = value.field("id").as_f64().unwrap_or(0.0) as u64;
+            session.record(crate::session::TimerRecord {
+                pid: std::process::id(),
+                id,
+                label: label.clone(),
+                after_ms: *after_ms,
+                interval_ms: *interval_ms,
+                clock: clock.clone(),
+                armed_at_nanos: backend
+                    .realtime_now()
+                    .map(|t| t.as_nanos() as u128)
+                    .unwrap_or(0),
+                session: session.session().to_string(),
+            });
+        }
+        Some(ClockAction::Timer {
+            action: TimerAction::Cancel { id },
+        }) => session.retire(*id),
+        _ => {}
+    }
+    Ok(value)
+}
+
+/// The host write this command performs, when it performs one: the verb and
+/// the target the confirmation prompt shows. Arming a timer or creating an
+/// alarm is this process's OWN state (a timerfd it owns, its own alarm store),
+/// so only the REMOVAL half is gated — exactly the C1 shape.
+pub fn write_intent(cmd: &ClockCmd) -> Option<(String, String)> {
+    use ClockAction as C;
+    Some(match &cmd.action {
+        Some(C::Timer { action: TimerAction::Cancel { id } }) => {
+            ("cancel timer".into(), format!("#{id}"))
+        }
+        Some(C::Alarm { action: AlarmAction::Delete { id } }) => {
+            ("delete alarm".into(), format!("#{id}"))
+        }
+        Some(C::SleepCancellable { millis, cancel_after: Some(after) }) => {
+            ("cancel".into(), format!("the {millis} ms sleep after {after} ms"))
+        }
+        _ => return None,
+    })
+}
+
 pub mod render;
 
 /// The host-write gate (law #8, the C1 shape): a REMOVAL verb proceeds only
@@ -448,8 +543,9 @@ fn guard_host_write(guard: WriteGuard, verb: &str) -> SmartResult<()> {
         return Ok(());
     }
     Err(SmartError::not_supported(format!(
-        "refusing to run `{verb}`: it CHANGES state. In the REPL confirm the prompt, or pass \
-         --force once you accept the write (the live bring-back proof is founder-run)."
+        "refusing to run `{verb}`: it CHANGES state. The interactive `(y/N)` prompt asks with the target's context \
+         beside it; a piped `y` line answers it, and `--force` accepts the write \
+         explicitly (the live bring-back proof is founder-run)."
     )))
 }
 

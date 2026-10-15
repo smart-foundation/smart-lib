@@ -34,6 +34,7 @@ use crate::complete::Completer;
 use crate::migrate;
 use crate::pipe::{self, PipeOp};
 use crate::selector::{self, Value};
+use crate::widgets::{Cell, Sgr, Table};
 use crate::{OutputFormat, SmartError, SmartResult};
 
 use crate::domains::network::Backend;
@@ -41,6 +42,66 @@ use crate::domains::network::Backend;
 use crate::domains::clipboard::Backend as ClipboardBackend;
 #[cfg(feature = "domain-service")]
 use crate::domains::service::Backend as ServiceBackend;
+
+/// How a mutating verb may be accepted, and by whom.
+///
+/// The founder's standard answers the same three ways from both doors (the
+/// REPL and the one-shot binary), and this is everything an answer depends on:
+/// who is asking, whether they already accepted, and whether stdin belongs to
+/// them at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteGate {
+    /// The operator said `--force` on the command line: the prompt is skipped.
+    pub force: bool,
+    /// The operator said `--dry-run`: the plan is printed and nothing is
+    /// written.
+    pub dry_run: bool,
+    /// The caller is driving stdin itself — the REPL's script mode, where
+    /// stdin is the PROGRAM and never the answer channel. A prompt here would
+    /// block forever against the caller's own reader, so this caller is told
+    /// it has no operator to ask instead of hanging.
+    pub script_mode: bool,
+}
+
+impl WriteGate {
+    /// The interactive gate: an operator answers the prompt, unless they
+    /// already accepted with `--force` / `--dry-run`.
+    pub fn interactive(force: bool, dry_run: bool) -> Self {
+        WriteGate {
+            force,
+            dry_run,
+            script_mode: false,
+        }
+    }
+
+    /// The script-mode gate: stdin is the caller's, so a destructive verb
+    /// refuses rather than reading the program as an answer.
+    pub fn scripted(force: bool, dry_run: bool) -> Self {
+        WriteGate {
+            force,
+            dry_run,
+            script_mode: true,
+        }
+    }
+}
+
+/// One line of gloss per LIVE domain, in the words the REPL's `help` prints
+/// under the board's list. The board (`migrate::live_domains`) decides WHICH
+/// domains are live and in what order; this decides only what each is called.
+/// A live domain missing here still appears — it simply gets the board's
+/// default gloss — so the list can never be shortened by this table going
+/// stale, which was the old failure.
+const LIVE_DOMAIN_GLOSS: &[(&str, &str)] = &[
+    ("network", "interfaces, wifi, radios — netlink + NetworkManager"),
+    ("clipboard", "the native selection: get/set/history/convert (writes gate-routed)"),
+    ("service", "the supervisor's services: state, health, deps, watch (writes gated)"),
+    ("files", "the host's files: ls/find/tree/stat/cat/du/watch (writes gated)"),
+    ("process", "/proc: every process, inspect, tree, groups, caps (writes gated)"),
+    ("settings", "the host's schemas, keys and values, live (writes gated)"),
+    ("logging", "the host's sinks and logs: sinks/domains/tail/entries/follow"),
+    ("clock", "clocks, timerfds and alarms — the session's ledger keeps them live"),
+    ("time", "wall time, TAI, the contract's calendars and their arithmetic"),
+];
 
 #[derive(Debug, Clone)]
 pub enum ShellCommand {
@@ -74,6 +135,11 @@ pub enum ShellCommand {
     },
     Help {
         domain: Option<String>,
+    },
+    /// The session's own surface: the per-domain read counts that prove the
+    /// session backend is one per process (`session reads`).
+    Session {
+        action: String,
     },
     Migrate,
     Exit,
@@ -119,6 +185,34 @@ pub struct Shell {
     pub clipboard: Box<ClipboardBackend>,
     #[cfg(feature = "domain-service")]
     pub service: Box<ServiceBackend>,
+    /// The session: per-domain read counts and the clock-timer ledger. Built
+    /// once per shell process — the REPL's every line, a `-c` line and a piped
+    /// script line all drive the same backends and the same ledger, which is
+    /// what makes `clock timer create → list → check` compose.
+    pub session: crate::session::SessionState,
+    /// How a mutating verb may be accepted: `--force`, `--dry-run`, and
+    /// whether stdin is this caller's program (the REPL's script mode).
+    pub gate: WriteGate,
+    // ── the session-scoped domain backends ──────────────────────────────
+    // Built on first use and memoized for the life of the process. The rot
+    // this replaced: every command constructed a fresh
+    // `Linux…Backend::new()`, so state a verb created died with its own
+    // command — create→list→check could never meet, and a subscription was
+    // cancelled by the line's end. `None` until the domain's first command;
+    // the binary prefers connecting the clipboard/service backends up front
+    // (`connect_clipboard` / `connect_service`).
+    #[cfg(feature = "domain-files")]
+    files_backend: Option<Box<crate::domains::files::Backend>>,
+    #[cfg(feature = "domain-process")]
+    process_backend: Option<Box<crate::domains::process::Backend>>,
+    #[cfg(feature = "domain-settings")]
+    settings_backend: Option<Box<crate::domains::settings::Backend>>,
+    #[cfg(feature = "domain-logging")]
+    logging_backend: Option<Box<crate::domains::logging::Backend>>,
+    #[cfg(feature = "domain-clock")]
+    clock_backend: Option<Box<crate::domains::clock::Backend>>,
+    #[cfg(feature = "domain-time")]
+    time_backend: Option<Box<crate::domains::time::Backend>>,
 }
 
 impl Shell {
@@ -132,7 +226,171 @@ impl Shell {
             clipboard: Box::new(smart_lib::platforms::linux::clipboard::LinuxClipboardBackend::solid()),
             #[cfg(feature = "domain-service")]
             service: Box::new(smart_lib::platforms::linux::service::LinuxServiceBackend::native_connect()),
+            session: crate::session::SessionState::hermetic(),
+            gate: WriteGate::default(),
+            #[cfg(feature = "domain-files")]
+            files_backend: None,
+            #[cfg(feature = "domain-process")]
+            process_backend: None,
+            #[cfg(feature = "domain-settings")]
+            settings_backend: None,
+            #[cfg(feature = "domain-logging")]
+            logging_backend: None,
+            #[cfg(feature = "domain-clock")]
+            clock_backend: None,
+            #[cfg(feature = "domain-time")]
+            time_backend: None,
         }
+    }
+
+    /// Share the session's state with the next process: the clock-timer ledger
+    /// is written to (and read from) a small state file, so `clock timer list`
+    /// in a fresh invocation can name the timers a live sibling session holds
+    /// and the ones whose owner exited. The binary calls this; the library's
+    /// `Shell::new` stays hermetic (no state file, nothing written).
+    pub fn enable_state_persistence(&mut self) {
+        self.session = crate::session::SessionState::persistent();
+    }
+
+    /// Record `--force` for this session: the explicit acceptance that skips
+    /// the interactive prompt (documented on the flag; a script never gets a
+    /// fabricated yes).
+    pub fn set_force(&mut self, force: bool) {
+        self.gate.force = force;
+    }
+
+    /// Record `--dry-run` for this session: every destructive verb prints its
+    /// plan and performs no write.
+    pub fn set_dry_run(&mut self, dry_run: bool) {
+        self.gate.dry_run = dry_run;
+    }
+
+    /// Mark this session as driving stdin itself (the REPL's script mode):
+    /// a destructive verb then refuses instead of reading the program as an
+    /// answer, which is also what keeps it from hanging.
+    pub fn set_script_mode(&mut self, script_mode: bool) {
+        self.gate.script_mode = script_mode;
+    }
+
+    /// Install the whole gate at once (the binary's entry).
+    pub fn set_gate(&mut self, gate: WriteGate) {
+        self.gate = gate;
+    }
+
+    /// The session's files backend, built once.
+    #[cfg(feature = "domain-files")]
+    pub fn files(&mut self) -> &crate::domains::files::Backend {
+        let built = self.files_backend.is_none() as u64;
+        self.session.note_read("files", built);
+        if self.files_backend.is_none() {
+            self.files_backend = Some(Box::new(
+                smart_lib::platforms::linux::files::LinuxFilesBackend::new(),
+            ) as Box<crate::domains::files::Backend>);
+        }
+        self.files_backend.as_deref().expect("built just above")
+    }
+
+    /// Install the session's files backend (the hermetic test seam).
+    #[cfg(feature = "domain-files")]
+    pub fn set_files(&mut self, backend: Box<crate::domains::files::Backend>) {
+        self.files_backend = Some(backend);
+    }
+
+    /// The session's process backend, built once.
+    #[cfg(feature = "domain-process")]
+    pub fn process(&mut self) -> &crate::domains::process::Backend {
+        let built = self.process_backend.is_none() as u64;
+        self.session.note_read("process", built);
+        if self.process_backend.is_none() {
+            self.process_backend = Some(Box::new(
+                smart_lib::platforms::linux::process::LinuxProcessBackend::new(),
+            ) as Box<crate::domains::process::Backend>);
+        }
+        self.process_backend.as_deref().expect("built just above")
+    }
+
+    /// Install the session's process backend (the hermetic test seam).
+    #[cfg(feature = "domain-process")]
+    pub fn set_process(&mut self, backend: Box<crate::domains::process::Backend>) {
+        self.process_backend = Some(backend);
+    }
+
+    /// The session's settings backend, built once.
+    #[cfg(feature = "domain-settings")]
+    pub fn settings(&mut self) -> &crate::domains::settings::Backend {
+        let built = self.settings_backend.is_none() as u64;
+        self.session.note_read("settings", built);
+        if self.settings_backend.is_none() {
+            self.settings_backend = Some(Box::new(
+                smart_lib::platforms::linux::settings::LinuxSettingsBackend::new(),
+            ) as Box<crate::domains::settings::Backend>);
+        }
+        self.settings_backend.as_deref().expect("built just above")
+    }
+
+    /// Install the session's settings backend (the hermetic test seam).
+    #[cfg(feature = "domain-settings")]
+    pub fn set_settings(&mut self, backend: Box<crate::domains::settings::Backend>) {
+        self.settings_backend = Some(backend);
+    }
+
+    /// The session's logging backend, built once.
+    #[cfg(feature = "domain-logging")]
+    pub fn logging(&mut self) -> &crate::domains::logging::Backend {
+        let built = self.logging_backend.is_none() as u64;
+        self.session.note_read("logging", built);
+        if self.logging_backend.is_none() {
+            self.logging_backend = Some(Box::new(
+                smart_lib::platforms::linux::logging::LinuxLoggingBackend::new(),
+            ) as Box<crate::domains::logging::Backend>);
+        }
+        self.logging_backend.as_deref().expect("built just above")
+    }
+
+    /// Install the session's logging backend (the hermetic test seam).
+    #[cfg(feature = "domain-logging")]
+    pub fn set_logging(&mut self, backend: Box<crate::domains::logging::Backend>) {
+        self.logging_backend = Some(backend);
+    }
+
+    /// The session's clock backend, built once: the timers and alarms this
+    /// session arms live here for the whole process, which is what lets
+    /// `timer create → list → check` meet.
+    #[cfg(feature = "domain-clock")]
+    pub fn clock(&mut self) -> &crate::domains::clock::Backend {
+        let built = self.clock_backend.is_none() as u64;
+        self.session.note_read("clock", built);
+        if self.clock_backend.is_none() {
+            self.clock_backend = Some(Box::new(
+                smart_lib::platforms::linux::clock::LinuxClockBackend::new(),
+            ) as Box<crate::domains::clock::Backend>);
+        }
+        self.clock_backend.as_deref().expect("built just above")
+    }
+
+    /// Install the session's clock backend (the hermetic test seam).
+    #[cfg(feature = "domain-clock")]
+    pub fn set_clock(&mut self, backend: Box<crate::domains::clock::Backend>) {
+        self.clock_backend = Some(backend);
+    }
+
+    /// The session's time backend, built once.
+    #[cfg(feature = "domain-time")]
+    pub fn time(&mut self) -> &crate::domains::time::Backend {
+        let built = self.time_backend.is_none() as u64;
+        self.session.note_read("time", built);
+        if self.time_backend.is_none() {
+            self.time_backend = Some(Box::new(
+                smart_lib::platforms::linux::time::LinuxTimeBackend::new(),
+            ) as Box<crate::domains::time::Backend>);
+        }
+        self.time_backend.as_deref().expect("built just above")
+    }
+
+    /// Install the session's time backend (the hermetic test seam).
+    #[cfg(feature = "domain-time")]
+    pub fn set_time(&mut self, backend: Box<crate::domains::time::Backend>) {
+        self.time_backend = Some(backend);
     }
 
     /// Build the shell with an explicitly-connected clipboard backend (the live
@@ -151,6 +409,20 @@ impl Shell {
             clipboard,
             #[cfg(feature = "domain-service")]
             service: Box::new(smart_lib::platforms::linux::service::LinuxServiceBackend::native_connect()),
+            session: crate::session::SessionState::hermetic(),
+            gate: WriteGate::default(),
+            #[cfg(feature = "domain-files")]
+            files_backend: None,
+            #[cfg(feature = "domain-process")]
+            process_backend: None,
+            #[cfg(feature = "domain-settings")]
+            settings_backend: None,
+            #[cfg(feature = "domain-logging")]
+            logging_backend: None,
+            #[cfg(feature = "domain-clock")]
+            clock_backend: None,
+            #[cfg(feature = "domain-time")]
+            time_backend: None,
         }
     }
 
@@ -205,39 +477,45 @@ impl Shell {
                 }
                 #[cfg(feature = "domain-files")]
                 if domain == "files" {
-                    let backend = smart_lib::platforms::linux::files::LinuxFilesBackend::new();
-                    let root = crate::domains::files::selector_root(&backend)?;
-                    return Ok(selector::resolve(root, &sel));
+                    return Ok(selector::resolve(
+                        crate::domains::files::selector_root(self.files())?,
+                        &sel,
+                    ));
                 }
                 #[cfg(feature = "domain-process")]
                 if domain == "process" {
-                    let backend = smart_lib::platforms::linux::process::LinuxProcessBackend::new();
-                    let root = crate::domains::process::selector_root(&backend)?;
-                    return Ok(selector::resolve(root, &sel));
+                    return Ok(selector::resolve(
+                        crate::domains::process::selector_root(self.process())?,
+                        &sel,
+                    ));
                 }
                 #[cfg(feature = "domain-settings")]
                 if domain == "settings" {
-                    let backend = smart_lib::platforms::linux::settings::LinuxSettingsBackend::new();
-                    let root = crate::domains::settings::selector_root(&backend)?;
-                    return Ok(selector::resolve(root, &sel));
+                    return Ok(selector::resolve(
+                        crate::domains::settings::selector_root(self.settings())?,
+                        &sel,
+                    ));
                 }
                 #[cfg(feature = "domain-logging")]
                 if domain == "logging" {
-                    let backend = smart_lib::platforms::linux::logging::LinuxLoggingBackend::new();
-                    let root = crate::domains::logging::selector_root(&backend)?;
-                    return Ok(selector::resolve(root, &sel));
+                    return Ok(selector::resolve(
+                        crate::domains::logging::selector_root(self.logging())?,
+                        &sel,
+                    ));
                 }
                 #[cfg(feature = "domain-clock")]
                 if domain == "clock" {
-                    let backend = smart_lib::platforms::linux::clock::LinuxClockBackend::new();
-                    let root = crate::domains::clock::selector_root(&backend)?;
-                    return Ok(selector::resolve(root, &sel));
+                    return Ok(selector::resolve(
+                        crate::domains::clock::selector_root(self.clock())?,
+                        &sel,
+                    ));
                 }
                 #[cfg(feature = "domain-time")]
                 if domain == "time" {
-                    let backend = smart_lib::platforms::linux::time::LinuxTimeBackend::new();
-                    let root = crate::domains::time::selector_root(&backend)?;
-                    return Ok(selector::resolve(root, &sel));
+                    return Ok(selector::resolve(
+                        crate::domains::time::selector_root(self.time())?,
+                        &sel,
+                    ));
                 }
                 match domain {
                     #[cfg(not(feature = "domain-network"))]
@@ -377,6 +655,7 @@ impl Shell {
                 self.execute_help(domain.as_deref());
                 Ok(Value::Null)
             }
+            ShellCommand::Session { action } => self.execute_session(action),
             ShellCommand::Migrate => {
                 print!("{}", migrate::render_queue(&OutputFormat::Human));
                 Ok(Value::Null)
@@ -474,7 +753,9 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = NetworkCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let guard = network::WriteGuard { allowed: false };
+        let guard = network::WriteGuard {
+            allowed: self.accept_write(network::write_intent(&cmd), "")?,
+        };
         if render {
             // A command that renders itself returns no further value.
             network::run(&cmd, &OutputFormat::Human, self.backend.as_ref(), guard)?;
@@ -498,8 +779,8 @@ impl Shell {
 
     /// The clipboard: parse its command with the same clap grammar the one-shot
     /// binary uses and route it to the native selection engine, in-process.
-    /// Host-mutating verbs are gated (allowed: false here; the REPL prompts and
-    /// one-shot `--force` opens the gate).
+    /// Host-mutating verbs gate through the confirmation path (the REPL's
+    /// prompt, a piped `y` line, or `--force`).
     #[cfg(feature = "domain-clipboard")]
     fn exec_clipboard(&mut self, args: &str, render: bool) -> SmartResult<Value> {
         use crate::domains::clipboard::{self, ClipboardCmd};
@@ -508,7 +789,9 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = ClipboardCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let guard = clipboard::WriteGuard { allowed: false };
+        let guard = clipboard::WriteGuard {
+            allowed: self.accept_write(clipboard::write_intent(&cmd), "")?,
+        };
         if render {
             clipboard::run(&cmd, &OutputFormat::Human, self.clipboard.as_ref(), guard)?;
             Ok(Value::Null)
@@ -519,8 +802,7 @@ impl Shell {
 
     /// The service domain: parse its command with the same clap grammar the
     /// one-shot binary uses and route it to the supervisor's native read path,
-    /// in-process. Host-mutating verbs are gated (allowed: false here; the REPL
-    /// prompts and one-shot `--force` opens the gate).
+    /// in-process. Host-mutating verbs gate through the confirmation path.
     #[cfg(feature = "domain-service")]
     fn exec_service(&mut self, args: &str, render: bool) -> SmartResult<Value> {
         use crate::domains::service::{self, ServiceCmd};
@@ -532,7 +814,9 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = ServiceCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let guard = service::WriteGuard { allowed: false };
+        let guard = service::WriteGuard {
+            allowed: self.accept_write(service::write_intent(&cmd), "")?,
+        };
         if render {
             service::run(&cmd, &OutputFormat::Human, self.service.as_ref(), guard)?;
             Ok(Value::Null)
@@ -542,8 +826,9 @@ impl Shell {
     }
 
     /// The files domain: parse with the same clap grammar the one-shot binary
-    /// uses and route to the engine, in-process. Host-mutating verbs are gated
-    /// (allowed: false here; the REPL prompts and one-shot `--force` opens it).
+    /// uses and route to the SESSION's backend, in-process. Host-mutating
+    /// verbs gate through the confirmation path (the REPL's prompt, a piped
+    /// `y` line, or `--force`).
     #[cfg(feature = "domain-files")]
     fn exec_files(&mut self, args: &str, render: bool) -> SmartResult<Value> {
         use crate::domains::files::{self, FilesCmd};
@@ -552,14 +837,33 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = FilesCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let backend = smart_lib::platforms::linux::files::LinuxFilesBackend::new();
-        let guard = files::WriteGuard { allowed: false };
-        if render {
-            files::run(&cmd, &OutputFormat::Human, &backend, guard)?;
-            Ok(Value::Null)
+        // The confirmation half: the context is a live read of the target(s)
+        // (type/size/mtime, or old→new), so the prompt shows what the write
+        // would touch — law #8's reads, never the write itself.
+        let context = files::write_context(&cmd, self.files());
+        let guard = files::WriteGuard {
+            allowed: self.accept_write(files::write_intent(&cmd), &context)?,
+        };
+        // The watch ledger is this session's, as the clock's is, but the
+        // borrow checker sees two &mut selves: the backend moves out for the
+        // call and goes straight back.
+        let files = self.files_backend.take().expect("the session's files backend");
+        let result = if render {
+            // The command rendered itself, so the REPL prints nothing further
+            // (a rendered command answers with Null, never the value twice).
+            files::run_session(
+                &cmd,
+                &OutputFormat::Human,
+                files.as_ref(),
+                guard,
+                &mut self.session.files_watch,
+            )
+            .map(|_| Value::Null)
         } else {
-            files::evaluate(&cmd, &backend, guard)
-        }
+            files::evaluate_session(&cmd, files.as_ref(), guard, &mut self.session.files_watch)
+        };
+        self.files_backend = Some(files);
+        result
     }
 
     /// The process domain.
@@ -571,13 +875,14 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = ProcessCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let backend = smart_lib::platforms::linux::process::LinuxProcessBackend::new();
-        let guard = process::WriteGuard { allowed: false };
+        let guard = process::WriteGuard {
+            allowed: self.accept_write(process::write_intent(&cmd), "")?,
+        };
         if render {
-            process::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            process::run(&cmd, &OutputFormat::Human, self.process(), guard)?;
             Ok(Value::Null)
         } else {
-            process::evaluate(&cmd, &backend, guard)
+            process::evaluate(&cmd, self.process(), guard)
         }
     }
 
@@ -590,13 +895,15 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = SettingsCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let backend = smart_lib::platforms::linux::settings::LinuxSettingsBackend::new();
-        let guard = settings::WriteGuard { allowed: false };
+        let context = settings::write_context(&cmd, self.settings());
+        let guard = settings::WriteGuard {
+            allowed: self.accept_write(settings::write_intent(&cmd), &context)?,
+        };
         if render {
-            settings::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            settings::run(&cmd, &OutputFormat::Human, self.settings(), guard)?;
             Ok(Value::Null)
         } else {
-            settings::evaluate(&cmd, &backend, guard)
+            settings::evaluate(&cmd, self.settings(), guard)
         }
     }
 
@@ -609,18 +916,20 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = LoggingCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let backend = smart_lib::platforms::linux::logging::LinuxLoggingBackend::new();
-        let guard = logging::WriteGuard { allowed: false };
+        let guard = logging::WriteGuard {
+            allowed: self.accept_write(logging::write_intent(&cmd), "")?,
+        };
         if render {
-            logging::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            logging::run(&cmd, &OutputFormat::Human, self.logging(), guard)?;
             Ok(Value::Null)
         } else {
-            logging::evaluate(&cmd, &backend, guard)
+            logging::evaluate(&cmd, self.logging(), guard)
         }
     }
 
-    /// The clock domain (reads + process-local timerfds; the alarm store's
-    /// create/delete are gated behind the write guard in the one-shot path).
+    /// The clock domain: reads plus this session's timerfds and alarm store,
+    /// all live for the process. The timer surface (create/list/check/cancel)
+    /// drives the session's ledger, so the verbs compose across lines.
     #[cfg(feature = "domain-clock")]
     fn exec_clock(&mut self, args: &str, render: bool) -> SmartResult<Value> {
         use crate::domains::clock::{self, ClockCmd};
@@ -629,14 +938,30 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = ClockCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let backend = smart_lib::platforms::linux::clock::LinuxClockBackend::new();
-        let guard = clock::WriteGuard { allowed: false };
-        if render {
-            clock::run(&cmd, &OutputFormat::Human, &backend, guard)?;
-            Ok(Value::Null)
+        let guard = clock::WriteGuard {
+            allowed: self.accept_write(clock::write_intent(&cmd), "")?,
+        };
+        // The clock backend and its session ledger are both this shell's, but
+        // the borrow checker sees two &mut selves: the backend is built (which
+        // is also where the read is counted) and then moved out for the call
+        // and put back, so the session and the engine are never aliased.
+        let _ = self.clock();
+        let clock = self.clock_backend.take().expect("the session's clock backend");
+        let result = if render {
+            // Rendered itself: the REPL prints nothing further.
+            clock::run_session(
+                &cmd,
+                &OutputFormat::Human,
+                clock.as_ref(),
+                guard,
+                &mut self.session.clock,
+            )
+            .map(|_| Value::Null)
         } else {
-            clock::evaluate(&cmd, &backend, guard)
-        }
+            clock::evaluate_session(&cmd, clock.as_ref(), guard, &mut self.session.clock)
+        };
+        self.clock_backend = Some(clock);
+        result
     }
 
     /// The time domain (all reads of the kernel clock and its calendars).
@@ -648,13 +973,31 @@ impl Shell {
         argv.extend(args.split_whitespace().map(str::to_string));
         let cmd = TimeCmd::try_parse_from(argv)
             .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
-        let backend = smart_lib::platforms::linux::time::LinuxTimeBackend::new();
         if render {
-            time::run(&cmd, &OutputFormat::Human, &backend)?;
+            time::run(&cmd, &OutputFormat::Human, self.time())?;
             Ok(Value::Null)
         } else {
-            time::evaluate(&cmd, &backend)
+            time::evaluate(&cmd, self.time())
         }
+    }
+
+    // ── the write gate: the founder's standard ──────────────────────────────
+
+    /// Whether this command performs a host write, and who accepted it.
+    ///
+    /// The founder's standard: a destructive verb asks `delete <path>? (y/N)`
+    /// with the CONTEXT beside it (the live read's type/size/mtime, or the
+    /// old→new of a move) — never "type the name". Script mode never assumes
+    /// yes: with no piped answer line the verb REFUSES (`not_supported`, which
+    /// the binary renders as a JSON answer under `--json`), and an explicit
+    /// `--force` is the documented acceptance that skips the prompt. A read
+    /// verb carries no intent and no prompt at all.
+    fn accept_write(
+        &self,
+        intent: Option<(String, String)>,
+        context: &str,
+    ) -> SmartResult<bool> {
+        accept_write(intent, context, self.gate)
     }
 
     // ── watch: the store's real bounded events ──────────────────────────────
@@ -1005,7 +1348,113 @@ impl Shell {
         ))
     }
 
+    // ── the session's own read counts ───────────────────────────────────────
+
+    /// `session reads` — what the session actually read, per domain: how many
+    /// commands evaluated the domain and how many backends it built. One build
+    /// per domain per process is the measurement that the per-invocation-backend
+    /// rot is gone; a pipe (`process | sort mem | take 5`) reads once and pipes
+    /// the VALUE through every stage, so its read count is 1.
+    fn execute_session(&self, action: &str) -> SmartResult<Value> {
+        match action.trim() {
+            "reads" | "" => {
+                let reads = self.session.reads();
+                let mut out = String::new();
+                out.push_str(&format!(
+                    "  {} {} {} — one backend per domain per session; pipes read once and pipe the VALUE\n",
+                    "📈".blue().bold(),
+                    "Session reads".blue().bold(),
+                    format!("({})", reads.len()).dimmed()
+                ));
+                if reads.is_empty() {
+                    out.push_str(&format!(
+                        "  └─ {} no domain read yet this session\n",
+                        "○".dimmed()
+                    ));
+                    return Ok(Value::Null);
+                }
+                let mut table = Table::new(vec![
+                    "DOMAIN".into(),
+                    "READS".into(),
+                    "BACKENDS BUILT".into(),
+                ]);
+                for row in &reads {
+                    table = table.row(vec![
+                        Cell::plain(row.domain),
+                        Cell::plain(row.reads.to_string()),
+                        Cell::styled(row.builds.to_string(), if row.builds > 1 { Sgr::Yellow } else { Sgr::Plain }),
+                    ]);
+                }
+                out.push_str(&table.render());
+                print!("{out}");
+                Ok(Value::Null)
+            }
+            other => Err(SmartError::invalid_argument(format!(
+                "session: unknown surface {other} (the session answers `session reads`)"
+            ))),
+        }
+    }
+
     // ── help: only what is real ─────────────────────────────────────────────
+
+    /// `help` (no domain) — the domains that are LIVE today, in the board's own
+    /// order. The list is the BOARD's, never a hand-kept one: a domain appears
+    /// because `migrate` records it `RealToday` on the engine, which is what
+    /// stopped the old `help` listing 3 of 9 live domains and calling the other
+    /// six "the migration queue" while all nine answered commands.
+    fn help_overview(&self) {
+        let live = crate::migrate::live_domains();
+        let (_real, pending, archive) = crate::migrate::counts();
+        println!(
+            "  {} Smart Shell — commands: {} domains LIVE on the engine",
+            "●".blue().bold(),
+            live.len()
+        );
+        println!();
+        for name in &live {
+            let gloss = LIVE_DOMAIN_GLOSS
+                .iter()
+                .find(|(d, _)| d == name)
+                .map(|(_, g)| *g)
+                .unwrap_or("live on the engine — see `smart migrate`");
+            println!("    {:<24} {}", name, gloss);
+        }
+        println!("    {:<24} {}", "session", "this session's own read counts (`session reads`)");
+        println!("    {:<24} {}", "migrate", "the migration queue as data");
+        println!();
+        println!("  {} Special:", "●".blue().bold());
+        println!("    @<domain>/<field>     Selector (e.g. @process/processes)");
+        println!("    <cmd> | where ...     Pipe with filter (the ops reshape a VALUE)");
+        println!("    <cmd> | sort <field>  Sort by field");
+        println!("    <cmd> | take <n>      Take the first n items");
+        println!("    <cmd> | skip <n>      Drop the first n items");
+        println!("    <cmd> | count         Count items");
+        println!("    watch <domain>        Stream the store's real events");
+        println!("    apply <file.toml>     Apply a config ([network] section)");
+        println!("    export [path]         Export the observed state");
+        println!("    session reads         What this session read, per domain");
+        println!("    help [domain]         This list, or one domain's verbs");
+        println!("    exit                  Leave");
+        println!();
+        println!(
+            "  {} Language (one command per line): a variable assigns, a pipe reshapes, and",
+            "●".blue().bold()
+        );
+        println!("    `-c '<line>'` runs one line the same way the REPL does. An `if:`/`for:`/");
+        println!("    `fn` block is entered as a single `-c` line — the REPL takes one line per");
+        println!("    prompt and never guesses at an indented body.");
+        println!();
+        println!(
+            "  {} {} queued domain(s) and {} archive-only domain(s) are NOT live here —",
+            "◌".dimmed(),
+            pending,
+            archive
+        );
+        println!(
+            "    each answers honestly from the board (`smart migrate` lists every one; a",
+        );
+        println!("    queued domain answers with its migration position, never a fake command).");
+    }
 
     fn execute_help(&self, domain: Option<&str>) {
         match domain {
@@ -1066,54 +1515,141 @@ impl Shell {
                 println!("    @service/services             The service records");
                 println!("    @service/supervisor           The supervisor's identity + caps");
             }
+            #[cfg(feature = "domain-files")]
+            Some("files") => {
+                println!("  {} files — Commands:", "?".blue());
+                println!("    files [path]                  The listing (getdents64; --all/--pattern/");
+                println!("                                   --sort/--order/--recursive)");
+                println!("    files find <path> <glob>      A name search under a path");
+                println!("    files tree <path> [--depth N] A bounded walk");
+                println!("    files stat|xattrs <path>      statx metadata (+ the file's own xattrs)");
+                println!("    files cat <path> [--offset --bytes]  Read through the handle surface");
+                println!("    files du|mounts [path]        statvfs usage; the mount this path lives on");
+                println!("    files locks|hash <path>       This process's fcntl locks; SHA-256");
+                println!("    files versions|branches <path>|store|dedupe   The version store");
+                println!("    files watch <path> [-c N]     Real inotify events, bounded");
+                println!("    files watches                 The watch ledger: whose subscriptions");
+                println!("                                   the host's /proc can still see");
+                println!("    files special <token>         home/tmp/cwd/... resolved from the engine");
+                println!("    files trash|recents           The trash and the recently-used record");
+                println!("    files app <mime>              The handler for a MIME type");
+                println!("    files grep <path> <pattern>   A pattern over a file's lines");
+                println!("    files compare <a> <b>|health|quota|caps");
+                println!("    files mkdir|touch|rm|mv|cp|write|link|lock|unlock   Host-mutating");
+                println!("                                   (every one prompts `delete <path>? (y/N)`");
+                println!("                                   with the type/size/mtime beside it)");
+                println!();
+                println!("  Selectors:");
+                println!("    @files/entries|home|cwd|du|caps");
+                println!("    files ls | take 5             Every row the read found — `| take` narrows");
+            }
+            #[cfg(feature = "domain-process")]
+            Some("process") => {
+                println!("  {} process — Commands:", "?".blue());
+                println!("    process                       The table: every process /proc reports");
+                println!("    process <pid>                 One process's whole read surface");
+                println!("    process inspect|tree|threads|env|maps|limits|accounting <pid>");
+                println!("                                   (env --names-only hides the values)");
+                println!("    process groups|group <pgid>   The kernel's own job-control groups");
+                println!("    process stats [--uid N]       The aggregate over every process");
+                println!("    process ptrace|can-signal <pid>   The host's own measured verdicts");
+                println!("    process signal <pid> <sig>    Deliver a signal (host-mutating)");
+                println!("    process attach <pid>          A ptrace attach (host-mutating)");
+                println!("    process wait <pid>|caps");
+                println!();
+                println!("  Selectors:");
+                println!("    @process/processes            The process records (one field per");
+                println!("                                   record: `@process/processes where uid == 1000`)");
+                println!("    process | sort mem | take 5   The read happens ONCE; the pipe reshapes");
+            }
+            #[cfg(feature = "domain-settings")]
+            Some("settings") => {
+                println!("  {} settings — Commands:", "?".blue());
+                println!("    settings                      Every schema the host publishes (default)");
+                println!("    settings list <domain>        One schema's live keys and values");
+                println!("    settings get <domain> <key>   One key: value, range, summary");
+                println!("    settings schema <domain>      The declaration per key");
+                println!("    settings category <token>     The keys recorded under one category");
+                println!("    settings version|history|diff The store's own bookkeeping");
+                println!("    settings bulk-get <domain> k… Several keys in one read");
+                println!("    settings watch [-c N]         Bounded change events");
+                println!("    settings set <domain> <key> <value>   Host-mutating (prompts)");
+                println!("    settings bulk-set <domain> a=… b=…     Host-mutating (prompts)");
+                println!("    settings caps");
+                println!();
+                println!("  Selectors:");
+                println!("    @settings/domains|schema|caps");
+            }
+            #[cfg(feature = "domain-logging")]
+            Some("logging") => {
+                println!("  {} logging — Commands:", "?".blue());
+                println!("    logging sinks [--refresh]     Every sink the host has, measured by");
+                println!("                                   opening it (root-only ones answer the");
+                println!("                                   host's own Permission denied words)");
+                println!("    logging domains               Every domain: file/sink, level, sampling");
+                println!("    logging tail <sink> [-n N]    Real lines out of a real host log");
+                println!("    logging entries [--level --domain --pattern]  This process's store");
+                println!("    logging follow [-c N]         A real subscription, bounded");
+                println!("    logging emit <level> <msg>    Write a line to this process's stderr");
+                println!("    logging level|set-level|sampling <domain>");
+                println!("    logging clear <domain>|export|tracked|caps");
+                println!();
+                println!("  Selectors:");
+                println!("    @logging/sinks|domains|caps");
+            }
+            #[cfg(feature = "domain-clock")]
+            Some("clock") => {
+                println!("  {} clock — Commands:", "?".blue());
+                println!("    clock                         The clock info (the default view)");
+                println!("    clock now|monotonic|uptime|resolution|sync|security|domains");
+                println!("    clock quality <source>        One source's measured quality");
+                println!("    clock drift <a> <b>           The drift between two clock domains");
+                println!("    clock sleep <ms>              The engine's own sleep");
+                println!("    clock timer create [--after-ms N --interval-ms N --label L]");
+                println!("                                   Arms a real timerfd the session owns");
+                println!("    clock timer list              This session's timers (the ledger)");
+                println!("    clock timer check <id>        The kernel's own expiration count");
+                println!("    clock timer cancel <id>       Disarm (host-mutating — prompts)");
+                println!("    clock alarm list|next|create|snooze|delete   The alarm store");
+                println!("    clock virtual create|advance <id> <ms>   Software clocks");
+                println!("    clock sleep-cancellable <ms> [--cancel-after N]");
+                println!("    clock watch [-c N]|caps");
+                println!();
+                println!("  Selectors:");
+                println!("    @clock/info|sync|caps");
+                println!("    clock timer create            Timers live for the WHOLE session: a fresh");
+                println!("                                   process reads the ledger rows earlier ones");
+                println!("                                   left (owned / gone), never a firing");
+            }
+            #[cfg(feature = "domain-time")]
+            Some("time") => {
+                println!("  {} time — Commands:", "?".blue());
+                println!("    time                          Wall time, weekday, day-of-year, zone");
+                println!("    time tai                      UTC nanos <-> TAI (offset, round-trip)");
+                println!("    time cal [--date D] [--to Z]  Gregorian into the contract's calendars");
+                println!("    time add|sub <date> <unit>    Calendar arithmetic (month-end clamped)");
+                println!("    time diff <a> <b>             The calendar distance between two dates");
+                println!("    time caps");
+                println!();
+                println!("  Selectors:");
+                println!("    @time/* resolves through the calendar set (see `smart migrate`)");
+            }
+            Some("shell") | Some("session") => {
+                println!("  {} session — Commands:", "?".blue());
+                println!("    session reads                 Per domain: how many commands read it and");
+                println!("                                   how many backends the session built (one");
+                println!("                                   per domain per process — a pipe reads once");
+                println!("                                   and pipes the VALUE through every stage)");
+            }
             Some(other) => {
-                println!("  {} {} — {}", "◌".dimmed(), other, migrate::pending_reason(other));
-            }
-            None => {
-                println!("  {} Smart Shell v0.2.0 — Commands:", "●".blue().bold());
-                println!();
-                println!("    {:<24} {}", "network", "Network connectivity (real)");
-                #[cfg(feature = "domain-clipboard")]
-                println!("    {:<24} {}", "clipboard", "The clipboard (native selections)");
-                #[cfg(feature = "domain-service")]
                 println!(
-                    "    {:<24} {}",
-                    "service", "The services the supervisor runs (native supervision read)"
-                );
-                println!("    {:<24} {}", "migrate", "The domain migration queue");
-                println!();
-                println!("  {} Special:", "●".blue().bold());
-                println!("    @<domain>/<field>     Selector (e.g. @network/interfaces)");
-                println!("    <cmd> | where ...     Pipe with filter");
-                println!("    <cmd> | sort <f>      Sort by field");
-                println!("    <cmd> | take <n>      Take first N items");
-                println!("    <cmd> | count         Count items");
-                println!("    watch network         Stream the store's real events");
-                println!("    apply <file.toml>     Apply a config ([network] section)");
-                println!("    export [path]         Export the observed state");
-                println!("    migrate               The migration queue as data");
-                println!("    help <domain>         Domain-specific help");
-                println!();
-                println!("  {} Variables:", "●".blue().bold());
-                println!("    var = @network/interfaces | count   Assign a piped expression");
-                println!("    $var                               Use a variable");
-                println!();
-                println!("  {} Conditionals:", "●".blue().bold());
-                println!("    if @network/networking == false: network status");
-                println!("    elif @network/interfaces | count > 2: network interfaces");
-                println!("    else: network");
-                println!();
-                println!("  {} Loops:", "●".blue().bold());
-                println!("    for iface in @network/interfaces: network interface $iface");
-                println!();
-                println!("  {} Functions:", "●".blue().bold());
-                println!("    fn name(param): ...    name(args)");
-                println!();
-                println!(
-                    "  {} every other domain is the migration queue — `smart migrate` lists it",
-                    "◌".dimmed()
+                    "  {} {} — {}",
+                    "◌".dimmed(),
+                    other,
+                    crate::migrate::pending_reason(other)
                 );
             }
+            None => self.help_overview(),
         }
     }
 
@@ -1150,6 +1686,14 @@ impl Shell {
             let domain = words.next().unwrap_or("").to_string();
             let args: Vec<String> = words.map(str::to_string).collect();
             return ShellCommand::Watch { domain, args };
+        }
+
+        if input.starts_with("session") {
+            let action = input
+                .strip_prefix("session")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            return ShellCommand::Session { action };
         }
 
         if input.starts_with("apply ") {
@@ -1312,6 +1856,83 @@ impl Shell {
     }
 }
 
+/// The founder's confirmation standard, as ONE function both doors call: the
+/// REPL's line dispatcher and the one-shot binary's domain dispatchers.
+///
+/// A destructive verb asks `delete <path>? (y/N)` with the CONTEXT beside it
+/// (the live read's type/size/mtime, or the old→new of a move) — never "type
+/// the name". The three answers:
+///
+/// * `Ok(true)` — the operator said **`--force`** on the command line (the
+///   documented acceptance), or answered the prompt with an explicit `y`/`yes`
+///   on stdout's own question (an interactive terminal or a piped `y` line).
+/// * `Err(Cancelled)` — the operator answered `n`, or pressed Enter: an empty
+///   answer is a NO, and nothing was written.
+/// * `Err(NotSupported)` — there was nobody to ask (a non-interactive caller
+///   with no piped answer line, i.e. `--json`/piped/redirected script mode),
+///   which the binary renders as a deterministic JSON error answer.
+pub fn accept_write(
+    intent: Option<(String, String)>,
+    context: &str,
+    gate: WriteGate,
+) -> SmartResult<bool> {
+    let Some((verb, target)) = intent else {
+        return Ok(false);
+    };
+    // The question, built once here because every answer path names it.
+    // The founder's question, verbatim: `delete <path>? (y/N)` with the CONTEXT
+    // beside it. The target is always named — the path being destroyed is the
+    // first thing an operator needs — and the context never repeats a target
+    // it already carries.
+    let target = target.trim();
+    let question = match (target, context) {
+        ("", "") => verb.clone(),
+        (t, "") => format!("{verb} {t}"),
+        ("", c) => format!("{verb} {c}"),
+        (t, c) if c.contains(t) => format!("{verb} {c}"),
+        (t, c) => format!("{verb} {t} ({c})"),
+    };
+    if gate.dry_run {
+        // The plan IS the answer: what would be asked, with the live context
+        // beside it, and an explicit statement that nothing was written.
+        println!(
+            "  {} (y/N) — the plan; nothing was written (--dry-run)",
+            format!("{question}?").bold()
+        );
+        return Err(SmartError::not_supported(format!(
+            "--dry-run: {question} — the plan was printed and no write was performed"
+        )));
+    }
+    if gate.force {
+        // The operator said yes on the command line; the prompt is skipped
+        // and the refusal message says so.
+        return Ok(true);
+    }
+    if gate.script_mode {
+        // Stdin is the caller's program, never an answer: the verb says so
+        // and refuses, which is what `--json` answers with under script mode.
+        return Err(SmartError::not_supported(format!(
+            "refusing `{question}`: it changes host state and this caller is driving stdin \
+             itself (script mode), so there is no operator to ask. Answer the interactive \
+             `(y/N)` prompt when running interactively, pipe a `y` line to a one-shot \
+             invocation, or pass `--force` to accept the write explicitly (the live \
+             bring-back proof is founder-run)."
+        )));
+    }
+    match crate::confirm::ask(&question) {
+        crate::confirm::Answer::Yes => Ok(true),
+        crate::confirm::Answer::No => Err(SmartError::cancelled(format!(
+            "{question} — the operator answered no; nothing was written"
+        ))),
+        crate::confirm::Answer::NoInput => Err(SmartError::not_supported(format!(
+            "refusing `{question}`: it changes host state and there is no operator to ask \
+             (non-interactive). Answer the interactive `(y/N)` prompt when running interactively, \
+             pipe a `y` line, or pass `--force` to accept the write explicitly (the live \
+             bring-back proof is founder-run)."
+        ))),
+    }
+}
+
 /// Parse a command body: one command per line, empty lines dropped.
 fn parse_body(body: &str) -> Vec<ShellCommand> {
     body.lines()
@@ -1459,7 +2080,16 @@ impl rustyline::Helper for ShellHelper {}
 /// Run the shell: the rustyline REPL on a terminal, the same evaluator over
 /// stdin's lines when piped (so the language is scriptable and provable).
 pub fn run_shell(backend: Box<Backend>) {
+    run_shell_with(backend, WriteGate::default())
+}
+
+/// The binary's entry: the same REPL, with `--force` carried into the session
+/// and the clock-timer ledger shared with the next process through the shell's
+/// own state directory.
+pub fn run_shell_with(backend: Box<Backend>, gate: WriteGate) {
     let mut shell = Shell::new(backend);
+    shell.set_gate(gate);
+    shell.enable_state_persistence();
     #[cfg(feature = "domain-clipboard")]
     shell.connect_clipboard();
     #[cfg(feature = "domain-service")]
@@ -1544,6 +2174,10 @@ fn run_repl(shell: &mut Shell, aliases: &std::collections::HashMap<String, Strin
 /// line by line (a block header accumulates its body until a blank line).
 fn run_script(shell: &mut Shell, aliases: &std::collections::HashMap<String, String>) {
     use std::io::BufRead;
+    // stdin is the PROGRAM here, so a confirmation never reads it: a
+    // destructive verb refuses instead of consuming (or blocking on) the very
+    // lines this loop is reading.
+    shell.set_script_mode(true);
     let stdin = std::io::stdin();
     let mut pending: Option<String> = None;
     for line in stdin.lock().lines() {
@@ -1573,16 +2207,40 @@ fn run_script(shell: &mut Shell, aliases: &std::collections::HashMap<String, Str
     }
 }
 
-/// Evaluate one shell-language line and render the result: a command's own
-/// aesthetic when it rendered itself, the pretty value form otherwise.
+/// Evaluate one shell-language line under the caller's output shape and gate.
+/// Raw prints the value's pipe-ready PLAIN TEXT form (`value::to_raw`) instead
+/// of the pretty table — the door the one-shot `-o raw` used to leave shut.
 pub fn eval_line(shell: &mut Shell, line: &str) {
+    // The REPL's own evaluator keeps the shell's gate: the caller installed it
+    // (script mode drives stdin itself, `--force` was passed) and a line
+    // evaluation must not quietly drop it.
+    let gate = shell.gate;
+    eval_line_with(shell, line, crate::OutputFormat::Human, gate);
+}
+
+/// Evaluate one line under the caller's output shape. Raw prints the value's
+/// pipe-ready PLAIN TEXT form (`value::to_raw`) instead of the pretty table —
+/// the door the one-shot `-o raw` used to leave shut. `force` is carried into
+/// the shell so a `-c` line can accept a host write explicitly.
+pub fn eval_line_with(shell: &mut Shell, line: &str, format: crate::OutputFormat, gate: WriteGate) {
+    shell.set_gate(gate);
     let cmd = Shell::parse(line);
     match shell.exec_cmd(&cmd) {
         Ok(value) => {
-            if !matches!(value, Value::Null) {
-                println!("{}", crate::value::render_pretty(&value));
+            if matches!(value, Value::Null) {
+                return;
+            }
+            match format {
+                crate::OutputFormat::Raw => print!("{}", crate::value::to_raw(&value)),
+                _ => println!("{}", crate::value::render_pretty(&value)),
             }
         }
-        Err(e) => eprintln!("  {} {}", "✗".red(), e),
+        Err(e) => {
+            if format == crate::OutputFormat::Json {
+                println!("{}", crate::error::json_error(&e));
+            } else {
+                eprintln!("  {} {}", "✗".red(), e);
+            }
+        }
     }
 }

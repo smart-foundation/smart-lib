@@ -22,11 +22,6 @@ use super::{
 };
 use super::{SettingsAction as A, SettingsCmd};
 
-/// The most rows one human table draws, and the line that names the cut — the
-/// host publishes 174 schemas here, and hiding the rest would be a lie about
-/// how many there are.
-const MAX_ROWS: usize = 24;
-
 // ═══ the data half ═══════════════════════════════════════════════════════
 
 /// `settings` — the host's own schema source: every published schema with its
@@ -411,7 +406,10 @@ fn render_human(cmd: &SettingsCmd, value: &Value) -> String {
     }
 }
 
-/// The schema source: every domain the host publishes.
+/// The schema source: every domain the host publishes. The row count is the
+/// caller's (`| take 24`, `--limit`) — the 24-of-258 peephole that used to
+/// live here hid the host's own source; the width is the renderer's, and the
+/// full 258 are one door away in `-o json`.
 fn render_domains(value: &Value) -> String {
     let mut out = String::new();
     let domains = match value.field("domains") {
@@ -419,8 +417,6 @@ fn render_domains(value: &Value) -> String {
         _ => Vec::new(),
     };
     let total = value.field("total").as_f64().unwrap_or(0.0) as usize;
-    let hidden = domains.len().saturating_sub(MAX_ROWS);
-    let shown = &domains[..domains.len().min(MAX_ROWS)];
     out.push_str(&format!(
         "  {} {} {} {}\n",
         "⚙".blue().bold(),
@@ -435,26 +431,21 @@ fn render_domains(value: &Value) -> String {
         ));
         return out.trim_end().to_string();
     }
-    let mut table = Table::new(vec!["".into(), "DOMAIN".into(), "KEYS".into(), "PATH".into()]);
-    for domain in shown {
+    let mut table = Table::new(vec!["".into(), "DOMAIN".into(), "KEYS".into(), "PATH".into()])
+        .cap(1, 52)
+        .cap(3, 44);
+    for domain in &domains {
         table = table.row(vec![
             yes_no(!domain.field_bool("relocatable")),
-            truncate_to(&domain.field_str("id"), 52).into(),
+            domain.field_str("id").into(),
             Cell::plain(domain.field_str("keys")),
             match domain.field("path") {
-                Value::String(path) => truncate_to(path, 44).into(),
+                Value::String(path) => Cell::path(path.clone()),
                 _ => Cell::plain("—"),
             },
         ]);
     }
     out.push_str(&table.render());
-    if hidden > 0 {
-        out.push_str(&format!(
-            "\n  {} … and {} more schema(s) the host's own source lists\n",
-            "…".dimmed(),
-            hidden
-        ));
-    }
     out.push_str(&format!(
         "\n  {} the full list: {} · one schema: {}\n",
         "●".blue().bold(),
@@ -507,14 +498,32 @@ fn render_list(value: &Value, domain: &str) -> String {
 }
 
 /// One key's read: the contract's own union, with the schema's own words.
+/// The schema's GVariant type token as the word an operator reads. The token is
+/// the schema source's own spelling; the word is what the value IS. Both stay
+/// reachable — the word here, the token under `-o json`.
+fn type_word(token: &str) -> String {
+    match token {
+        "b" | "mb" => "boolean".to_string(),
+        "y" | "n" | "q" | "i" | "u" | "x" | "h" | "t" => "integer".to_string(),
+        "d" => "real".to_string(),
+        "s" | "o" | "g" => "string".to_string(),
+        other if other.starts_with('a') => "list".to_string(),
+        other if other.starts_with('{') => "dict".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn render_get(value: &Value, domain: &str, key: &str) -> String {
     let mut out = String::new();
+    // The header's type word is the HUMAN one (boolean/integer/string/…), never
+    // the raw GVariant token the schema source spells (`(as)`, `(i)`, `(mb)`).
+    // The raw token still rides `-o json`, where a machine can use it.
     out.push_str(&format!(
         "  {} {} {} {}\n",
         "🔎".blue().bold(),
         "Setting".blue().bold(),
         format!("{domain} {key}").bold(),
-        format!("({})", value.field_str("schema_type")).dimmed()
+        format!("({})", type_word(&value.field_str("schema_type"))).dimmed()
     ));
     if !value.field_str("error").is_empty() {
         out.push_str(&format!("  └─ {} {}\n", "✗".red(), value.field_str("error")));
