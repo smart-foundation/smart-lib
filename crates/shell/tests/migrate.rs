@@ -28,25 +28,46 @@ fn every_domain_the_original_shell_hosted_is_in_the_queue() {
 }
 
 #[test]
-fn three_domains_are_real_today() {
+fn nine_domains_are_real_today() {
     let real: Vec<&Domain> = QUEUE.iter().filter(|d| d.status == Status::RealToday).collect();
-    assert_eq!(real.len(), 3);
-    let names: Vec<&str> = real.iter().map(|d| d.name).collect();
-    assert!(names.contains(&"network"), "the live-proven engine domain");
-    assert!(names.contains(&"clipboard"), "clipboard migrated C2 on the native selection path");
-    assert!(
-        names.contains(&"service"),
-        "service migrated C3 on the supervisor's own native read path"
+    assert_eq!(
+        real.len(),
+        9,
+        "network, clipboard, service and the batch-4 six (files, process, settings, logging, \
+         clock, time)"
     );
+    let names: Vec<&str> = real.iter().map(|d| d.name).collect();
+    for domain in [
+        "network", "clipboard", "service", "files", "process", "settings", "logging", "clock",
+        "time",
+    ] {
+        assert!(names.contains(&domain), "{domain} is real today on the engine");
+    }
+    // A landed domain names its engine half, not a salvage archive path, and
+    // its count names the engine's own availability rows.
+    for domain in &real {
+        assert!(
+            domain.archive.starts_with("engine:"),
+            "{}: {}",
+            domain.name,
+            domain.archive
+        );
+        assert!(
+            domain.count.to_lowercase().contains("real"),
+            "{}: {}",
+            domain.name,
+            domain.count
+        );
+    }
 }
 
 #[test]
-fn the_queue_order_is_the_recons_value_order_past_service() {
+fn the_queue_order_is_the_recons_value_order_past_the_landed_domains() {
     let ordered: Vec<u16> = QUEUE.iter().filter_map(|d| d.order).collect();
     let mut sorted = ordered.clone();
     sorted.sort_unstable();
     assert_eq!(ordered, sorted, "the positions are the order");
-    assert_eq!(ordered, (1..=10).collect::<Vec<u16>>(), "ten queued domains, contiguous");
+    assert_eq!(ordered, (1..=8).collect::<Vec<u16>>(), "eight queued domains, contiguous");
 }
 
 #[test]

@@ -7,7 +7,13 @@
 //! contract-shaped over the engine's owned types rather than a hope.
 
 use crate::selector::Value;
-use crate::widgets::Table;
+use crate::widgets::{truncate_to, Cell, Table};
+
+/// The widest one cell of a piped table may draw. The pipe's value is data, and
+/// data a terminal cannot read is not a rendering: a command line 400 columns
+/// wide is cut and the cut is marked, exactly as a domain table cuts. The full
+/// value is one door away in `-o json`.
+const PIPE_CELL_WIDTH: usize = 48;
 
 /// The pretty rendering the REPL prints for a command's result value: a table
 /// for a list of records, aligned lines for a record, one line per item for a
@@ -26,14 +32,15 @@ pub fn render_pretty(value: &Value) -> String {
                 let mut table = Table::new(headers);
                 for item in items {
                     if let Value::Object(pairs) = item {
-                        let row: Vec<String> = first
+                        let row: Vec<Cell> = first
                             .iter()
                             .map(|(k, _)| {
-                                pairs
+                                let text = pairs
                                     .iter()
                                     .find(|(pk, _)| pk == k)
                                     .map(|(_, v)| v.display())
-                                    .unwrap_or_default()
+                                    .unwrap_or_default();
+                                Cell::plain(truncate_to(&text, PIPE_CELL_WIDTH))
                             })
                             .collect();
                         table = table.row(row);

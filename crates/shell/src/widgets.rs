@@ -352,6 +352,30 @@ pub fn truncate_to(cell: &str, width: usize) -> String {
     out
 }
 
+/// A human size: the host's own bytes, scaled with the binary prefixes the
+/// host's own tools print (a disk's `df -h`, a file's `ls -lh`). The scaling is
+/// a presentation of a measured number, never a rounding of it: the exact byte
+/// count travels beside it in the value tree.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else if value >= 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
 /// The display width of a string: the number of terminal columns it occupies.
 /// ANSI escapes count zero, and the shell's ambiguous-width glyphs count what
 /// this terminal draws them as ([`ambiguous_width`]).

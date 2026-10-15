@@ -203,6 +203,42 @@ impl Shell {
                     let root = crate::domains::service::selector_root(self.service.as_ref())?;
                     return Ok(selector::resolve(root, &sel));
                 }
+                #[cfg(feature = "domain-files")]
+                if domain == "files" {
+                    let backend = smart_lib::platforms::linux::files::LinuxFilesBackend::new();
+                    let root = crate::domains::files::selector_root(&backend)?;
+                    return Ok(selector::resolve(root, &sel));
+                }
+                #[cfg(feature = "domain-process")]
+                if domain == "process" {
+                    let backend = smart_lib::platforms::linux::process::LinuxProcessBackend::new();
+                    let root = crate::domains::process::selector_root(&backend)?;
+                    return Ok(selector::resolve(root, &sel));
+                }
+                #[cfg(feature = "domain-settings")]
+                if domain == "settings" {
+                    let backend = smart_lib::platforms::linux::settings::LinuxSettingsBackend::new();
+                    let root = crate::domains::settings::selector_root(&backend)?;
+                    return Ok(selector::resolve(root, &sel));
+                }
+                #[cfg(feature = "domain-logging")]
+                if domain == "logging" {
+                    let backend = smart_lib::platforms::linux::logging::LinuxLoggingBackend::new();
+                    let root = crate::domains::logging::selector_root(&backend)?;
+                    return Ok(selector::resolve(root, &sel));
+                }
+                #[cfg(feature = "domain-clock")]
+                if domain == "clock" {
+                    let backend = smart_lib::platforms::linux::clock::LinuxClockBackend::new();
+                    let root = crate::domains::clock::selector_root(&backend)?;
+                    return Ok(selector::resolve(root, &sel));
+                }
+                #[cfg(feature = "domain-time")]
+                if domain == "time" {
+                    let backend = smart_lib::platforms::linux::time::LinuxTimeBackend::new();
+                    let root = crate::domains::time::selector_root(&backend)?;
+                    return Ok(selector::resolve(root, &sel));
+                }
                 match domain {
                     #[cfg(not(feature = "domain-network"))]
                     "network" => {
@@ -392,6 +428,18 @@ impl Shell {
             "clipboard" => self.exec_clipboard(args, render),
             #[cfg(feature = "domain-service")]
             "service" => self.exec_service(args, render),
+            #[cfg(feature = "domain-files")]
+            "files" => self.exec_files(args, render),
+            #[cfg(feature = "domain-process")]
+            "process" => self.exec_process(args, render),
+            #[cfg(feature = "domain-settings")]
+            "settings" => self.exec_settings(args, render),
+            #[cfg(feature = "domain-logging")]
+            "logging" => self.exec_logging(args, render),
+            #[cfg(feature = "domain-clock")]
+            "clock" => self.exec_clock(args, render),
+            #[cfg(feature = "domain-time")]
+            "time" => self.exec_time(args, render),
             "migrate" => {
                 if render {
                     print!("{}", migrate::render_queue(&OutputFormat::Human));
@@ -493,6 +541,122 @@ impl Shell {
         }
     }
 
+    /// The files domain: parse with the same clap grammar the one-shot binary
+    /// uses and route to the engine, in-process. Host-mutating verbs are gated
+    /// (allowed: false here; the REPL prompts and one-shot `--force` opens it).
+    #[cfg(feature = "domain-files")]
+    fn exec_files(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::files::{self, FilesCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["files".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = FilesCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let backend = smart_lib::platforms::linux::files::LinuxFilesBackend::new();
+        let guard = files::WriteGuard { allowed: false };
+        if render {
+            files::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            Ok(Value::Null)
+        } else {
+            files::evaluate(&cmd, &backend, guard)
+        }
+    }
+
+    /// The process domain.
+    #[cfg(feature = "domain-process")]
+    fn exec_process(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::process::{self, ProcessCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["process".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = ProcessCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let backend = smart_lib::platforms::linux::process::LinuxProcessBackend::new();
+        let guard = process::WriteGuard { allowed: false };
+        if render {
+            process::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            Ok(Value::Null)
+        } else {
+            process::evaluate(&cmd, &backend, guard)
+        }
+    }
+
+    /// The settings domain.
+    #[cfg(feature = "domain-settings")]
+    fn exec_settings(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::settings::{self, SettingsCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["settings".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = SettingsCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let backend = smart_lib::platforms::linux::settings::LinuxSettingsBackend::new();
+        let guard = settings::WriteGuard { allowed: false };
+        if render {
+            settings::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            Ok(Value::Null)
+        } else {
+            settings::evaluate(&cmd, &backend, guard)
+        }
+    }
+
+    /// The logging domain (all reads — no host-mutating verb, so no guard).
+    #[cfg(feature = "domain-logging")]
+    fn exec_logging(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::logging::{self, LoggingCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["logging".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = LoggingCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let backend = smart_lib::platforms::linux::logging::LinuxLoggingBackend::new();
+        let guard = logging::WriteGuard { allowed: false };
+        if render {
+            logging::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            Ok(Value::Null)
+        } else {
+            logging::evaluate(&cmd, &backend, guard)
+        }
+    }
+
+    /// The clock domain (reads + process-local timerfds; the alarm store's
+    /// create/delete are gated behind the write guard in the one-shot path).
+    #[cfg(feature = "domain-clock")]
+    fn exec_clock(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::clock::{self, ClockCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["clock".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = ClockCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let backend = smart_lib::platforms::linux::clock::LinuxClockBackend::new();
+        let guard = clock::WriteGuard { allowed: false };
+        if render {
+            clock::run(&cmd, &OutputFormat::Human, &backend, guard)?;
+            Ok(Value::Null)
+        } else {
+            clock::evaluate(&cmd, &backend, guard)
+        }
+    }
+
+    /// The time domain (all reads of the kernel clock and its calendars).
+    #[cfg(feature = "domain-time")]
+    fn exec_time(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::time::{self, TimeCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["time".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = TimeCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let backend = smart_lib::platforms::linux::time::LinuxTimeBackend::new();
+        if render {
+            time::run(&cmd, &OutputFormat::Human, &backend)?;
+            Ok(Value::Null)
+        } else {
+            time::evaluate(&cmd, &backend)
+        }
+    }
+
     // ── watch: the store's real bounded events ──────────────────────────────
 
     /// `watch network [--count N] [--interval MILLIS]` — the engine store's
@@ -501,6 +665,13 @@ impl Shell {
     /// the revisions a pull collapsed are counted by the engine and reported.
     #[cfg(feature = "domain-network")]
     fn execute_watch(&mut self, domain: &str, args: &[String]) -> SmartResult<Value> {
+        // `watch files <path>` is the engine's own inotify subscription: the
+        // kernel's records, pulled in bounded rounds. Decided before the
+        // network arm so a files-only build still serves it.
+        #[cfg(feature = "domain-files")]
+        if domain == "files" {
+            return self.execute_watch_files(args);
+        }
 
         let domain = domain.trim();
         if domain != "network" {
@@ -603,6 +774,109 @@ impl Shell {
         Err(SmartError::unavailable(
             "watch needs the engine's network domain: rebuild the shell with default features",
         ))
+    }
+
+    /// `watch files <path> [--count N] [--interval MILLIS]` — the engine's own
+    /// inotify subscription: one watch over the path, one bounded pull per
+    /// round, the kernel's own records printed as they arrive. Bounded by the
+    /// caller's count (Ctrl+C stops an unbounded stream), never polled.
+    #[cfg(feature = "domain-files")]
+    fn execute_watch_files(&mut self, args: &[String]) -> SmartResult<Value> {
+        use smart_lib::domains::files::FilesBackend;
+
+        let mut path: Option<String> = None;
+        let mut count: Option<u64> = None;
+        let mut interval_ms: u64 = 500;
+        let mut rest = args.iter().map(String::as_str);
+        while let Some(arg) = rest.next() {
+            match arg {
+                "--count" => {
+                    count = Some(
+                        rest.next()
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .ok_or_else(|| {
+                                SmartError::invalid_argument("watch --count needs a number")
+                            })?,
+                    );
+                }
+                "--interval" => {
+                    interval_ms = rest
+                        .next()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or_else(|| {
+                            SmartError::invalid_argument(
+                                "watch --interval needs a number of milliseconds",
+                            )
+                        })?;
+                }
+                other if other.starts_with("--") => {
+                    return Err(SmartError::invalid_argument(format!(
+                        "watch files: unknown option {other} (try --count N or --interval MILLIS)"
+                    )))
+                }
+                other => path = Some(other.to_string()),
+            }
+        }
+        let Some(path) = path else {
+            return Err(SmartError::invalid_argument(
+                "watch files names a directory: `watch files /tmp`",
+            ));
+        };
+
+        let backend = smart_lib::platforms::linux::files::LinuxFilesBackend::new();
+        let subscription = backend.watch_directory(&path)?;
+        println!(
+            "  {} watching {} — {} the kernel's own inotify records (Ctrl+C to stop)",
+            "⟳".cyan(),
+            path.clone().bold(),
+            match count {
+                Some(n) => format!("{n} round(s) bounded"),
+                None => "unbounded".to_string(),
+            }
+        );
+        let mut seen = 0u64;
+        let mut round = 0u64;
+        loop {
+            if let Some(bound) = count {
+                if round >= bound {
+                    break;
+                }
+            }
+            round += 1;
+            std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            let events = backend.pull_watch(subscription, 32)?;
+            for event in &events {
+                seen += 1;
+                let glyph = match event.kind {
+                    smart_lib::domains::files::types::FileEventKind::Create => "＋",
+                    smart_lib::domains::files::types::FileEventKind::Delete => "－",
+                    smart_lib::domains::files::types::FileEventKind::Modify => "～",
+                    smart_lib::domains::files::types::FileEventKind::Rename
+                    | smart_lib::domains::files::types::FileEventKind::Move => "↔",
+                    _ => "▢",
+                };
+                let shown = if event.old_path.is_empty() {
+                    event.path.clone()
+                } else {
+                    format!("{} → {}", event.old_path, event.path)
+                };
+                println!(
+                    "     {} {:<7} {} {}",
+                    glyph,
+                    event.kind.as_token(),
+                    shown,
+                    format!("(event {seen})").dimmed()
+                );
+            }
+        }
+        let _ = backend.cancel_watch(subscription);
+        println!(
+            "  {} watch closed — {} event(s) over {} round(s)",
+            "◉".green(),
+            seen,
+            round
+        );
+        Ok(Value::Null)
     }
 
     // ── apply / export: the real [network] section ──────────────────────────

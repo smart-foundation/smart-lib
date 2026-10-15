@@ -29,7 +29,35 @@ name = "shell"
 path = "src/lib.rs"
 
 [features]
-default = ["domain-network", "domain-clipboard", "domain-service"]
+# The Batch 4 wave landed all six of these on the engine in one commit, so the
+# shell's default build hosts them all — the founder's live binary is one
+# `cargo build -j6 -p shell` away. Each feature still gates its domain exactly
+# like service: with it off the shell builds and the domain's commands answer
+# honestly that the engine was built without the feature.
+default = [
+    "domain-network",
+    "domain-clipboard",
+    "domain-service",
+    "domain-files",
+    "domain-process",
+    "domain-settings",
+    "domain-logging",
+    "domain-clock",
+    "domain-time",
+]
+# The six Batch 4 domains, each a real engine half.
+# files — the anchor: statx/getdents/inotify/copy_file_range/mmap + the CAS store
+domain-files = ["smart-lib/domain-files"]
+# process — /proc/<pid> read natively, the measured table
+domain-process = ["smart-lib/domain-process"]
+# settings — the host's own glib schema source + dconf, read live
+domain-settings = ["smart-lib/domain-settings"]
+# logging — the host's own svlogd dirs, /var/log, this process's stderr
+domain-logging = ["smart-lib/domain-logging"]
+# clock — the kernel's own clocks, timerfd timers, /proc/stat btime
+domain-clock = ["smart-lib/domain-clock"]
+# time — CLOCK_REALTIME, the host's TZif zone, the contract's calendar kernels
+domain-time = ["smart-lib/domain-time"]
 # The network domain's engine half. With it off the shell still builds (the
 # engine crate compiles without the schema), but the network commands answer
 # honestly that the engine was built without the domain.

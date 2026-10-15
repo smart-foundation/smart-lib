@@ -11,6 +11,18 @@ use shell::domains::network::NetworkCmd;
 use shell::domains::clipboard::ClipboardCmd;
 #[cfg(feature = "domain-service")]
 use shell::domains::service::ServiceCmd;
+#[cfg(feature = "domain-files")]
+use shell::domains::files::FilesCmd;
+#[cfg(feature = "domain-process")]
+use shell::domains::process::ProcessCmd;
+#[cfg(feature = "domain-settings")]
+use shell::domains::settings::SettingsCmd;
+#[cfg(feature = "domain-logging")]
+use shell::domains::logging::LoggingCmd;
+#[cfg(feature = "domain-clock")]
+use shell::domains::clock::ClockCmd;
+#[cfg(feature = "domain-time")]
+use shell::domains::time::TimeCmd;
 use shell::migrate;
 use shell::shell::run_shell;
 use shell::{OutputFormat, SmartError};
@@ -29,7 +41,7 @@ pub struct Cli {
     pub interactive: bool,
     /// Accept the host write a mutating verb performs (the live bring-back
     /// proof is founder-run; charter law #8).
-    #[arg(long, global = true, help = "Accept host-mutating verbs (network wifi on/off, clipboard set, service start/stop/restart, apply)")]
+    #[arg(long, global = true, help = "Accept host-mutating verbs (files write/edit/rm, process signal, settings set, network wifi on/off, clipboard set, service start/stop/restart, apply)")]
     pub force: bool,
     /// Run one shell-language line and exit (selectors, pipes, conditionals).
     #[arg(short = 'c', long = "command", value_name = "LINE")]
@@ -47,6 +59,24 @@ pub enum DomainCommand {
     /// The services the host's supervisor runs — observed, not shelled out to.
     #[cfg(feature = "domain-service")]
     Service(ServiceCmd),
+    /// The file surface — statx/getdents/inotify/copy_file_range, read natively.
+    #[cfg(feature = "domain-files")]
+    Files(FilesCmd),
+    /// The processes the host runs — /proc/<pid> read natively, measured.
+    #[cfg(feature = "domain-process")]
+    Process(ProcessCmd),
+    /// The host's own settings — the glib schema source and dconf, read live.
+    #[cfg(feature = "domain-settings")]
+    Settings(SettingsCmd),
+    /// The log sinks the host has — svlogd, /var/log, this process's stderr.
+    #[cfg(feature = "domain-logging")]
+    Logging(LoggingCmd),
+    /// The host's clocks and timers — kernel clock_gettime and timerfd.
+    #[cfg(feature = "domain-clock")]
+    Clock(ClockCmd),
+    /// What time it is — the kernel clock, TZif zone, contract calendar math.
+    #[cfg(feature = "domain-time")]
+    Time(TimeCmd),
     /// The domain migration queue, as data.
     Migrate {
         #[command(subcommand)]
@@ -69,6 +99,18 @@ impl fmt::Debug for DomainCommand {
             DomainCommand::Clipboard(_) => write!(f, "DomainCommand::Clipboard(...)"),
             #[cfg(feature = "domain-service")]
             DomainCommand::Service(_) => write!(f, "DomainCommand::Service(...)"),
+            #[cfg(feature = "domain-files")]
+            DomainCommand::Files(_) => write!(f, "DomainCommand::Files(...)"),
+            #[cfg(feature = "domain-process")]
+            DomainCommand::Process(_) => write!(f, "DomainCommand::Process(...)"),
+            #[cfg(feature = "domain-settings")]
+            DomainCommand::Settings(_) => write!(f, "DomainCommand::Settings(...)"),
+            #[cfg(feature = "domain-logging")]
+            DomainCommand::Logging(_) => write!(f, "DomainCommand::Logging(...)"),
+            #[cfg(feature = "domain-clock")]
+            DomainCommand::Clock(_) => write!(f, "DomainCommand::Clock(...)"),
+            #[cfg(feature = "domain-time")]
+            DomainCommand::Time(_) => write!(f, "DomainCommand::Time(...)"),
             DomainCommand::Migrate { .. } => write!(f, "DomainCommand::Migrate(...)"),
         }
     }
@@ -144,6 +186,65 @@ fn main() {
             let backend = smart_lib::platforms::linux::service::LinuxServiceBackend::native_connect();
             let guard = service::WriteGuard { allowed: cli.force };
             match service::run(cmd, &cli.output, &backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
+            }
+        }
+        #[cfg(feature = "domain-files")]
+        Some(DomainCommand::Files(cmd)) => {
+            use shell::domains::files;
+            let backend = smart_lib::platforms::linux::files::LinuxFilesBackend::new();
+            let guard = files::WriteGuard { allowed: cli.force };
+            match files::run(cmd, &cli.output, &backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
+            }
+        }
+        #[cfg(feature = "domain-process")]
+        Some(DomainCommand::Process(cmd)) => {
+            use shell::domains::process;
+            let backend = smart_lib::platforms::linux::process::LinuxProcessBackend::new();
+            let guard = process::WriteGuard { allowed: cli.force };
+            match process::run(cmd, &cli.output, &backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
+            }
+        }
+        #[cfg(feature = "domain-settings")]
+        Some(DomainCommand::Settings(cmd)) => {
+            use shell::domains::settings;
+            let backend = smart_lib::platforms::linux::settings::LinuxSettingsBackend::new();
+            let guard = settings::WriteGuard { allowed: cli.force };
+            match settings::run(cmd, &cli.output, &backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
+            }
+        }
+        #[cfg(feature = "domain-logging")]
+        Some(DomainCommand::Logging(cmd)) => {
+            use shell::domains::logging;
+            let backend = smart_lib::platforms::linux::logging::LinuxLoggingBackend::new();
+            let guard = logging::WriteGuard { allowed: cli.force };
+            match logging::run(cmd, &cli.output, &backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
+            }
+        }
+        #[cfg(feature = "domain-clock")]
+        Some(DomainCommand::Clock(cmd)) => {
+            use shell::domains::clock;
+            let backend = smart_lib::platforms::linux::clock::LinuxClockBackend::new();
+            let guard = clock::WriteGuard { allowed: cli.force };
+            match clock::run(cmd, &cli.output, &backend, guard) {
+                Ok(_) => {}
+                Err(e) => report(e),
+            }
+        }
+        #[cfg(feature = "domain-time")]
+        Some(DomainCommand::Time(cmd)) => {
+            use shell::domains::time;
+            let backend = smart_lib::platforms::linux::time::LinuxTimeBackend::new();
+            match time::run(cmd, &cli.output, &backend) {
                 Ok(_) => {}
                 Err(e) => report(e),
             }

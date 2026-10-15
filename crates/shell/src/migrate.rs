@@ -57,13 +57,16 @@ pub struct Domain {
     pub count: &'static str,
 }
 
-/// The queue. The order is the recon's value order, past the three real-today
-/// domains (network, clipboard, service): queue 8/8, then the partial ones by
-/// real-method ratio (media 8/13, database 8/14, files 8/17), then the thin
-/// ones (audio 6/7, power 4/7, process 4/13), then the multi-backend domains
-/// (window 10/36 across four WMs, package's 19 managers, compositor's 9
-/// backends) — each of those is its own wave with its own live proof in the
-/// shell.
+/// The queue. The order is the recon's value order, past the real-today domains
+/// — network, clipboard, service, and the batch-4 six the engine landed in one
+/// commit (files, process, settings, logging, clock, time, each native and
+/// live-proven with the contract's own rows answered by measured reasons). The
+/// positions below are contiguous: a landed domain leaves the queue and the
+/// queue closes the gap. What remains: queue 8/8, then the partial ones by
+/// real-method ratio (media 8/13, database 8/14), then the thin ones (audio
+/// 6/7, power 4/7), then the multi-backend domains (window 10/36 across four
+/// WMs, package's 19 managers, compositor's 9 backends) — each of those is its
+/// own wave with its own live proof in the shell.
 pub const QUEUE: &[Domain] = &[
     Domain {
         name: "network",
@@ -112,50 +115,52 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "files",
-        status: Status::MigratedPending,
-        order: Some(4),
-        archive: "platforms/linux/files.rs (real body, 110 lines)",
-        count: "8/17 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the host's own files read natively — statx(2) metadata, getdents64 walks,              mmap + pread on the handle surface, copy_file_range copies, inotify watches,              statvfs usage, SHA-256 implemented in the engine, the file's own user xattrs, and a              content-addressed store beside the host's own cache root (live-proven)",
+        count: "native · 48 REAL / 31 DEGRADED / 4 UNAVAILABLE",
     },
     Domain {
         name: "audio",
         status: Status::MigratedPending,
-        order: Some(5),
+        order: Some(4),
         archive: "platforms/linux/audio.rs (real body, 173 lines)",
         count: "6/7 methods",
     },
     Domain {
         name: "power",
         status: Status::MigratedPending,
-        order: Some(6),
+        order: Some(5),
         archive: "platforms/linux/power.rs (real body, 294 lines)",
         count: "4/7 methods",
     },
     Domain {
         name: "process",
-        status: Status::MigratedPending,
-        order: Some(7),
-        archive: "platforms/linux/process.rs (real body, 102 lines)",
-        count: "4/13 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: /proc/<pid>/{stat,status,cmdline,statm,environ,maps,task} read natively,              btime from /proc/stat, the host's own page size and CLK_TCK through sysconf, a              measured 20 ms CPU window, and kill(pid,0) as the read-shaped signal probe              (live-proven)",
+        count: "native · 16 REAL / 17 DEGRADED / 13 UNAVAILABLE",
     },
     Domain {
         name: "window",
         status: Status::MigratedPending,
-        order: Some(8),
+        order: Some(6),
         archive: "platforms/linux/window.rs (real body, 412 lines)",
         count: "10/36 methods",
     },
     Domain {
         name: "package",
         status: Status::MigratedPending,
-        order: Some(9),
+        order: Some(7),
         archive: "platforms/linux/package/ (19 managers: apt, dnf, pacman, …)",
         count: "19 managers",
     },
     Domain {
         name: "compositor",
         status: Status::MigratedPending,
-        order: Some(10),
+        order: Some(8),
         archive: "platforms/linux/compositor/ (9 backends: sway, hyprland, i3, …)",
         count: "9 backends",
     },
@@ -239,10 +244,11 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "time",
-        status: Status::ArchiveBodyExists,
+        status: Status::RealToday,
         order: None,
-        archive: "platforms/linux/time.rs (real body, 68 lines)",
-        count: "archive body",
+        archive:
+            "engine: the kernel's own CLOCK_REALTIME, the host's own /etc/localtime and its own              TZif file (the version-2/3 64-bit block), and the contract's own TAI/Unix              converters and arithmetic calendar kernels — never chrono's epoch math (live-proven)",
+        count: "native · 6 REAL / 1 DEGRADED / 1 UNAVAILABLE",
     },
     Domain {
         name: "usb",
@@ -267,10 +273,11 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "settings",
-        status: Status::ArchiveBodyExists,
+        status: Status::RealToday,
         order: None,
-        archive: "platforms/linux/settings.rs (real body, 62 lines)",
-        count: "archive body",
+        archive:
+            "engine: the host's own settings engine (glib's GSettings through the gio crate) —              the compiled schema source for schemas/defaults/ranges, the host's own dconf              database for values, and the host's own `changed` signal for the watch surface. No              gsettings fork, no dconf fork (live-proven)",
+        count: "native · 11 REAL / 7 DEGRADED / 2 UNAVAILABLE",
     },
     Domain {
         name: "camera",
@@ -288,10 +295,11 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "logging",
-        status: Status::ArchiveBodyExists,
+        status: Status::RealToday,
         order: None,
-        archive: "platforms/linux/logging.rs (real body, 58 lines)",
-        count: "archive body",
+        archive:
+            "engine: this host's own sinks, measured by opening each one — the svlogd              supervisor directories under /run/runit, the files under /var/log, and this              process's own stderr (which under a runit service IS the svlogd input). No              journalctl fork, no sv fork, no dmesg fork: this host has no journal to parse              (live-proven)",
+        count: "native · 6 REAL / 5 DEGRADED / 0 UNAVAILABLE",
     },
     Domain {
         name: "font",
@@ -306,6 +314,14 @@ pub const QUEUE: &[Domain] = &[
         order: None,
         archive: "platforms/linux/translation.rs (real body, 37 lines)",
         count: "archive body",
+    },
+    Domain {
+        name: "clock",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the kernel's own clocks — clock_gettime/clock_getres for the readings,              timerfd_create + timerfd_settime for a real timerfd (a periodic timer that expired              three times reports 3), nanosleep on the caller's own thread, /proc/stat's btime,              and the measured chrony verdict with the root-only state dir named (live-proven)",
+        count: "native · 25 REAL / 5 DEGRADED / 0 UNAVAILABLE",
     },
     // ── archive-only: the archive holds a placeholder (available() = false) ──
     Domain {
@@ -520,15 +536,23 @@ pub fn render_queue(format: &crate::OutputFormat) -> String {
                 "smart migrate -o json".dimmed()
             ));
             out.push_str(&format!(
-                "\n  {} The order is the recon's value order, now past service (real):\n",
+                "\n  {} The order is the recon's value order, past the batch-4 six (files,\n",
                 "●".blue().bold()
             ));
-            out.push_str("    queue 8/8 (a whole body next), then the partial ones by\n");
-            out.push_str("    real-method ratio (media 8/13, database 8/14, files 8/17),\n");
-            out.push_str("    then the thin ones (audio 6/7, power 4/7, process 4/13), then the\n");
-            out.push_str("    multi-backend domains (window 10/36 across four WMs, package's 19\n");
-            out.push_str("    managers, compositor's 9 backends). Each migration is its own wave\n");
-            out.push_str("    with its own live proof in the shell.\n");
+            out.push_str(
+                "    process, settings, logging, clock, time — all native, all live-proven) and\n",
+            );
+            out.push_str("    service: queue 8/8 (a whole body next), then the partial ones by\n");
+            out.push_str(
+                "    real-method ratio (media 8/13, database 8/14), then the thin ones (audio\n",
+            );
+            out.push_str(
+                "    6/7, power 4/7), then the multi-backend domains (window 10/36 across four\n",
+            );
+            out.push_str(
+                "    WMs, package's 19 managers, compositor's 9 backends). Each migration is\n",
+            );
+            out.push_str("    its own wave with its own live proof in the shell.\n");
             out.push_str(&format!(
                 "\n  {} A domain not yet migrated answers honestly from this table:\n",
                 "●".blue().bold()

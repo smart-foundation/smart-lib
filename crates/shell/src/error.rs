@@ -10,8 +10,9 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmartError {
-    /// The named thing does not exist.
-    NotFound,
+    /// The named thing does not exist — with the engine's own reason (the
+    /// host's measured words are never dropped on the floor).
+    NotFound(String),
     /// The operation failed for a stated reason.
     Failed(String),
     /// The request violated the shape (a bad selector, a bad pipe op).
@@ -47,7 +48,7 @@ impl SmartError {
 impl fmt::Display for SmartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SmartError::NotFound => write!(f, "not found"),
+            SmartError::NotFound(reason) => write!(f, "{reason}"),
             SmartError::Failed(m) => write!(f, "{m}"),
             SmartError::InvalidArgument(m) => write!(f, "{m}"),
             SmartError::Unavailable(m) => write!(f, "{m}"),
@@ -71,7 +72,7 @@ impl From<smart_lib::core::Error> for SmartError {
             format!("{e}")
         };
         match e.code {
-            ErrorCode::NotFound => SmartError::NotFound,
+            ErrorCode::NotFound => SmartError::NotFound(reason),
             ErrorCode::Unavailable => SmartError::Unavailable(reason),
             ErrorCode::NotSupported => SmartError::NotSupported(reason),
             ErrorCode::InvalidArgument => SmartError::InvalidArgument(reason),

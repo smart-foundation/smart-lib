@@ -10,3 +10,21 @@ pub mod clipboard;
 
 #[cfg(feature = "domain-service")]
 pub mod service;
+
+#[cfg(feature = "domain-files")]
+pub mod files;
+
+#[cfg(feature = "domain-process")]
+pub mod process;
+
+#[cfg(feature = "domain-settings")]
+pub mod settings;
+
+#[cfg(feature = "domain-logging")]
+pub mod logging;
+
+#[cfg(feature = "domain-clock")]
+pub mod clock;
+
+#[cfg(feature = "domain-time")]
+pub mod time;

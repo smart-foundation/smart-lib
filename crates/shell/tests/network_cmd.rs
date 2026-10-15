@@ -82,7 +82,10 @@ fn one_interface_resolves_by_name_and_answers_its_type_and_hoststate() {
     // An interface the host does not have is notFound — never a fabricated
     // record.
     let err = evaluate(&cmd(&["network", "interface", "wwan9"]), &backend, refused()).unwrap_err();
-    assert!(matches!(err, shell::SmartError::NotFound));
+    assert!(
+        matches!(err, shell::SmartError::NotFound(ref reason) if reason.contains("wwan9")),
+        "the notFound answer carries its reason: {err:?}"
+    );
 }
 
 /// The interface up/down arm the original faked: the backend exposes no such

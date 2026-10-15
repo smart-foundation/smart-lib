@@ -212,7 +212,9 @@ fn evaluate_network(
         Some(NetworkAction::Interface { name, state }) => {
             let interfaces = backend.get_interfaces(all)?;
             let Some(iface) = interfaces.items.iter().find(|i| i.name == *name) else {
-                return Err(SmartError::NotFound);
+                return Err(SmartError::NotFound(format!(
+                    "no interface named {name} on this host"
+                )));
             };
             if let Some(requested) = state {
                 // There is no per-interface up/down verb on this backend: the
