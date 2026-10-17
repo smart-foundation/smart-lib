@@ -774,7 +774,14 @@ impl ProcessBackend for LinuxProcessBackend {
             pid,
             name: info.name,
             state: info.state,
-            exit_status: ExitStatus::default(),
+            exit_status: if info.state == ExecutionState::Terminated {
+                ExitStatus::default()
+            } else {
+                // A running process has no observed exit status; reporting
+                // Exited(0) would fabricate a fact (audit gap #9). The contract
+                // requires the field, so we carry an honest "not applicable".
+                ExitStatus::Custom(b"running".to_vec())
+            },
             uptime: Duration::from_nanos(uptime_nanos),
             memory_bytes: rss_pages.saturating_mul(page_size()),
             // The CPU total is the kernel's own tick counters — utime+stime —
