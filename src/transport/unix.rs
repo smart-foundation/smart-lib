@@ -23,6 +23,11 @@
 //! Inherent to crossing a kernel boundary; the zero-copy transports are
 //! InProcess (message) and Shmem (`DataHandle.buffer`).
 
+// The crate is `no_std` (charter law #1); this module is the std-gated
+// seam, so it links `std` for itself rather than asking the crate root to.
+#[cfg(feature = "std")]
+extern crate std;
+
 use alloc::string::ToString;
 use alloc::collections::BTreeMap;
 use alloc::boxed::Box;
@@ -33,9 +38,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::schema::types_capnp;
 use crate::transport::channel::{
-    frame, AttachedCap, CapHandoff, CapId, CapOutcome, Channel, CloseReason, FrameRef,
-    MessageOut, NegotiateResponse, OsHandle, PeerCredentials, RecvBatch, RecvMessage, RegionNotice,
-    TransportCaps, TransportError, TransportKind,
+    frame, AttachedCap, ByteReader, ByteStream, ByteWriter, CapHandoff, CapId, CapOutcome, Channel,
+    CloseReason, FrameRef, MessageOut, NegotiateResponse, OsHandle, PeerCredentials, RecvBatch,
+    RecvMessage, RegionNotice, TransportCaps, TransportError,
 };
 use crate::transport::shmem::{Arena, ArenaConfig};
 use crate::transport::sync::Mutex;
@@ -103,7 +108,7 @@ fn unix_caps() -> TransportCaps {
         )
     };
     TransportCaps {
-        kind: TransportKind::UnixSocket,
+        scheme: crate::transport::registry::UNIX_SCHEME,
         framing: "length-prefixed capnp flat messages over SOCK_STREAM",
         capability_transfer: transfer,
         zero_copy_message: false,
@@ -307,8 +312,8 @@ impl capnp::message::ReaderSegments for MessageSegments<'_> {
 }
 
 impl Channel for UnixChannel {
-    fn kind(&self) -> TransportKind {
-        TransportKind::UnixSocket
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::UNIX_SCHEME
     }
 
     fn caps(&self) -> TransportCaps {
@@ -524,14 +529,39 @@ impl Channel for UnixChannel {
         self.peer
     }
 
-    fn close(self: Box<Self>, reason: CloseReason) -> Result<(), TransportError> {
+    fn close(mut self: Box<Self>, reason: CloseReason) -> Result<(), TransportError> {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Err(TransportError::AlreadyClosed);
         }
         let payload = frame::encode_close(&reason);
         let _ = self.send_frame(frame::KIND_CLOSE, &payload, &[]);
         sys::close_fd(self.fd);
+        self.fd = -1;
         Ok(())
+    }
+
+    /// The socket's raw bytes, for a protocol that owns its own framing.
+    ///
+    /// The fd moves out of the channel (the channel's own framing is not
+    /// used on this path, ever) and the channel's close is the stream's
+    /// close from here on.
+    fn into_byte_stream(self: Box<Self>) -> Result<Box<dyn ByteStream>, TransportError> {
+        let mut channel = *self;
+        let fd = channel.fd;
+        channel.fd = -1;
+        drop(channel);
+        Ok(Box::new(UnixByteStream::new(fd)))
+    }
+}
+
+impl Drop for UnixChannel {
+    fn drop(&mut self) {
+        // `-1` means the fd was moved into a byte stream; the stream owns it
+        // now. Anything else is a socket this channel still holds.
+        if self.fd >= 0 {
+            sys::close_fd(self.fd);
+            self.fd = -1;
+        }
     }
 }
 
@@ -580,13 +610,107 @@ impl UnixListener {
 }
 
 impl crate::transport::channel::ChannelListener for UnixListener {
-    fn kind(&self) -> TransportKind {
-        TransportKind::UnixSocket
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::UNIX_SCHEME
     }
 
     fn accept(&self) -> Result<Box<dyn Channel>, TransportError> {
         let fd = sys::unix_accept(self.fd)?;
         Ok(Box::new(UnixChannel::from_fd(fd)))
+    }
+}
+
+/// The `unix` scheme's byte stream: the socket's own bytes, with the
+/// engine's framing **off** — a foreign protocol (capnp RPC) owns the
+/// bytes it writes here.
+pub struct UnixByteStream {
+    stream: std::os::unix::net::UnixStream,
+}
+
+impl UnixByteStream {
+    /// Take ownership of a connected socket's fd as a byte stream.
+    fn new(fd: i32) -> Self {
+        use std::os::fd::FromRawFd;
+        // SAFETY: the fd is owned by the caller and is not used again.
+        let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+        Self { stream }
+    }
+}
+
+impl ByteReader for UnixByteStream {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        use std::io::Read;
+        (&self.stream)
+            .read(buf)
+            .map_err(|e| TransportError::Host {
+                errno: e.raw_os_error().unwrap_or(0),
+                detail: alloc::format!("unix read: {e}"),
+            })
+    }
+}
+
+impl ByteWriter for UnixByteStream {
+    fn write_all(&self, buf: &[u8]) -> Result<(), TransportError> {
+        use std::io::Write;
+        (&self.stream)
+            .write_all(buf)
+            .map_err(|e| TransportError::Host {
+                errno: e.raw_os_error().unwrap_or(0),
+                detail: alloc::format!("unix write: {e}"),
+            })
+    }
+
+    fn flush(&self) -> Result<(), TransportError> {
+        use std::io::Write;
+        (&self.stream)
+            .flush()
+            .map_err(|e| TransportError::Host {
+                errno: e.raw_os_error().unwrap_or(0),
+                detail: alloc::format!("unix flush: {e}"),
+            })
+    }
+}
+
+impl ByteStream for UnixByteStream {
+    fn close(&self) {
+        use std::net::Shutdown;
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
+/// The `unix` transport, registered under its open scheme token.
+pub struct UnixTransport;
+
+impl crate::transport::registry::TransportImpl for UnixTransport {
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::UNIX_SCHEME
+    }
+
+    fn description(&self) -> crate::transport::registry::TransportDescription {
+        crate::transport::registry::TransportDescription {
+            scheme: crate::transport::registry::UNIX_SCHEME,
+            framing: "length-prefixed capnp flat messages over SOCK_STREAM",
+            capability_transfer: crate::transport::channel::CapabilityTransfer::OsHandle,
+            byte_stream: true,
+            default_address: Some("/tmp/smart-service.sock"),
+            note: "SCM_RIGHTS passes fds per frame on Linux; the raw byte \
+                   stream is available for a foreign protocol (capnp RPC) and \
+                   carries no framing of this layer's own",
+        }
+    }
+
+    fn connect(
+        &self,
+        request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn Channel>, TransportError> {
+        Ok(Box::new(UnixChannel::connect(&request.address)?))
+    }
+
+    fn listen(
+        &self,
+        request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn crate::transport::channel::ChannelListener>, TransportError> {
+        Ok(Box::new(UnixListener::bind(&request.address)?))
     }
 }
 

@@ -18,9 +18,9 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::schema::types_capnp;
 use crate::transport::channel::{
-    AttachedCap, CapHandoff, CapId, CapOutcome, Channel, CloseReason, FrameRef, MessageOut,
-    NegotiateResponse, PeerCredentials, RecvBatch, RecvMessage, TransportCaps, TransportError,
-    TransportKind,
+    AttachedCap, ByteStream, CapHandoff, CapId, CapOutcome, Channel, CloseReason, FrameRef,
+    MessageOut, NegotiateResponse, PeerCredentials, RecvBatch, RecvMessage, TransportCaps,
+    TransportError,
 };
 use crate::transport::sync::Mutex;
 
@@ -264,7 +264,7 @@ impl InProcessChannel {
 
 fn inprocess_caps() -> TransportCaps {
     TransportCaps {
-        kind: TransportKind::InProcess,
+        scheme: crate::transport::registry::INPROCESS_SCHEME,
         framing: "direct dispatch (no framing, no bytes)",
         capability_transfer: crate::transport::channel::CapabilityTransfer::Native,
         zero_copy_message: true,
@@ -281,8 +281,8 @@ fn inprocess_caps() -> TransportCaps {
 }
 
 impl Channel for InProcessChannel {
-    fn kind(&self) -> TransportKind {
-        TransportKind::InProcess
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::INPROCESS_SCHEME
     }
 
     fn caps(&self) -> TransportCaps {
@@ -375,6 +375,17 @@ impl Channel for InProcessChannel {
         self.remote.notice_close(reason);
         Ok(())
     }
+
+    /// The in-process transport has **no byte stream**: it dispatches
+    /// messages, it does not move bytes. The honest answer says so.
+    fn into_byte_stream(self: Box<Self>) -> Result<Box<dyn ByteStream>, TransportError> {
+        Err(TransportError::UnsupportedCapability {
+            kind: "byte stream".into(),
+            detail: "the in-process transport dispatches messages, not bytes: \
+                     a foreign protocol (capnp RPC) needs a stream transport"
+                .into(),
+        })
+    }
 }
 
 /// Move the capability out of `cap`, leaving a same-kind placeholder so the
@@ -393,5 +404,61 @@ fn take_cap(cap: &mut CapHandoff) -> CapHandoff {
             fd: *fd,
             notice: *notice,
         },
+    }
+}
+
+/// The `inprocess` transport, registered under its open scheme token.
+///
+/// Both ends of this transport are *constructed*, not dialled: the peer
+/// seam travels in the request's state, and there is no accept path.
+pub struct InProcessTransport;
+
+impl crate::transport::registry::TransportImpl for InProcessTransport {
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::INPROCESS_SCHEME
+    }
+
+    fn description(&self) -> crate::transport::registry::TransportDescription {
+        crate::transport::registry::TransportDescription {
+            scheme: crate::transport::registry::INPROCESS_SCHEME,
+            framing: "direct dispatch: the message allocation moves unchanged",
+            capability_transfer: crate::transport::channel::CapabilityTransfer::Native,
+            byte_stream: false,
+            default_address: None,
+            note: "no byte stream: messages are dispatched, not serialized; \
+                   a foreign protocol (capnp RPC) needs a stream transport",
+        }
+    }
+
+    fn connect(
+        &self,
+        request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn Channel>, TransportError> {
+        let peer = request
+            .state
+            .as_ref()
+            .ok_or_else(|| TransportError::Connect {
+                detail: "the in-process transport needs a peer seam: construct \
+                         both ends directly (InProcessChannel::pair)"
+                    .into(),
+            })?;
+        let peer = peer
+            .downcast_ref::<alloc::sync::Arc<dyn InProcessPeer>>()
+            .ok_or_else(|| TransportError::Connect {
+                detail: "the in-process transport's state is not a peer seam".into(),
+            })?;
+        Ok(Box::new(InProcessChannel::to_peer(peer.clone())))
+    }
+
+    fn listen(
+        &self,
+        _request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn crate::transport::channel::ChannelListener>, TransportError> {
+        Err(TransportError::UnsupportedCapability {
+            kind: "listen".into(),
+            detail: "the in-process transport has no accept path: construct \
+                     both ends directly (InProcessChannel::pair)"
+                .into(),
+        })
     }
 }

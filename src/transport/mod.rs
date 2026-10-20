@@ -36,6 +36,7 @@
 pub mod bootstrap;
 pub mod channel;
 pub mod inprocess;
+pub mod registry;
 pub mod shmem;
 
 #[cfg(all(unix, feature = "std"))]

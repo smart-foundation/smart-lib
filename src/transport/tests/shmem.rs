@@ -10,7 +10,6 @@ use crate::schema::types_capnp;
 use crate::transport::bootstrap::{namespace_root_for, RegionPass};
 use crate::transport::channel::{
     CapabilityTransfer, Channel, CloseReason, FrameRef, MessageOut, OwnedMessage, TransportError,
-    TransportKind,
 };
 use crate::transport::shmem::{Arena, ArenaStats, Direction, ShmemChannel, ShmemHandle};
 
@@ -222,7 +221,7 @@ fn inert_arena_refuses_everything() {
 fn caps_are_declared_honestly() {
     let (_arena, a, _b) = established_arena();
     let caps = a.caps();
-    assert_eq!(caps.kind, TransportKind::Shmem);
+    assert_eq!(caps.scheme, "shmem");
     assert_eq!(caps.capability_transfer, CapabilityTransfer::BootstrapOnly);
     assert!(caps.zero_copy_data_handle);
     assert!(!caps.zero_copy_message, "the control ring copies its frames");

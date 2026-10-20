@@ -41,7 +41,7 @@ path = "src/lib.rs"
 # non-default feature sets fail to compile the example target.
 [[example]]
 name = "smart-service"
-required-features = ["domain-network", "std"]
+required-features = ["rpc", "domain-network", "domain-discovery", "std"]
 
 # The founder's privileged exact state read for the runit service cell (the
 # physical limit: /run/runit/supervise.<name>/stat is root-only on this host,
@@ -61,7 +61,7 @@ required-features = ["domain-network", "std"]
 # The default set is deliberately NOT "everything": charter law #2 exists to stop
 # the old all-domains-at-once build. An application enables the domains it uses;
 # `--all-features` is reserved for a build-graph integrity check.
-default = ["std", "domain-files", "domain-network", "domain-audio", "domain-system"]
+default = ["std", "rpc", "domain-files", "domain-network", "domain-discovery", "domain-audio", "domain-system"]
 
 # ─── std ────────────────────────────────────────────────────────────────
 # Opt-in widening only. The core stays no_std + alloc (law #1); `std` turns on
@@ -100,6 +100,18 @@ std = ["capnp/std", "capnp/alloc"]
 # `default` does not list it: default keeps `std`, which is what turns the
 # sockets on today, so the default feature set is unchanged by adding this line.
 std-transports = ["std"]
+
+# ─── rpc ─────────────────────────────────────────────────────────────────
+# The contract's own call model: capnp RPC, served over the transport's byte
+# stream. This is the feature that turns the service harness on; it is
+# `std`-only because `capnp-rpc` drives a futures executor and the socket
+# transports need host sockets.
+#
+# `capnp-rpc` pulls `capnp` with its `std` feature (it is an std-only
+# runtime), so the core's `no_std` law is honoured by *gating* the whole
+# service layer here rather than by weakening capnp itself: a
+# `--no-default-features` build never links the RPC runtime at all.
+rpc = ["std", "dep:capnp-rpc", "dep:futures"]
 
 # ─── domains: one line per schema ───────────────────────────────────────
 # `domain-<stem>` compiles `<stem>.capnp` (dashes in the feature name are
@@ -205,6 +217,23 @@ domain-windowmanager = []
 # (`FromClientHook`, `DynClientHook`). `std` is the separate widening feature
 # above; it implies `alloc`.
 capnp = { version = "0.27.2", default-features = false, features = ["alloc"] }
+
+# The contract's own call model, served and called over the transports'
+# byte streams. `capnp-rpc` IS the RPC protocol implementation (the vat
+# network, the two-party connection, the capability export table); the
+# generated `Server` traits from the contract's `interface` blocks are what
+# it dispatches to. Both crates are already in the local registry, so the
+# spine costs no new vendor.
+capnp-rpc = { version = "0.27.0", optional = true }
+
+# The futures runtime the RPC layer drives: the executor (one per served
+# connection), the byte-stream pump's channels, and the `AsyncRead`/
+# `AsyncWrite` traits `capnp-rpc` speaks. `executor` is what lets a
+# connection be served on its own thread without a global runtime.
+futures = { version = "0.3.34", default-features = false, features = [
+    "std",
+    "executor",
+], optional = true }
 
 # The Linux network domain's kernel-first read path (charter law #9), the
 # maintained rust-netlink crate ecosystem: netlink-sys is the synchronous

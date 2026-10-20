@@ -48,7 +48,7 @@ fn inprocess_factory() -> (Box<dyn Channel>, Box<dyn Channel>, Declared) {
         Box::new(a),
         Box::new(b),
         Declared {
-            kind: "InProcess",
+            kind: "inprocess",
             descriptor_outcome: DescriptorOutcome::InBand,
             close_propagates: true,
             live_carries: true,
@@ -71,7 +71,7 @@ fn shmem_factory() -> (Box<dyn Channel>, Box<dyn Channel>, Declared) {
         Box::new(a),
         Box::new(b),
         Declared {
-            kind: "Shmem",
+            kind: "shmem",
             descriptor_outcome: DescriptorOutcome::Refused,
             close_propagates: true,
             live_carries: false,
@@ -86,7 +86,7 @@ fn unix_factory() -> (Box<dyn Channel>, Box<dyn Channel>, Declared) {
         Box::new(crate::transport::unix::UnixChannel::from_fd(a)),
         Box::new(crate::transport::unix::UnixChannel::from_fd(b)),
         Declared {
-            kind: "UnixSocket",
+            kind: "unix",
             descriptor_outcome: DescriptorOutcome::InBand,
             close_propagates: true,
             live_carries: false,
@@ -105,7 +105,7 @@ fn tcp_factory() -> (Box<dyn Channel>, Box<dyn Channel>, Declared) {
         Box::new(client),
         server,
         Declared {
-            kind: "Tcp",
+            kind: "tcp",
             descriptor_outcome: DescriptorOutcome::InBand,
             close_propagates: true,
             live_carries: false,
@@ -121,8 +121,8 @@ fn exercise(
     server: Box<dyn Channel>,
 ) {
     // The published declaration matches the transport we constructed.
-    assert_eq!(client.kind().as_str(), declared.kind);
-    assert!(!client.caps().note.is_empty() || declared.kind == "InProcess");
+    assert_eq!(client.scheme(), declared.kind);
+    assert!(!client.caps().note.is_empty() || declared.kind == "inprocess");
 
     // ── 1. send / recv a real contract message ────────────────────────
     client

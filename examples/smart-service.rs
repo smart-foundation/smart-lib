@@ -2,17 +2,27 @@
 //! network contract's capability (`knowledge/05-AI-FIRST-SURFACE.md` §2).
 //!
 //! ```text
-//! smart-service                              # unix socket at /tmp/smart-service.sock
+//! smart-service                              # unix socket at the unix transport's
+//!                                           # own default address
 //! SMART_SERVICE_SOCKET=/run/smart.sock smart-service
 //! smart-service --socket /run/smart.sock     # an explicit path
 //! smart-service --transport tcp --addr 127.0.0.1:7777
 //! ```
 //!
-//! What it does, and nothing more: bind the transport, accept a connection,
-//! **classify the peer from its host credentials** (uid 0 / `CAP_NET_ADMIN`
-//! ⇒ Control; anything else, and any peer with no identity, ⇒ ReadOnly), and
-//! serve the network backend over that one connection at that class. There
-//! is no polkit, no elevation and no suid here — the daemon is not a
+//! # What it does, and nothing more
+//!
+//! Bind the transport, accept a connection, **classify the peer from its host
+//! credentials** (uid 0 / `CAP_NET_ADMIN` ⇒ Control; anything else, and any
+//! peer with no identity, ⇒ ReadOnly), and serve the contract over that one
+//! connection at that class.
+//!
+//! The wire is the contract's own: **capnp RPC**, over the transport's byte
+//! stream. The daemon serves every domain that is enabled *and* has a
+//! service implementation, each one registering its own discovery
+//! descriptor; the foundation interfaces (discovery, ABI, capability
+//! publication) are served on the same connection.
+//!
+//! There is no polkit, no elevation and no suid here — the daemon is not a
 //! privilege broker (05 §2): a caller that lacks host privileges gets
 //! host-truthful denials.
 //!
@@ -22,110 +32,94 @@
 //! Law #8: the daemon itself changes no host state. Its mutating verbs
 //! (`setNetworking`, `setRadioEnabled`, ...) write host state **only** on a
 //! Control-class connection, and the live bring-back of those is founder-run.
-//! Every test of this harness path is mock-verified
-//! (`src/serve/tests.rs`, including the UnixSocket end-to-end session).
 
-#![cfg(all(unix, feature = "domain-network", feature = "std"))]
+#![cfg(all(feature = "rpc", feature = "std"))]
 
 extern crate std;
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use smart_lib::serve::abi::SupportedAbi;
+use smart_lib::serve::discovery::PublishedEndpoint;
+use smart_lib::serve::service::{serve_connection, ServedDomain, Service};
+use smart_lib::serve::classify;
+use smart_lib::transport::registry::{TransportRegistry, TransportRequest};
+
+#[cfg(feature = "domain-network")]
+use smart_lib::serve::network::NetworkDomain;
+#[cfg(feature = "domain-network")]
 use smart_lib::platforms::linux::network::LinuxNetworkBackend;
-use smart_lib::serve::{classify, serve, orderly_close};
-use smart_lib::transport::channel::{Channel, ChannelListener};
-use smart_lib::transport::tcp::TcpListener;
-use smart_lib::transport::unix::UnixListener;
-
-// The daemon is a plain consumer of the harness's public API now that
-// `build.rs` wires the `serve` wave module: `smart_lib::serve` carries the
-// connection loop and the uid-peer capability policy, and nothing here
-// reaches into the harness internals.
-
-/// The default unix socket path (`$SMART_SERVICE_SOCKET` overrides it).
-const DEFAULT_SOCKET: &str = "/tmp/smart-service.sock";
-
-/// The bound listener, whichever transport it came from — the accept loop
-/// names neither.
-enum Bound {
-    Unix(UnixListener),
-    Tcp(TcpListener),
-}
-
-impl Bound {
-    fn accept(&self) -> Result<Box<dyn Channel>, smart_lib::transport::channel::TransportError> {
-        match self {
-            Bound::Unix(listener) => listener.accept(),
-            Bound::Tcp(listener) => listener.accept(),
-        }
-    }
-}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let transport_kind = flag_value(&args, "--transport").unwrap_or_else(|| "unix".to_string());
-    let socket = flag_value(&args, "--socket")
-        .or_else(|| std::env::var("SMART_SERVICE_SOCKET").ok())
-        .unwrap_or_else(|| DEFAULT_SOCKET.to_string());
-    let addr = flag_value(&args, "--addr");
+    let scheme = flag_value(&args, "--transport").unwrap_or_else(|| "unix".to_string());
+    let address = flag_value(&args, "--addr")
+        .or_else(|| flag_value(&args, "--socket"))
+        .or_else(|| std::env::var("SMART_SERVICE_SOCKET").ok());
 
-    let (listener, bound) = match transport_kind.as_str() {
-        "unix" => {
-            // A stale socket file from a killed daemon must not keep the
-            // service from binding: the file we are about to bind is ours.
-            let _ = std::fs::remove_file(&socket);
-            match UnixListener::bind(&socket) {
-                Ok(listener) => (Bound::Unix(listener), socket.clone()),
-                Err(error) => {
-                    eprintln!("smart-service: bind {socket} failed: {error}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-        "tcp" => match &addr {
-            Some(addr) => match TcpListener::bind(addr) {
-                Ok(listener) => {
-                    let bound = match listener.local_addr() {
-                        Ok(bound) => bound,
-                        Err(error) => {
-                            eprintln!("smart-service: local_addr failed: {error}");
-                            return ExitCode::FAILURE;
-                        }
-                    };
-                    (Bound::Tcp(listener), bound)
-                }
-                Err(error) => {
-                    eprintln!("smart-service: bind {addr} failed: {error}");
-                    return ExitCode::FAILURE;
-                }
-            },
-            None => {
-                eprintln!("smart-service: --transport tcp needs --addr host:port");
-                return ExitCode::FAILURE;
-            }
-        },
-        other => {
-            eprintln!("smart-service: unknown --transport {other:?} (unix|tcp)");
+    // The registry: the open set of transports. The daemon names a *scheme
+    // token*; which implementation answers it is the registry's business.
+    let registry = TransportRegistry::with_builtins();
+    let Some(transport) = registry.lookup(&scheme) else {
+        eprintln!(
+            "smart-service: no transport is registered for scheme {scheme:?}; the \
+             registered schemes are: {}",
+            registry.schemes().join(", ")
+        );
+        return ExitCode::FAILURE;
+    };
+    let description = transport.description();
+    let address = match address.or_else(|| description.default_address.map(String::from)) {
+        Some(address) => address,
+        None => {
+            eprintln!(
+                "smart-service: the {scheme:?} transport needs an address (--addr, or \
+                 --socket for the unix transport)"
+            );
             return ExitCode::FAILURE;
         }
     };
 
-    // The backend: the Linux network cell over the live kernel-first store
-    // and the counted NetworkManager seam. Building it reads host state
-    // (netlink, the bus) and writes nothing (law #8).
-    let backend = match LinuxNetworkBackend::connect() {
-        Ok(backend) => backend,
+    // A stale socket file from a killed daemon must not keep the service
+    // from binding: the file we are about to bind is ours.
+    if scheme == "unix" {
+        let _ = std::fs::remove_file(&address);
+    }
+
+    let listener = match registry.listen(&TransportRequest::new(&scheme, &address)) {
+        Ok(listener) => listener,
         Err(error) => {
-            eprintln!("smart-service: the network backend could not start: {error}");
+            eprintln!("smart-service: bind {scheme} at {address} failed: {error}");
             return ExitCode::FAILURE;
         }
     };
 
-    eprintln!("smart-service: serving network on {transport_kind} at {bound}");
+    // The service: every domain that is enabled and has a service
+    // implementation, each one registering its own discovery descriptor.
+    let service = Arc::new(build_service());
 
-    // The accept loop: one session at a time, each served at the class its
-    // peer's credentials earned. A failed session is printed and the daemon
-    // keeps accepting — one caller's fault is not the service's.
+    // The endpoint this service is reachable at, published in the contract's
+    // own `ServiceEndpoint` (with the open transport token).
+    let endpoints = vec![PublishedEndpoint {
+        transport: scheme.clone(),
+        address: address.clone(),
+    }];
+    service.set_endpoints(endpoints);
+
+    eprintln!("smart-service: serving the contract on {scheme} at {address}");
+    for domain in service.domains() {
+        eprintln!(
+            "smart-service:   domain {} (interface id 0x{:x}, service id 0x{:x})",
+            domain.name(),
+            domain.interface_id(),
+            domain.service_id()
+        );
+    }
+
+    // The accept loop: each connection is served at the class its peer's
+    // credentials earned, on its own thread. A failed session is printed and
+    // the daemon keeps accepting — one caller's fault is not the service's.
     loop {
         let channel = match listener.accept() {
             Ok(channel) => channel,
@@ -135,18 +129,53 @@ fn main() -> ExitCode {
             }
         };
         let class = classify(channel.peer_credentials());
-        let kind = channel.kind();
-        eprintln!(
-            "smart-service: {} connection served at capability class {class}",
-            kind.as_str()
-        );
-        if let Err(error) = serve(&backend, &*channel, class) {
+        let transport_name = channel.scheme();
+        eprintln!("smart-service: {transport_name} connection served at capability class {class}");
+        // One session at a time: the backend is the host's own state and is
+        // not shared across threads (the old daemon's shape, kept).
+        if let Err(error) = serve_connection(Arc::clone(&service), channel, class) {
             eprintln!("smart-service: session ended with {error}");
         }
-        // The harness borrows its channel, so the daemon owns the close: an
-        // orderly shutdown frame reaches the peer instead of a dropped fd.
-        let _ = channel.close(orderly_close());
     }
+}
+
+/// The service: the domains that are enabled and have a service
+/// implementation, plus the foundation interfaces (discovery, ABI and the
+/// capability publication), which every service serves.
+///
+/// The set is *data*, not a special case: each served domain contributes
+/// one line here, and the daemon's accept loop, the discovery descriptors
+/// and the ABI catalogue all follow from it. A domain whose service
+/// implementation has not landed yet is simply not in the set — the daemon
+/// says so on stderr rather than pretending to serve it.
+fn build_service() -> Service {
+    let mut service = Service::new();
+
+    #[cfg(feature = "domain-network")]
+    {
+        // The backend: the Linux network cell over the live kernel-first
+        // store and the counted NetworkManager seam. Building it reads host
+        // state (netlink, the bus) and writes nothing (law #8).
+        let backend = match LinuxNetworkBackend::connect() {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("smart-service: the network backend could not start: {error}");
+                std::process::exit(1);
+            }
+        };
+        let domain = Arc::new(NetworkDomain::new(Arc::new(backend)));
+        // The ABI this service speaks, published: the schema's own id and
+        // the generation it is spoken at.
+        service.abi().publish(SupportedAbi {
+            schema_id: domain.service_id(),
+            name: "smart-protocol/network".to_string(),
+            major: 0,
+            minor: 1,
+        });
+        service = service.with_domain(domain);
+    }
+
+    service
 }
 
 /// The value of `--flag value` (or `--flag=value`).

@@ -72,7 +72,7 @@ fn every_variant_maps_to_a_declared_code() {
         ),
         (
             TransportError::NotCompiled {
-                transport: crate::transport::channel::TransportKind::Tcp,
+                scheme: "tcp",
             },
             types_capnp::ErrorCode::NotSupported,
         ),
@@ -144,7 +144,7 @@ fn details_are_never_empty_and_errors_write_t_error() {
             detail: "denied".into(),
         },
         TransportError::NotCompiled {
-            transport: crate::transport::channel::TransportKind::UnixSocket,
+            scheme: "unix",
         },
     ];
     for error in errors {

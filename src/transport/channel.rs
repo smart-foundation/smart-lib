@@ -55,38 +55,16 @@ pub use crate::transport::sync::Mutex;
 /// of the seam; the frame layout is private to `src/transport/**`.
 pub const FRAMING_VERSION: u16 = 1;
 
-/// The transport a value was produced by. Never used in a required position
-/// of a domain API — it is diagnostics only (charter: agnostic).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TransportKind {
-    /// Direct dispatch in one process.
-    InProcess,
-    /// A shared arena referenced by `T.BufferId`.
-    Shmem,
-    /// `AF_UNIX` with SCM_RIGHTS-class handle passing.
-    UnixSocket,
-    /// A TCP stream, with in-band capability tokens only.
-    Tcp,
-}
-
-impl TransportKind {
-    /// The stable name for diagnostics (never used in a required position).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TransportKind::InProcess => "InProcess",
-            TransportKind::Shmem => "Shmem",
-            TransportKind::UnixSocket => "UnixSocket",
-            TransportKind::Tcp => "Tcp",
-        }
-    }
-}
-
 /// What this transport can honestly do. Published per channel; a fabricated
 /// value here is the one unforgivable defect (charter law #6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransportCaps {
-    /// Which transport this is.
-    pub kind: TransportKind,
+    /// The open scheme token this transport answers to (never used in a
+    /// required position of a domain API — it is diagnostics only).
+    ///
+    /// The token is an *open* string: the set of schemes is whatever the
+    /// registry holds (`crate::transport::registry`), not an enum here.
+    pub scheme: &'static str,
     /// The framing actually used, as declared text (never a placeholder).
     pub framing: &'static str,
     /// How a capability reference moves on this transport.
@@ -589,8 +567,20 @@ pub enum TransportError {
     },
     /// This transport is not compiled for this configuration.
     NotCompiled {
-        /// Which transport is missing.
-        transport: TransportKind,
+        /// The scheme token that is missing in this build.
+        scheme: &'static str,
+    },
+    /// No transport is registered for this scheme token.
+    ///
+    /// The honest answer for a paradigm this engine does not serve: it names
+    /// the scheme that was asked for and the schemes that do exist, so the
+    /// caller can pick a supported one. Never a crash, never a silent
+    /// fallback to another paradigm.
+    UnknownScheme {
+        /// The scheme token that was asked for.
+        scheme: String,
+        /// The scheme tokens that are registered.
+        known: Vec<String>,
     },
 }
 
@@ -618,6 +608,7 @@ impl TransportError {
             TransportError::Message { .. } => types_capnp::ErrorCode::Failed,
             TransportError::Host { errno, .. } => host_errno_to_code(*errno),
             TransportError::NotCompiled { .. } => types_capnp::ErrorCode::NotSupported,
+            TransportError::UnknownScheme { .. } => types_capnp::ErrorCode::Unavailable,
         }
     }
 
@@ -645,8 +636,18 @@ impl TransportError {
             TransportError::Host { errno, detail } => {
                 alloc::format!("host failure (errno {errno}): {detail}")
             }
-            TransportError::NotCompiled { transport } => {
-                alloc::format!("{} is not compiled in this configuration", transport.as_str())
+            TransportError::NotCompiled { scheme } => {
+                alloc::format!("{scheme} is not compiled in this configuration")
+            }
+            TransportError::UnknownScheme { scheme, known } => {
+                alloc::format!(
+                    "transport scheme '{scheme}' is not served here; the registered schemes are: {}",
+                    if known.is_empty() {
+                        "none".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                )
             }
         }
     }
@@ -689,8 +690,8 @@ impl core::error::Error for TransportError {}
 /// sharing a channel is the caller's choice via `Arc`, and every impl is
 /// `Sync` anyway.
 pub trait Channel: Send {
-    /// Which transport this is (diagnostics only).
-    fn kind(&self) -> TransportKind;
+    /// The open scheme token this channel answers to (diagnostics only).
+    fn scheme(&self) -> &'static str;
 
     /// The declared capabilities of this transport instance (law #6).
     fn caps(&self) -> TransportCaps;
@@ -735,35 +736,54 @@ pub trait Channel: Send {
     /// Close with a typed reason. The reason is propagated to the far side
     /// where the transport can carry it.
     fn close(self: Box<Self>, reason: CloseReason) -> Result<(), TransportError>;
+
+    /// Take this channel's **byte stream**, for a protocol that owns its own
+    /// framing — the contract's own call model (capnp RPC) rides here.
+    ///
+    /// This *consumes* the channel on purpose: a connection carries either
+    /// this engine's framed messages or a foreign protocol's bytes, never
+    /// both interleaved. A transport with no byte stream (InProcess
+    /// dispatches messages, it does not move bytes) answers honestly with
+    /// the reason it has none.
+    fn into_byte_stream(self: Box<Self>) -> Result<Box<dyn ByteStream>, TransportError>;
 }
 
-/// How a caller selects a transport. The variants carry only data — no
-/// platform noun in a required position, no vendor lock.
-pub enum Transport {
-    /// Direct dispatch into a same-process peer (the seam a local backend
-    /// implements; see `inprocess.rs`).
-    InProcess {
-        /// The peer seam to dispatch into.
-        dispatch: alloc::sync::Arc<dyn InProcessPeer>,
-    },
-    /// A shared arena plus this side's direction (see `shmem.rs`; the
-    /// handle is produced by the authenticated bootstrap).
-    Shmem {
-        /// The bootstrapped arena handle.
-        handle: ShmemHandle,
-    },
-    /// AF_UNIX path. A leading NUL byte denotes the Linux abstract
-    /// namespace (`02-HOST-CAPABILITIES.md` §0).
-    UnixSocket {
-        /// The socket path (or `\0`-prefixed abstract name).
-        path: String,
-    },
-    /// `host:port`.
-    Tcp {
-        /// The `host:port` to connect to.
-        addr: String,
-    },
+/// The read half of a channel's raw byte stream.
+///
+/// The stream is `Send + Sync`: the RPC runtime pumps it from a thread of
+/// its own, so the far end's socket is read on that thread while the
+/// executor keeps running.
+pub trait ByteReader: Send + Sync {
+    /// Read up to `buf.len()` bytes. `Ok(0)` means the far side closed.
+    fn read(&self, buf: &mut [u8]) -> Result<usize, TransportError>;
 }
+
+/// The write half of a channel's raw byte stream.
+pub trait ByteWriter: Send + Sync {
+    /// Write every byte of `buf` or fail.
+    fn write_all(&self, buf: &[u8]) -> Result<(), TransportError>;
+    /// Push buffered bytes toward the far side.
+    fn flush(&self) -> Result<(), TransportError>;
+}
+
+/// A channel's raw byte stream: what a foreign protocol (capnp RPC) rides.
+///
+/// The transport's own framing stays *off* this path: the bytes here are
+/// the foreign protocol's bytes, end to end.
+pub trait ByteStream: ByteReader + ByteWriter {
+    /// Close the stream: the far side sees the end of the connection and
+    /// this side's reader unblocks.
+    fn close(&self);
+}
+
+/// How a caller selects a transport.
+///
+/// The selection is an **open scheme token** plus the address in that
+/// scheme's own vocabulary — never a closed enum of paradigms. The four
+/// transports this tree ships register themselves into
+/// [`crate::transport::registry::TransportRegistry`]; a fifth needs no
+/// change here.
+pub type Transport = crate::transport::registry::TransportRequest;
 
 /// Connect the client side of a transport.
 ///
@@ -771,40 +791,7 @@ pub enum Transport {
 /// (Shmem: the arena must already be established by the bootstrap) →
 /// negotiate → send/recv.
 pub fn connect(transport: Transport) -> Result<Box<dyn Channel>, TransportError> {
-    match transport {
-        Transport::InProcess { dispatch } => {
-            Ok(Box::new(crate::transport::inprocess::InProcessChannel::to_peer(dispatch)))
-        }
-        Transport::Shmem { handle } => Ok(Box::new(
-            crate::transport::shmem::ShmemChannel::from_handle(handle),
-        )),
-        Transport::UnixSocket { path } => {
-            #[cfg(all(unix, feature = "std"))]
-            {
-                Ok(Box::new(crate::transport::unix::UnixChannel::connect(&path)?))
-            }
-            #[cfg(not(all(unix, feature = "std")))]
-            {
-                let _ = path;
-                Err(TransportError::NotCompiled {
-                    transport: TransportKind::UnixSocket,
-                })
-            }
-        }
-        Transport::Tcp { addr } => {
-            #[cfg(feature = "std")]
-            {
-                Ok(Box::new(crate::transport::tcp::TcpChannel::connect(&addr)?))
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                let _ = addr;
-                Err(TransportError::NotCompiled {
-                    transport: TransportKind::Tcp,
-                })
-            }
-        }
-    }
+    crate::transport::registry::TransportRegistry::with_builtins().connect(&transport)
 }
 
 /// Connect and run the ABI handshake in one step (the connect sequence's
@@ -829,58 +816,15 @@ pub type NegotiateResponse = capnp::message::TypedReader<
 
 /// The server side of a transport-selection: accepts far-side connections.
 pub trait ChannelListener: Send {
-    /// Which transport this listener serves.
-    fn kind(&self) -> TransportKind;
+    /// The open scheme token this listener serves.
+    fn scheme(&self) -> &'static str;
     /// Accept one connection. Blocking; the accept loop is the caller's.
     fn accept(&self) -> Result<Box<dyn Channel>, TransportError>;
 }
 
 /// Bind a listener for the given transport (where one exists).
 pub fn listen(transport: &Transport) -> Result<Box<dyn ChannelListener>, TransportError> {
-    match transport {
-        Transport::InProcess { .. } | Transport::Shmem { .. } => {
-            // Both sides of these transports are constructed, not accepted:
-            // InProcess via `InProcessChannel::pair`, Shmem via the arena's
-            // two directions.
-            Err(TransportError::UnsupportedCapability {
-                kind: "listen".to_string(),
-                detail: alloc::format!(
-                    "{} has no accept path; construct both ends directly",
-                    match transport {
-                        Transport::InProcess { .. } => TransportKind::InProcess,
-                        _ => TransportKind::Shmem,
-                    }
-                    .as_str()
-                ),
-            })
-        }
-        Transport::UnixSocket { path } => {
-            #[cfg(all(unix, feature = "std"))]
-            {
-                Ok(Box::new(crate::transport::unix::UnixListener::bind(path)?))
-            }
-            #[cfg(not(all(unix, feature = "std")))]
-            {
-                let _ = path;
-                Err(TransportError::NotCompiled {
-                    transport: TransportKind::UnixSocket,
-                })
-            }
-        }
-        Transport::Tcp { addr } => {
-            #[cfg(feature = "std")]
-            {
-                Ok(Box::new(crate::transport::tcp::TcpListener::bind(addr)?))
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                let _ = addr;
-                Err(TransportError::NotCompiled {
-                    transport: TransportKind::Tcp,
-                })
-            }
-        }
-    }
+    crate::transport::registry::TransportRegistry::with_builtins().listen(transport)
 }
 
 /// The wire framing shared by the stream transports (UnixSocket, Tcp).

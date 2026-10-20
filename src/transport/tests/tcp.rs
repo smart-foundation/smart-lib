@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use crate::schema::types_capnp;
 use crate::transport::channel::{
     CapabilityTransfer, CapHandoff, CapOutcome, Channel, ChannelListener, CloseReason, MessageOut,
-    OwnedMessage, TransportError, TransportKind,
+    OwnedMessage, TransportError,
 };
 use crate::transport::tcp::{TcpChannel, TcpListener};
 
@@ -56,7 +56,7 @@ fn honest_degradation_is_declared_and_mechanical() {
     let caps = a.caps();
 
     // 1. The declared capability-transfer semantics: in-band token only.
-    assert_eq!(caps.kind, TransportKind::Tcp);
+    assert_eq!(caps.scheme, "tcp");
     assert_eq!(
         caps.capability_transfer,
         CapabilityTransfer::InBandToken,

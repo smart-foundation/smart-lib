@@ -48,9 +48,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 extern crate std;
 
 use crate::transport::channel::{
-    frame, CapHandoff, CapId, CapOutcome, Channel, CloseReason, FrameRef, MessageOut,
-    NegotiateResponse, PeerCredentials, RecvBatch, RecvMessage, TransportCaps, TransportError,
-    TransportKind,
+    frame, ByteReader, ByteStream, ByteWriter, CapHandoff, CapId, CapOutcome, Channel, CloseReason,
+    FrameRef, MessageOut, NegotiateResponse, PeerCredentials, RecvBatch, RecvMessage, TransportCaps,
+    TransportError,
 };
 use crate::transport::sync::Mutex;
 
@@ -63,7 +63,7 @@ pub struct TcpChannel {
 
 fn tcp_caps() -> TransportCaps {
     TransportCaps {
-        kind: TransportKind::Tcp,
+        scheme: crate::transport::registry::TCP_SCHEME,
         framing: "length-prefixed capnp flat messages over TCP",
         capability_transfer: crate::transport::channel::CapabilityTransfer::InBandToken,
         zero_copy_message: false,
@@ -136,8 +136,8 @@ impl TcpChannel {
 }
 
 impl Channel for TcpChannel {
-    fn kind(&self) -> TransportKind {
-        TransportKind::Tcp
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::TCP_SCHEME
     }
 
     fn caps(&self) -> TransportCaps {
@@ -280,6 +280,86 @@ impl Channel for TcpChannel {
         let _ = self.send_frame(frame::KIND_CLOSE, &payload);
         Ok(())
     }
+
+    /// The stream's raw bytes, for a protocol that owns its own framing.
+    ///
+    /// The socket moves out of the channel: this layer's length-prefixed
+    /// framing is not used on this path, and the two never interleave.
+    fn into_byte_stream(self: Box<Self>) -> Result<Box<dyn ByteStream>, TransportError> {
+        let channel = *self;
+        Ok(Box::new(TcpByteStream {
+            stream: channel.stream,
+        }))
+    }
+}
+
+/// The `tcp` scheme's byte stream: the socket's own bytes.
+pub struct TcpByteStream {
+    stream: std::net::TcpStream,
+}
+
+impl ByteReader for TcpByteStream {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        use std::io::Read;
+        (&self.stream).read(buf).map_err(TcpIoError::into_transport)
+    }
+}
+
+impl ByteWriter for TcpByteStream {
+    fn write_all(&self, buf: &[u8]) -> Result<(), TransportError> {
+        use std::io::Write;
+        (&self.stream)
+            .write_all(buf)
+            .map_err(TcpIoError::into_transport)
+    }
+
+    fn flush(&self) -> Result<(), TransportError> {
+        use std::io::Write;
+        (&self.stream).flush().map_err(TcpIoError::into_transport)
+    }
+}
+
+impl ByteStream for TcpByteStream {
+    fn close(&self) {
+        use std::net::Shutdown;
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
+/// The `tcp` transport, registered under its open scheme token.
+pub struct TcpTransport;
+
+impl crate::transport::registry::TransportImpl for TcpTransport {
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::TCP_SCHEME
+    }
+
+    fn description(&self) -> crate::transport::registry::TransportDescription {
+        crate::transport::registry::TransportDescription {
+            scheme: crate::transport::registry::TCP_SCHEME,
+            framing: "length-prefixed capnp flat messages over TCP",
+            capability_transfer: crate::transport::channel::CapabilityTransfer::InBandToken,
+            byte_stream: true,
+            default_address: None,
+            note: "no fd transfer and no peer identity exist over TCP; \
+                   capability descriptors travel in-band only; the raw byte \
+                   stream is available for a foreign protocol (capnp RPC)",
+        }
+    }
+
+    fn connect(
+        &self,
+        request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn Channel>, TransportError> {
+        Ok(Box::new(TcpChannel::connect(&request.address)?))
+    }
+
+    fn listen(
+        &self,
+        request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn crate::transport::channel::ChannelListener>, TransportError> {
+        Ok(Box::new(TcpListener::bind(&request.address)?))
+    }
 }
 
 struct MessageSegments<'a>(&'a MessageOut<'a>);
@@ -318,8 +398,8 @@ impl TcpListener {
 }
 
 impl crate::transport::channel::ChannelListener for TcpListener {
-    fn kind(&self) -> TransportKind {
-        TransportKind::Tcp
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::TCP_SCHEME
     }
 
     fn accept(&self) -> Result<Box<dyn Channel>, TransportError> {

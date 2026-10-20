@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::schema::types_capnp;
 use crate::transport::channel::{
     AttachedCap, CapabilityTransfer, CapHandoff, CapOutcome, Channel, ChannelListener, CloseReason,
-    MessageOut, OwnedMessage, OsHandle, TransportError, TransportKind,
+    MessageOut, OwnedMessage, OsHandle, TransportError,
 };
 use crate::transport::sys;
 use crate::transport::unix::{UnixChannel, UnixListener};
@@ -274,7 +274,7 @@ fn listener_accepts_and_exchanges() {
 fn caps_declare_os_handle_transfer() {
     let (a, _b) = pair();
     let caps = a.caps();
-    assert_eq!(caps.kind, TransportKind::UnixSocket);
+    assert_eq!(caps.scheme, "unix");
     #[cfg(all(target_os = "linux", feature = "std"))]
     assert_eq!(
         caps.capability_transfer,

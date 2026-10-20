@@ -245,8 +245,8 @@ fn host(errno: i32, detail: impl Into<String>) -> TransportError {
 // Only reachable in the non-Linux / non-std configurations; on this box's
 // build the real implementations take every call path.
 #[allow(dead_code)]
-fn not_compiled(kind: crate::transport::channel::TransportKind) -> TransportError {
-    TransportError::NotCompiled { transport: kind }
+fn not_compiled(scheme: &'static str) -> TransportError {
+    TransportError::NotCompiled { scheme }
 }
 
 // ─── sockets ────────────────────────────────────────────────────────────
@@ -266,7 +266,7 @@ pub fn unix_socket() -> Result<i32, TransportError> {
     #[cfg(not(all(target_os = "linux", feature = "std")))]
     {
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -288,7 +288,7 @@ pub fn unix_socketpair() -> Result<(i32, i32), TransportError> {
     #[cfg(not(all(target_os = "linux", feature = "std")))]
     {
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -348,7 +348,7 @@ pub fn unix_bind_listen(fd: i32, path: &str) -> Result<(), TransportError> {
     {
         let _ = (fd, path);
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -369,7 +369,7 @@ pub fn unix_connect(fd: i32, path: &str) -> Result<(), TransportError> {
     {
         let _ = (fd, path);
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -389,7 +389,7 @@ pub fn unix_accept(fd: i32) -> Result<i32, TransportError> {
     {
         let _ = fd;
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -466,7 +466,7 @@ pub fn send_with_fds(fd: i32, bytes: &[u8], fds: &[i32]) -> Result<usize, Transp
     {
         let _ = (fd, bytes, fds);
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -505,7 +505,7 @@ pub fn recv_with_fds(fd: i32, buf: &mut [u8]) -> Result<(usize, Vec<i32>), Trans
     {
         let _ = (fd, buf);
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -541,7 +541,7 @@ pub fn peer_credential_triple(fd: i32) -> Result<(i32, u32, u32), TransportError
     {
         let _ = fd;
         Err(not_compiled(
-            crate::transport::channel::TransportKind::UnixSocket,
+            crate::transport::registry::UNIX_SCHEME,
         ))
     }
 }
@@ -685,7 +685,7 @@ pub fn create_shared_region(len: usize) -> Result<SharedRegion, TransportError> 
     {
         let _ = len;
         Err(not_compiled(
-            crate::transport::channel::TransportKind::Shmem,
+            crate::transport::registry::SHMEM_SCHEME,
         ))
     }
 }
@@ -727,7 +727,7 @@ pub fn adopt_shared_region(fd: i32) -> Result<SharedRegion, TransportError> {
     {
         let _ = fd;
         Err(not_compiled(
-            crate::transport::channel::TransportKind::Shmem,
+            crate::transport::registry::SHMEM_SCHEME,
         ))
     }
 }

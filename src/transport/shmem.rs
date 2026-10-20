@@ -52,9 +52,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::schema::types_capnp;
 use crate::transport::bootstrap::RegionPass;
 use crate::transport::channel::{
-    frame, CapHandoff, CapId, CapOutcome, Channel, CloseReason, FrameRef, MessageOut,
+    frame, ByteStream, CapHandoff, CapId, CapOutcome, Channel, CloseReason, FrameRef, MessageOut,
     NegotiateResponse, OsHandle, PeerCredentials, RecvBatch, RecvMessage, TransportCaps,
-    TransportError, TransportKind,
+    TransportError,
 };
 use crate::transport::sync::Mutex;
 
@@ -144,7 +144,7 @@ impl ArenaConfig {
         }
         if self.ring_slots < 2 || self.ring_slots > MAX_RING_SLOTS || self.ring_bytes < 64 {
             return Err(TransportError::Framing {
-                detail: "ring geometry out of range".to_string(),
+                detail: "ring geometry out of range".into(),
             });
         }
         Ok(())
@@ -309,7 +309,7 @@ impl Arena {
             RegionPass::Shared(arena) => {
                 if arena.config() != *expected || arena.epoch() != expected_epoch {
                     return Err(TransportError::Framing {
-                        detail: "offered arena does not match the expected geometry".to_string(),
+                        detail: "offered arena does not match the expected geometry".into(),
                     });
                 }
                 Ok(arena.clone())
@@ -336,7 +336,7 @@ impl Arena {
         }
         if storage.read_u64(OFF_MAGIC) != ARENA_MAGIC {
             return Err(TransportError::Framing {
-                detail: "region magic mismatch: not an arena".to_string(),
+                detail: "region magic mismatch: not an arena".into(),
             });
         }
         if storage.read_u32(OFF_FORMAT) != ARENA_FORMAT {
@@ -525,7 +525,7 @@ impl Arena {
         let current = seq.load(Ordering::Relaxed);
         if current % 2 == 1 {
             return Err(TransportError::Message {
-                detail: "slot write in progress".to_string(),
+                detail: "slot write in progress".into(),
             });
         }
         // Mark "writing" (odd), write the payload, then publish (even) with
@@ -557,7 +557,7 @@ impl Arena {
         if seq == 0 || seq % 2 == 1 {
             return Err(TransportError::BufferNotResolvable {
                 id: id.get_id(),
-                detail: "nothing published at this slot".to_string(),
+                detail: "nothing published at this slot".into(),
             });
         }
         let slot = self.slot_offset(index);
@@ -571,7 +571,7 @@ impl Arena {
         };
         if len > self.slot_bytes as usize {
             return Err(TransportError::Framing {
-                detail: "slot length exceeds geometry: arena corrupt".to_string(),
+                detail: "slot length exceeds geometry: arena corrupt".into(),
             });
         }
         self.stats.resolve_calls.fetch_add(1, Ordering::Relaxed);
@@ -594,7 +594,7 @@ impl Arena {
         if seq == 0 || seq % 2 == 1 {
             return Err(TransportError::BufferNotResolvable {
                 id,
-                detail: "nothing published at this slot".to_string(),
+                detail: "nothing published at this slot".into(),
             });
         }
         let slot = self.slot_offset(index);
@@ -607,7 +607,7 @@ impl Arena {
         };
         if len > self.slot_bytes as usize {
             return Err(TransportError::Framing {
-                detail: "slot length exceeds geometry: arena corrupt".to_string(),
+                detail: "slot length exceeds geometry: arena corrupt".into(),
             });
         }
         Ok((ptr, len))
@@ -732,7 +732,7 @@ impl Arena {
             let len = (base as *const u32).read_unaligned() as usize;
             if len + 4 > self.ring_bytes as usize {
                 return Err(TransportError::Framing {
-                    detail: "ring slot length exceeds geometry".to_string(),
+                    detail: "ring slot length exceeds geometry".into(),
                 });
             }
             (len, base.add(4))
@@ -768,7 +768,7 @@ impl Storage {
         let mut v: Vec<u64> = Vec::new();
         v.try_reserve_exact(words)
             .map_err(|_| TransportError::Message {
-                detail: "arena allocation failed".to_string(),
+                detail: "arena allocation failed".into(),
             })?;
         v.resize(words, 0);
         Ok(Storage::Heap(v))
@@ -877,7 +877,7 @@ impl ShmemChannel {
 
 fn shmem_caps() -> TransportCaps {
     TransportCaps {
-        kind: TransportKind::Shmem,
+        scheme: crate::transport::registry::SHMEM_SCHEME,
         framing: "bounded SPSC control rings (kind-tagged capnp frames) + slot arena; bulk referenced by T.BufferId",
         capability_transfer: crate::transport::channel::CapabilityTransfer::BootstrapOnly,
         // The control ring copies the small referencing message; the bulk
@@ -896,8 +896,8 @@ fn shmem_caps() -> TransportCaps {
 }
 
 impl Channel for ShmemChannel {
-    fn kind(&self) -> TransportKind {
-        TransportKind::Shmem
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::SHMEM_SCHEME
     }
 
     fn caps(&self) -> TransportCaps {
@@ -956,17 +956,17 @@ impl Channel for ShmemChannel {
         // 02-HOST-CAPABILITIES §4.2: Shmem carries no authority. The value
         // is handed back untouched — nothing was consumed.
         Err(TransportError::UnsupportedCapability {
-            kind: kind.to_string(),
+            kind: kind.into(),
             detail: "Shmem carries no authority; the one-time authenticated \
                      bootstrap (transport::bootstrap) is the transfer point"
-                .to_string(),
+                .into(),
         })
     }
 
     fn detach(&self, _id: CapId) -> Result<(), TransportError> {
         Err(TransportError::UnsupportedCapability {
-            kind: "detach".to_string(),
-            detail: "Shmem stages no capabilities".to_string(),
+            kind: "detach".into(),
+            detail: "Shmem stages no capabilities".into(),
         })
     }
 
@@ -1009,6 +1009,17 @@ impl Channel for ShmemChannel {
         let _ = self.arena.send_close(self.direction, &reason);
         Ok(())
     }
+
+    /// The shared-arena transport has no byte stream of its own: its
+    /// ring carries framed messages. The honest answer says so.
+    fn into_byte_stream(self: Box<Self>) -> Result<Box<dyn ByteStream>, TransportError> {
+        Err(TransportError::UnsupportedCapability {
+            kind: "byte stream".into(),
+            detail: "the shared-arena transport carries framed messages over \
+                     its control ring, not a foreign protocol's byte stream"
+                .into(),
+        })
+    }
 }
 
 /// Adapt any `MessageOut` into `ReaderSegments` for the ring path.
@@ -1049,7 +1060,7 @@ pub enum ControlFrame {
 pub fn parse_control_frame(bytes: &[u8]) -> Result<ControlFrame, TransportError> {
     if bytes.is_empty() {
         return Err(TransportError::Framing {
-            detail: "empty control frame".to_string(),
+            detail: "empty control frame".into(),
         });
     }
     let kind = bytes[0];
@@ -1060,7 +1071,7 @@ pub fn parse_control_frame(bytes: &[u8]) -> Result<ControlFrame, TransportError>
         frame::KIND_ATTACH => {
             if payload.len() < 11 {
                 return Err(TransportError::Framing {
-                    detail: "attach payload too short".to_string(),
+                    detail: "attach payload too short".into(),
                 });
             }
             let cap_kind = payload[0];
@@ -1068,7 +1079,7 @@ pub fn parse_control_frame(bytes: &[u8]) -> Result<ControlFrame, TransportError>
             let data_len = u16::from_be_bytes([payload[9], payload[10]]) as usize;
             if payload.len() < 11 + data_len {
                 return Err(TransportError::Framing {
-                    detail: "attach data length exceeds payload".to_string(),
+                    detail: "attach data length exceeds payload".into(),
                 });
             }
             Ok(ControlFrame::Attach {
@@ -1080,7 +1091,7 @@ pub fn parse_control_frame(bytes: &[u8]) -> Result<ControlFrame, TransportError>
         frame::KIND_DETACH => {
             if payload.len() != 8 {
                 return Err(TransportError::Framing {
-                    detail: "detach payload must be 8 bytes".to_string(),
+                    detail: "detach payload must be 8 bytes".into(),
                 });
             }
             Ok(ControlFrame::Detach {
@@ -1090,5 +1101,66 @@ pub fn parse_control_frame(bytes: &[u8]) -> Result<ControlFrame, TransportError>
         _ => Err(TransportError::Framing {
             detail: alloc::format!("unknown control kind {kind}"),
         }),
+    }
+}
+
+/// The `shmem` transport, registered under its open scheme token.
+///
+/// The shared arena is *established* by the authenticated bootstrap, so the
+/// handle travels in the request's state; there is no accept path.
+pub struct ShmemTransport;
+
+impl crate::transport::registry::TransportImpl for ShmemTransport {
+    fn scheme(&self) -> &'static str {
+        crate::transport::registry::SHMEM_SCHEME
+    }
+
+    fn description(&self) -> crate::transport::registry::TransportDescription {
+        crate::transport::registry::TransportDescription {
+            scheme: crate::transport::registry::SHMEM_SCHEME,
+            framing: "framed messages over the arena's control ring",
+            capability_transfer: crate::transport::channel::CapabilityTransfer::BootstrapOnly,
+            byte_stream: false,
+            default_address: None,
+            note: "the arena is established by the authenticated bootstrap; \
+                   there is no byte stream on this transport, only framed \
+                   messages over the control ring",
+        }
+    }
+
+    fn connect(
+        &self,
+        request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn Channel>, TransportError> {
+        let handle = request
+            .state
+            .as_ref()
+            .ok_or_else(|| TransportError::Connect {
+                detail: "the shared-arena transport needs a bootstrapped arena \
+                         handle: run the authenticated bootstrap first"
+                    .into(),
+            })?;
+        let handle = handle
+            .downcast_ref::<crate::transport::shmem::ShmemHandle>()
+            .ok_or_else(|| TransportError::Connect {
+                detail: "the shared-arena transport's state is not an arena handle".into(),
+            })?;
+        Ok(Box::new(ShmemChannel::from_handle(ShmemHandle::new(
+            handle.arena.clone(),
+            handle.direction,
+            handle.peer,
+        ))))
+    }
+
+    fn listen(
+        &self,
+        _request: &crate::transport::registry::TransportRequest,
+    ) -> Result<Box<dyn crate::transport::channel::ChannelListener>, TransportError> {
+        Err(TransportError::UnsupportedCapability {
+            kind: "listen".into(),
+            detail: "the shared-arena transport has no accept path: both \
+                     directions come from the bootstrapped arena"
+                .into(),
+        })
     }
 }

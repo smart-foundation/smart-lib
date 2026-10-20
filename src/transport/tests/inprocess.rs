@@ -10,7 +10,7 @@ use capnp::message::ReaderSegments;
 use crate::schema::types_capnp;
 use crate::transport::channel::{
     AttachedCap, CapHandoff, CapOutcome, Channel, CloseReason, MessageOut, OwnedMessage,
-    TransportError, TransportKind,
+    TransportError,
 };
 use crate::transport::inprocess::{InProcessChannel, InProcessInbox, InProcessPeer};
 
@@ -214,7 +214,7 @@ fn send_after_peer_close_is_reported() {
 fn caps_are_declared_honestly() {
     let (client, _server) = InProcessChannel::pair();
     let caps = client.caps();
-    assert_eq!(caps.kind, TransportKind::InProcess);
+    assert_eq!(caps.scheme, "inprocess");
     assert!(caps.zero_copy_message);
     assert!(!caps.zero_copy_data_handle, "no arena rides this channel");
     assert!(!caps.peer_identity, "one process has no OS peer");
@@ -319,8 +319,8 @@ fn inbox_default_and_empty() {
     assert!(inbox.pop_close().is_none());
     let (_client, server) = InProcessChannel::pair();
     assert_eq!(
-        server.caps().kind,
-        TransportKind::InProcess,
-        "a pair is two InProcess channels"
+        server.caps().scheme,
+        "inprocess",
+        "a pair is two in-process channels"
     );
 }
