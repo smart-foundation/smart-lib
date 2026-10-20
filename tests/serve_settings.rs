@@ -10,7 +10,9 @@ use smart_lib::domains::settings::availability;
 use smart_lib::platforms::linux::settings::LinuxSettingsBackend;
 use smart_lib::schema::cli_capnp::cli_service;
 use smart_lib::schema::discovery_capnp::discovery;
+use smart_lib::schema::settings_capnp::setting_result::WhichReader;
 use smart_lib::schema::settings_capnp::settings as st;
+use smart_lib::schema::types_capnp::ErrorCode as ContractErrorCode;
 use smart_lib::serve::abi::SupportedAbi;
 use smart_lib::serve::discovery::PublishedEndpoint;
 use smart_lib::serve::service::Service;
@@ -385,6 +387,208 @@ fn the_app_override_verbs_answer_the_matrix_reason() {
         reason.contains("no-privilege:"),
         "the refusal must carry the matrix's reason class: {reason}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// The daemon survives a client asking for a key the host does not carry
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A domain the host publishes, with a key its schema does NOT carry, and
+/// one it does.
+///
+/// The absent key is derived from the contract's own `getAll` answer: every
+/// key the host's schema carries is in that list, so a name that is not in
+/// it is a key the host's schema does not carry. The test therefore needs no
+/// knowledge the contract does not publish.
+fn a_published_domain_with_a_present_and_an_absent_key() -> Option<(String, String, String)> {
+    let (domain, present) = a_published_domain_and_key()?;
+    let client = settings_client();
+    let domain_in = domain.clone();
+    let all = futures::executor::block_on(async move {
+        let mut request = client.get_all_request();
+        {
+            let mut params = request.get();
+            params.set_domain(&domain_in);
+            let mut page = params.init_pagination();
+            page.set_offset(0);
+            page.set_limit(65_536);
+        }
+        request.send().promise.await
+    });
+    let Ok(response) = all else { return None };
+    let results = response.get().expect("the results");
+    let settings = results.get_settings().expect("the settings");
+    let entries = settings.get_entries().expect("the entries");
+    let carried: Vec<String> = (0..entries.len())
+        .map(|index| text(entries.get(index).get_key().expect("the key")))
+        .collect();
+    let mut absent = "no-such-key".to_string();
+    while carried.iter().any(|key| key == &absent) {
+        absent.push('x');
+    }
+    Some((domain, present, absent))
+}
+
+/// THE REGRESSION, over the wire: a client asking for a key the host's
+/// schema does not carry gets an ANSWER, and the daemon is still serving
+/// afterwards.
+///
+/// The host's own engine answers a key its schema does not carry with a
+/// FATAL error (glib's `g_error`), which ends the process and not the
+/// request — so over the wire this is the difference between one refused
+/// call and a dead daemon. The last call in this test is the proof that the
+/// daemon survived.
+#[test]
+fn a_client_asking_for_an_unknown_key_does_not_kill_the_daemon() {
+    let Some((domain, present, absent)) = a_published_domain_with_a_present_and_an_absent_key()
+    else {
+        // The host publishes no schema: there is no key to name, and the
+        // daemon is alive.
+        return;
+    };
+    let service = build_service();
+    let path = socket_path();
+    // The key the client will name, kept for the assertions below.
+    let named = absent.clone();
+
+    let answers = run_client(service, &path, CapabilityClass::Control, move |session| {
+        let settings: st::Client = session.interface();
+        // `get` — the contract's own union: the error arm, with the reason.
+        let read = session.run({
+            let settings = settings.clone();
+            let domain = domain.clone();
+            let absent = absent.clone();
+            async move {
+                let mut request = settings.get_request();
+                {
+                    let mut params = request.get();
+                    params.set_domain(&domain);
+                    params.set_key(&absent);
+                }
+                request.send().promise.await
+            }
+        });
+        let response = read.expect("the call answers");
+        let result = response
+            .get()
+            .expect("the results")
+            .get_result()
+            .expect("the result");
+        let reason = match result.which() {
+            Ok(WhichReader::Error(error)) => {
+                let error = error.expect("the error");
+                (
+                    error.get_code().expect("the code"),
+                    text(error.get_message().expect("the message")),
+                )
+            }
+            Ok(WhichReader::Value(_)) => panic!("an unknown key must not answer a value"),
+            Ok(WhichReader::NotSet(())) => panic!("an unknown key must not answer notSet"),
+            Ok(WhichReader::Unknown(())) => panic!("an unknown key must not answer unknown"),
+            Err(error) => panic!("the union must be readable: {error}"),
+        };
+
+        // `bulkGet` — the refusal rides the contract's own code token.
+        let bulk = session.run({
+            let settings = settings.clone();
+            let domain = domain.clone();
+            let absent = absent.clone();
+            async move {
+                let mut request = settings.bulk_get_request();
+                {
+                    let mut params = request.get();
+                    params.set_domain(&domain);
+                    let mut keys = params.init_keys(1);
+                    keys.reborrow().set(0, absent.as_str());
+                }
+                request.send().promise.await
+            }
+        });
+        let bulk_refusal = bulk.err().map(|error| error.to_string());
+
+        // `watch` — a subscription for a key that is not there cannot be
+        // made, so the call is refused with a reason.
+        let watched = session.run({
+            let settings = settings.clone();
+            let domain = domain.clone();
+            let absent = absent.clone();
+            async move {
+                let mut request = settings.watch_request();
+                {
+                    let mut params = request.get();
+                    params.set_domain(&domain);
+                    params.set_key(&absent);
+                }
+                request.send().promise.await
+            }
+        });
+        let watch_refusal = watched.err().map(|error| error.to_string());
+
+        // THE DAEMON SURVIVED: a key the host's schema DOES carry still
+        // answers, over the same connection.
+        let alive = session.run({
+            let settings = settings.clone();
+            let domain = domain.clone();
+            let present = present.clone();
+            async move {
+                let mut request = settings.get_request();
+                {
+                    let mut params = request.get();
+                    params.set_domain(&domain);
+                    params.set_key(&present);
+                }
+                request.send().promise.await
+            }
+        });
+        let alive = alive.expect("the daemon is still serving");
+        let alive = alive
+            .get()
+            .expect("the results")
+            .get_result()
+            .expect("the result");
+        let alive = match alive.which() {
+            Ok(WhichReader::Value(value)) => {
+                let value = value.expect("the value");
+                // The value is read here, inside the client's thread: the
+                // reader itself does not cross the thread boundary.
+                let _ = smart_lib::domains::settings::types::SettingValue::from_reader(&value);
+                true
+            }
+            Ok(WhichReader::Error(_)) => panic!("a key the host carries must not answer an error"),
+            Ok(WhichReader::NotSet(())) => panic!("a key the host carries must not answer notSet"),
+            Ok(WhichReader::Unknown(())) => panic!("a key the host carries must not answer unknown"),
+            Err(error) => panic!("the union must be readable: {error}"),
+        };
+
+        (reason, bulk_refusal, watch_refusal, alive)
+    });
+
+    // The answer is the contract's own code, with the reason.
+    assert_eq!(answers.0 .0, ContractErrorCode::NotFound);
+    assert!(
+        answers.0 .1.contains(&named),
+        "the reason must name the key: {}",
+        answers.0 .1
+    );
+    // The refusals ride the contract's own code token, and are not the
+    // generated default.
+    for refusal in [answers.1, answers.2].into_iter().flatten() {
+        assert!(
+            refusal.contains("notFound:"),
+            "the refusal must ride the contract's own code: {refusal}"
+        );
+        assert!(
+            !refusal.contains("not implemented"),
+            "the refusal must not be the generated default: {refusal}"
+        );
+    }
+    // And the daemon served a real key afterwards.
+    assert!(
+        answers.3,
+        "the daemon answered a real key after the unknown one"
+    );
+
+    let _ = std::fs::remove_file(&path);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

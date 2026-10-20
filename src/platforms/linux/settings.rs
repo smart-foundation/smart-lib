@@ -20,6 +20,32 @@
 //! archive body's `Command::new("gsettings")` per key is the pattern this
 //! backend exists to end, and `Command::new("dconf")` with it.
 //!
+//! ## THE KEY GUARD: an unknown key is an ANSWER, never a process abort
+//!
+//! glib's own engine answers a key its schema does not carry with a **fatal**
+//! error — `g_error`, "Settings schema '…' does not contain a key named '…'" —
+//! and a fatal in glib ends the PROCESS, not the request. MEASURED on this
+//! host (glib 2.88):
+//!
+//! | the host's own call | the host's own answer |
+//! |---|---|
+//! | `gio::Settings::value(unknown_key)` | `GLib-GIO-ERROR` → **SIGABRT** |
+//! | `gio::Settings::set_value(unknown_key, v)` | `GLib-GIO-ERROR` → **SIGABRT** |
+//! | `gio::Settings::connect_changed(Some(unknown_key), f)` | no abort; a handler id for a detailed signal that can never fire — a subscription that is a promise the host cannot keep |
+//!
+//! So every path in this file that names a key checks it against the host's
+//! own schema table **before** the engine is asked anything about it. The
+//! answer for a key the schema does not carry is the contract's `NotFound`
+//! with the reason — the same shape the `get` path already used, now the
+//! shape EVERY path uses. The settings domain is served over capnp RPC
+//! (`src/serve/settings.rs`), so before this guard one client could take the
+//! whole daemon down with a key that does not exist.
+//!
+//! The guard is the host's OWN table, read from the host's own schema source:
+//! `schema_for` finds the schema, `key_guard` asks whether it carries the
+//! key. A schema the host does not publish is answered the same way (the
+//! schema guard), so neither case can reach the engine.
+//!
 //! ## What is DEGRADED, measured
 //!
 //! `listByCategory` — the contract's category tokens are conventions, and this
@@ -164,32 +190,82 @@ impl LinuxSettingsBackend {
         })
     }
 
-    /// The host's own settings object for one schema, guarded so a host that
-    /// does not publish the schema is answered honestly rather than aborting
-    /// (glib's own `Settings::new` logs a fatal error for an unknown schema).
-    fn settings_for(&self, domain: &str) -> Result<gio::Settings> {
-        let known = self
-            .source
-            .as_ref()
-            .map(|source| source.lookup(domain, true).is_some())
-            .unwrap_or(false);
-        if !known {
-            return Err(Error::with_message(
-                ErrorCode::NotFound,
-                alloc::format!(
-                    "not-applicable: this host's own schema source publishes no `{domain}` schema"
-                ),
-            ));
+    /// The host's own schema for one domain, when this host's own source
+    /// publishes it. The source is consulted FIRST, because the host's own
+    /// engine answers a schema it does not know with a fatal error.
+    fn schema_for(&self, domain: &str) -> Option<gio::SettingsSchema> {
+        self.source.as_ref()?.lookup(domain, true)
+    }
+
+    /// The honest answer for a schema this host's own source does not publish.
+    fn no_such_schema(domain: &str) -> Error {
+        Error::with_message(
+            ErrorCode::NotFound,
+            alloc::format!(
+                "not-applicable: this host's own schema source publishes no `{domain}` schema"
+            ),
+        )
+    }
+
+    /// The honest answer for a key this host's own schema does not carry.
+    ///
+    /// This is the answer the whole file's key guard produces: a key the
+    /// schema does not carry is a fact about the store, not a fault of the
+    /// caller and never a fatal.
+    fn no_such_key(domain: &str, key: &str) -> Error {
+        Error::with_message(
+            ErrorCode::NotFound,
+            alloc::format!("this host's schema for `{domain}` has no key `{key}`"),
+        )
+    }
+
+    /// The host's own schema and settings object for one domain.
+    ///
+    /// Guarded so a host that does not publish the schema is answered
+    /// honestly rather than aborting (glib's own `Settings::new` logs a fatal
+    /// error for an unknown schema).
+    fn engine_for(&self, domain: &str) -> Result<(gio::SettingsSchema, gio::Settings)> {
+        let schema = self
+            .schema_for(domain)
+            .ok_or_else(|| Self::no_such_schema(domain))?;
+        let settings = gio::Settings::new(domain);
+        Ok((schema, settings))
+    }
+
+    /// THE KEY GUARD: does the host's own schema carry this key?
+    ///
+    /// Every path that names a key passes through this before the host's own
+    /// engine is asked anything about it, because the engine's own answer to a
+    /// key its schema does not carry is a FATAL error — glib's `g_error`, which
+    /// ends the PROCESS and not the request. The honest answer is the
+    /// contract's `NotFound` with the reason, and that is what this returns.
+    fn key_guard(&self, domain: &str, key: &str) -> Result<()> {
+        let schema = self
+            .schema_for(domain)
+            .ok_or_else(|| Self::no_such_schema(domain))?;
+        if !schema.has_key(key) {
+            return Err(Self::no_such_key(domain, key));
         }
-        Ok(gio::Settings::new(domain))
+        Ok(())
+    }
+
+    /// The host's own schema and settings object for one domain AND one key,
+    /// with the key GUARDED: a key the host's schema does not carry is the
+    /// contract's `NotFound`, never the fatal the engine would make of it.
+    fn engine_for_key(&self, domain: &str, key: &str) -> Result<(gio::SettingsSchema, gio::Settings)> {
+        let (schema, settings) = self.engine_for(domain)?;
+        if !schema.has_key(key) {
+            return Err(Self::no_such_key(domain, key));
+        }
+        Ok((schema, settings))
     }
 
     /// One value read through the host's own engine, as the contract's own
-    /// value model.
+    /// value model, with the key GUARDED.
     fn value_of(&self, domain: &str, key: &str) -> Result<SettingValue> {
-        let settings = self.settings_for(domain)?;
-        let variant = settings.value(key);
-        Ok(setting_value_from_variant(&variant))
+        let (schema, settings) = self.engine_for_key(domain, key)?;
+        engine_value(&schema, &settings, key)
+            .ok_or_else(|| Self::no_such_key(domain, key))
     }
 
     /// This backend's own version for one key, seeded from the store version so
@@ -260,6 +336,25 @@ impl LinuxSettingsBackend {
         });
         version
     }
+}
+
+/// The value the host's own engine holds for one key — or `None` when the
+/// host's own schema does not carry that key.
+///
+/// **THE GUARD.** glib's own engine answers a key its schema does not carry
+/// with a FATAL error (`g_error`: "Settings schema '…' does not contain a key
+/// named '…'"), which ends the PROCESS and not the request. So every key this
+/// backend names to the engine is checked against the host's own schema table
+/// first, and `None` — "the key is not there" — is the honest answer.
+fn engine_value(
+    schema: &gio::SettingsSchema,
+    settings: &gio::Settings,
+    key: &str,
+) -> Option<SettingValue> {
+    if !schema.has_key(key) {
+        return None;
+    }
+    Some(setting_value_from_variant(&settings.value(key)))
 }
 
 /// A host variant printed in GVariant's own text syntax, so a caller sees the
@@ -381,16 +476,11 @@ fn variant_from_setting_value(value: &SettingValue) -> Option<gio::glib::Variant
 impl SettingsBackend for LinuxSettingsBackend {
     fn get(&self, domain: &str, key: &str) -> Result<SettingResult> {
         // A key the host's own schema does not carry is an answer, not a fault:
-        // the contract's `notSet` arm, with the schema's own default reported
-        // through `describe` for a caller that wants the fallback.
-        if let Some(schema) = self.describe_schema(domain) {
-            if !schema.has_key(key) {
-                return Ok(SettingResult::Error(Error::with_message(
-                    ErrorCode::NotFound,
-                    alloc::format!("this host's schema for `{domain}` has no key `{key}`"),
-                )));
-            }
-        }
+        // the contract's own `error` arm carrying `NotFound`, with the schema's
+        // own default reported through `describe` for a caller that wants the
+        // fallback. The guard lives in `value_of`, so the host's own engine is
+        // never asked about a key its schema does not carry (that answer is a
+        // fatal, not an error).
         match self.value_of(domain, key) {
             Ok(value) => Ok(SettingResult::Value(value)),
             Err(error) => Ok(SettingResult::Error(error)),
@@ -398,7 +488,11 @@ impl SettingsBackend for LinuxSettingsBackend {
     }
 
     fn set(&self, domain: &str, key: &str, value: &SettingValue) -> Result<()> {
-        // The value model is validated first: a list, dict or unknown value is
+        // The KEY is guarded FIRST: a key the host's schema does not carry is
+        // an answer (the contract's `NotFound`), and the host's own engine
+        // would make it a FATAL if it were handed the key.
+        self.key_guard(domain, key)?;
+        // The value model is validated next: a list, dict or unknown value is
         // refused rather than coerced, because the host's own engine types
         // matter and a coerced value would be a lie a caller depends on.
         let Some(variant) = variant_from_setting_value(value) else {
@@ -413,8 +507,9 @@ impl SettingsBackend for LinuxSettingsBackend {
         if let Some(error) = self.write_gate() {
             return Err(error);
         }
-        // Reached only when the gate is lifted (the founder's path).
-        let settings = self.settings_for(domain)?;
+        // Reached only when the gate is lifted (the founder's path). The key is
+        // guarded again here, so the write can never be the fatal.
+        let (_, settings) = self.engine_for_key(domain, key)?;
         settings.set_value(key, &variant).map_err(|error| {
             // The host's own refusal is the truth about its own engine, so its
             // words are carried rather than a generic reason.
@@ -429,23 +524,32 @@ impl SettingsBackend for LinuxSettingsBackend {
     }
 
     fn get_all(&self, domain: &str, page: Pagination) -> Result<SettingMap> {
-        let settings = self.settings_for(domain)?;
+        let (schema, settings) = self.engine_for(domain)?;
         let mut entries = Vec::new();
-        for key in self
-            .describe_schema(domain)
-            .map(|schema| schema.keys.into_iter().map(|key| key.name).collect::<Vec<_>>())
-            .unwrap_or_default()
-        {
-            let value = setting_value_from_variant(&settings.value(&key));
+        for key in schema.list_keys() {
+            // The same guard every caller-named key passes: the key is
+            // checked against the host's own schema table before the engine is
+            // asked for it. (The keys here come from that very table, so the
+            // guard always passes — it is here so the read path has ONE way of
+            // naming a key to the engine.)
+            let value = engine_value(&schema, &settings, key.as_str())
+                .ok_or_else(|| Self::no_such_key(domain, key.as_str()))?;
             // The host's own value answers even when it equals the schema
             // default, which is what a caller comparing them needs.
-            entries.push(SettingMapEntry { key, value });
+            entries.push(SettingMapEntry {
+                key: key.to_string(),
+                value,
+            });
         }
         let window = crate::domains::settings::types::page_window(&entries, page);
         Ok(SettingMap { entries: window.items })
     }
 
-    fn delete(&self, domain: &str, _key: &str) -> Result<()> {
+    fn delete(&self, domain: &str, key: &str) -> Result<()> {
+        // The key is guarded first: a key the host's schema does not carry is
+        // an answer (the contract's `NotFound`), not a write to a key that is
+        // not there.
+        self.key_guard(domain, key)?;
         Err(self.gated_write("delete", domain))
     }
 
@@ -459,7 +563,12 @@ impl SettingsBackend for LinuxSettingsBackend {
     }
 
     fn watch(&self, domain: &str, key: &str) -> Result<SettingsSubscription> {
-        let settings = self.settings_for(domain)?;
+        // The key is GUARDED before it reaches the host's own engine: a
+        // detailed change signal for a key the schema does not carry can never
+        // fire, so the subscription would be a promise the host cannot keep —
+        // and the engine's own answer to an unknown key is a fatal in some
+        // glib versions.
+        let (schema, settings) = self.engine_for_key(domain, key)?;
         let subscription = self.next_subscription.fetch_add(1, Ordering::Relaxed) + 1;
         // The host's own change signal. The handler owns the shared queue and
         // the shared counter, appends the value the engine now holds, and
@@ -469,12 +578,18 @@ impl SettingsBackend for LinuxSettingsBackend {
         let handler_pending = std::sync::Arc::clone(&pending);
         let domain_owned = domain.to_string();
         let handler = settings.connect_changed(Some(key), move |settings, changed| {
+            // The key the host's own signal reports is a key of this schema,
+            // and the engine's answer to a key it does not carry is a fatal —
+            // so even the signal's own key is guarded before it is read.
+            let Some(value) = engine_value(&schema, settings, changed) else {
+                return;
+            };
             let appended = {
                 let mut pending = handler_pending.lock().unwrap();
                 let change = SettingChange {
                     domain: domain_owned.clone(),
                     key: changed.to_string(),
-                    value: setting_value_from_variant(&settings.value(changed)),
+                    value,
                     timestamp: Timestamp::from_nanos(now_nanos()),
                     actor_id: "host:changed".to_string(),
                     version: handler_version.fetch_add(1, Ordering::Relaxed) + 1,
@@ -502,18 +617,26 @@ impl SettingsBackend for LinuxSettingsBackend {
     }
 
     fn watch_domain(&self, domain: &str) -> Result<SettingsSubscription> {
-        let settings = self.settings_for(domain)?;
+        // No key is named here — the whole schema is watched — so the schema
+        // guard is the whole guard.
+        let (schema, settings) = self.engine_for(domain)?;
         let subscription = self.next_subscription.fetch_add(1, Ordering::Relaxed) + 1;
         let (version, pending) = self.shared();
         let handler_version = std::sync::Arc::clone(&version);
         let handler_pending = std::sync::Arc::clone(&pending);
         let domain_owned = domain.to_string();
         let handler = settings.connect_changed(None, move |settings, changed| {
+            // The key the host's own signal reports is a key of this schema,
+            // and the engine's answer to a key it does not carry is a fatal —
+            // so even the signal's own key is guarded before it is read.
+            let Some(value) = engine_value(&schema, settings, changed) else {
+                return;
+            };
             let mut pending = handler_pending.lock().unwrap();
             pending.push(SettingChange {
                 domain: domain_owned.clone(),
                 key: changed.to_string(),
-                value: setting_value_from_variant(&settings.value(changed)),
+                value,
                 timestamp: Timestamp::from_nanos(now_nanos()),
                 actor_id: "host:changed".to_string(),
                 version: handler_version.fetch_add(1, Ordering::Relaxed) + 1,
@@ -534,15 +657,27 @@ impl SettingsBackend for LinuxSettingsBackend {
         Ok(SettingsSubscription(subscription))
     }
 
-    fn bulk_set(&self, domain: &str, _entries: &[SettingMapEntry]) -> Result<()> {
+    fn bulk_set(&self, domain: &str, entries: &[SettingMapEntry]) -> Result<()> {
+        // Every key the caller named is guarded first: a key the host's schema
+        // does not carry is an answer (the contract's `NotFound`), and the
+        // write is gated anyway.
+        for entry in entries {
+            self.key_guard(domain, &entry.key)?;
+        }
         Err(self.gated_write("bulkSet", domain))
     }
 
     fn bulk_get(&self, domain: &str, keys: &[&str]) -> Result<Vec<SettingMapEntry>> {
-        let settings = self.settings_for(domain)?;
+        // The keys are GUARDED before the engine is asked about any of them:
+        // the host's own answer to a key its schema does not carry is a fatal,
+        // and the entry list has no per-entry error arm — so the honest
+        // answer for a key the schema does not carry is the contract's
+        // `NotFound`, naming the key, rather than a silently shorter list.
+        let (schema, settings) = self.engine_for(domain)?;
         let mut out = Vec::new();
         for key in keys {
-            let value = setting_value_from_variant(&settings.value(key));
+            let value = engine_value(&schema, &settings, key)
+                .ok_or_else(|| Self::no_such_key(domain, key))?;
             out.push(SettingMapEntry {
                 key: (*key).to_string(),
                 value,
@@ -573,6 +708,10 @@ impl SettingsBackend for LinuxSettingsBackend {
     }
 
     fn set_app_override(&self, _app_id: AppId, _key: &str, _value: &SettingValue) -> Result<()> {
+        // The key is not guarded, and the reason is the contract's own: this
+        // host's engine has NO per-app namespace to name a key into, so the
+        // answer does not depend on the key at all. There is nothing for the
+        // key to be wrong about.
         Err(Error::with_message(
             ErrorCode::PermissionDenied,
             "no-privilege: the contract states it — whether app X may override setting Y is a \
@@ -584,7 +723,8 @@ impl SettingsBackend for LinuxSettingsBackend {
 
     fn get_app_override(&self, _app_id: AppId, _key: &str) -> Result<(SettingValue, bool)> {
         // `exists` rather than an error, because "not set" is an answer, and
-        // this host carries no per-app override at all.
+        // this host carries no per-app override at all — so the key is not
+        // named to any host API and cannot be wrong about.
         Ok((SettingValue::String(String::new()), false))
     }
 
@@ -596,6 +736,10 @@ impl SettingsBackend for LinuxSettingsBackend {
     }
 
     fn get_version(&self, domain: &str, key: &str) -> Result<u64> {
+        // The key is guarded: a version is a property of a key, and this
+        // host's schema does not carry the key — so there is no version of it
+        // to report. The honest answer is the contract's `NotFound`.
+        self.key_guard(domain, key)?;
         Ok(self.version_of(domain, key))
     }
 
@@ -606,6 +750,9 @@ impl SettingsBackend for LinuxSettingsBackend {
         value: &SettingValue,
         expected_version: u64,
     ) -> Result<()> {
+        // The key is guarded FIRST, so an unknown key is always the contract's
+        // `NotFound` — never a version conflict about a key that is not there.
+        self.key_guard(domain, key)?;
         let current = self.version_of(domain, key);
         if current != expected_version {
             return Err(Error::with_message(
@@ -621,6 +768,14 @@ impl SettingsBackend for LinuxSettingsBackend {
     }
 
     fn get_history(&self, domain: &str, key: &str, page: Pagination) -> Result<Page<SettingChange>> {
+        // The key is guarded, when one is named: a key this host's schema does
+        // not carry has no history, and the honest answer for it is the
+        // contract's `NotFound`. The EMPTY key is this backend's own token for
+        // "the whole domain", so it names the domain rather than a key and is
+        // not guarded.
+        if !key.is_empty() {
+            self.key_guard(domain, key)?;
+        }
         let history = self.changes.lock().unwrap();
         let matched: Vec<SettingChange> = history
             .iter()
@@ -1048,4 +1203,283 @@ mod tests {
     struct NothingSettingsBackend;
 
     impl crate::domains::settings::backend::SettingsBackend for NothingSettingsBackend {}
+
+    // ═══════════════════════════════════════════════════════════════════
+    // THE REGRESSION: an unknown key is an ANSWER, never a process abort.
+    //
+    // The host's own engine answers a key its schema does not carry with a
+    // FATAL error (glib's `g_error`), which ends the PROCESS and not the
+    // request. Every test below drives a key-naming path with such a key and
+    // asserts an honest answer; the fact that the test completes at all is
+    // the proof that the process survived.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// A key the host's own schema demonstrably does NOT carry.
+    ///
+    /// MEASURED against the host's own schema table, so the regression test
+    /// can never accidentally name a key that exists.
+    fn absent_key(domain: &str) -> String {
+        let source = gio::SettingsSchemaSource::default().expect("the host publishes a source");
+        let schema = source.lookup(domain, true).expect("the host publishes this schema");
+        let mut candidate = "no-such-key".to_string();
+        while schema.has_key(&candidate) {
+            candidate.push('x');
+        }
+        candidate
+    }
+
+    /// The reason an answer carries, for the assertion that names the key.
+    fn not_found(error: &crate::core::Error, key: &str) {
+        assert_eq!(error.code, ErrorCode::NotFound, "{}", error.message);
+        assert!(
+            error.message.contains(key),
+            "the reason must name the key: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_is_an_answer_on_every_path_that_names_one() {
+        let backend = LinuxSettingsBackend::new();
+        let absent = absent_key(SCHEMA);
+        // MEASURED: the key really is not in the host's own table.
+        let schema = backend.describe(SCHEMA).expect("describe").expect("a schema");
+        assert!(!schema.has_key(&absent), "the key must be absent");
+
+        // `get` — the contract's own union: the error arm, with the reason.
+        match backend.get(SCHEMA, &absent).expect("get") {
+            SettingResult::Error(error) => not_found(&error, &absent),
+            other => panic!("an unknown key is the contract's error arm: {other:?}"),
+        }
+
+        // `set` — the key is answered before the write is ever reached.
+        let error = backend
+            .set(SCHEMA, &absent, &SettingValue::String("x".into()))
+            .expect_err("an unknown key");
+        not_found(&error, &absent);
+
+        // `setIfUnchanged` — the key is answered before the version
+        // handshake, so it is never a conflict about a key that is not there.
+        for expected in [0, 1, u64::MAX] {
+            let error = backend
+                .set_if_unchanged(SCHEMA, &absent, &SettingValue::String("x".into()), expected)
+                .expect_err("an unknown key");
+            not_found(&error, &absent);
+        }
+
+        // `delete`.
+        let error = backend.delete(SCHEMA, &absent).expect_err("an unknown key");
+        not_found(&error, &absent);
+
+        // `bulkGet` — the call is refused, naming the key, rather than
+        // answering a silently shorter list.
+        let error = backend
+            .bulk_get(SCHEMA, &[absent.as_str()])
+            .expect_err("an unknown key");
+        not_found(&error, &absent);
+        // Even in a mixed list: the unknown key is named, and the known one
+        // is never quietly dropped.
+        let error = backend
+            .bulk_get(SCHEMA, &["gtk-theme", absent.as_str()])
+            .expect_err("an unknown key");
+        not_found(&error, &absent);
+
+        // `bulkSet`.
+        let error = backend
+            .bulk_set(
+                SCHEMA,
+                &[SettingMapEntry {
+                    key: absent.clone(),
+                    value: SettingValue::String("x".into()),
+                }],
+            )
+            .expect_err("an unknown key");
+        not_found(&error, &absent);
+
+        // `watch` — a subscription for a key the schema does not carry could
+        // never fire, so the honest answer is that there is no such key.
+        let error = backend.watch(SCHEMA, &absent).expect_err("an unknown key");
+        not_found(&error, &absent);
+
+        // `getVersion` — a version is a property of a key, and this key is
+        // not one the host's schema carries.
+        let error = backend.get_version(SCHEMA, &absent).expect_err("an unknown key");
+        not_found(&error, &absent);
+
+        // `getHistory`.
+        let error = backend
+            .get_history(SCHEMA, &absent, Pagination { offset: 0, limit: 10 })
+            .expect_err("an unknown key");
+        not_found(&error, &absent);
+
+        // The app-override trio names a key too, but this host's engine has
+        // NO per-app namespace to name it into, and the contract says the
+        // read answers `exists` rather than an error — so the key is not
+        // wrong about anything and no host API is asked.
+        let (value, exists) = backend
+            .get_app_override(crate::core::ids::AppId::new(1), &absent)
+            .expect("getAppOverride");
+        assert!(!exists, "this host carries no per-app override");
+        assert_eq!(value, SettingValue::String(String::new()));
+        assert_eq!(
+            backend
+                .set_app_override(
+                    crate::core::ids::AppId::new(1),
+                    &absent,
+                    &SettingValue::String("x".into()),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            backend
+                .clear_app_override(crate::core::ids::AppId::new(1), &absent)
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+
+        // THE PROCESS SURVIVED: the backend still answers a key the host's
+        // schema does carry, and the store is unchanged.
+        assert!(matches!(
+            backend.get(SCHEMA, "gtk-theme").expect("get"),
+            SettingResult::Value(_)
+        ));
+    }
+
+    /// The other half of the guard: a schema this host's own source does not
+    /// publish is answered honestly too — the source is consulted BEFORE the
+    /// engine is asked, because the engine's own answer to an unknown schema
+    /// is a fatal as well.
+    #[test]
+    fn a_schema_the_host_does_not_publish_is_answered_honestly() {
+        let backend = LinuxSettingsBackend::new();
+        const ABSENT: &str = "com.example.not-installed";
+        // `get` — the contract's own union.
+        match backend.get(ABSENT, "gtk-theme").expect("get") {
+            SettingResult::Error(error) => assert_eq!(error.code, ErrorCode::NotFound),
+            other => panic!("an unpublished schema is the error arm: {other:?}"),
+        }
+        for error in [
+            backend
+                .set(ABSENT, "gtk-theme", &SettingValue::String("x".into()))
+                .unwrap_err(),
+            backend
+                .set_if_unchanged(ABSENT, "gtk-theme", &SettingValue::String("x".into()), 0)
+                .unwrap_err(),
+            backend.delete(ABSENT, "gtk-theme").unwrap_err(),
+            backend
+                .bulk_set(
+                    ABSENT,
+                    &[SettingMapEntry {
+                        key: "gtk-theme".into(),
+                        value: SettingValue::String("x".into()),
+                    }],
+                )
+                .unwrap_err(),
+            backend.bulk_get(ABSENT, &["gtk-theme"]).unwrap_err(),
+            backend.watch(ABSENT, "gtk-theme").unwrap_err(),
+            backend.get_version(ABSENT, "gtk-theme").unwrap_err(),
+            backend
+                .get_history(ABSENT, "gtk-theme", Pagination { offset: 0, limit: 10 })
+                .unwrap_err(),
+            backend
+                .get_all(ABSENT, Pagination { offset: 0, limit: 10 })
+                .unwrap_err(),
+            backend.watch_domain(ABSENT).unwrap_err(),
+        ] {
+            assert_eq!(error.code, ErrorCode::NotFound, "{}", error.message);
+        }
+        // And the process survived: the host's own schema still answers.
+        assert!(matches!(
+            backend.get(SCHEMA, "gtk-theme").expect("get"),
+            SettingResult::Value(_)
+        ));
+    }
+
+    /// A key the host's schema DOES carry still answers on every path that
+    /// names one: the guard refuses nothing the host itself published.
+    #[test]
+    fn a_known_key_still_answers_on_every_path_that_names_one() {
+        let backend = LinuxSettingsBackend::new();
+        // `get`.
+        assert!(matches!(
+            backend.get(SCHEMA, "gtk-theme").expect("get"),
+            SettingResult::Value(SettingValue::String(_))
+        ));
+        // `getAll`.
+        let all = backend
+            .get_all(SCHEMA, Pagination { offset: 0, limit: 100 })
+            .expect("getAll");
+        assert!(all.entries.iter().any(|entry| entry.key == "gtk-theme"));
+        // `bulkGet`.
+        let entries = backend
+            .bulk_get(SCHEMA, &["gtk-theme", "icon-theme"])
+            .expect("bulkGet");
+        assert_eq!(entries.len(), 2, "every key the caller named");
+        // `watch` and `watchDomain`.
+        let subscription = backend.watch(SCHEMA, "gtk-theme").expect("watch");
+        assert!(backend.pull_settings(subscription, 4).expect("pull").len() <= 4);
+        backend.cancel_settings(subscription).expect("cancel");
+        let domain_subscription = backend.watch_domain(SCHEMA).expect("watchDomain");
+        backend.cancel_settings(domain_subscription).expect("cancel");
+        // `getVersion` and `getHistory`.
+        let version = backend.get_version(SCHEMA, "gtk-theme").expect("getVersion");
+        assert!(version >= super::VERSION_FLOOR, "the floor is published");
+        let page = backend
+            .get_history(SCHEMA, "gtk-theme", Pagination { offset: 0, limit: 10 })
+            .expect("getHistory");
+        assert_eq!(page.total, 0);
+        // The gated writes: a key that IS there reaches the gate, which is
+        // the founder's answer (law #8) and not a fault about the key.
+        for error in [
+            backend
+                .set(SCHEMA, "gtk-theme", &SettingValue::String("x".into()))
+                .unwrap_err(),
+            backend.delete(SCHEMA, "gtk-theme").unwrap_err(),
+            backend
+                .bulk_set(
+                    SCHEMA,
+                    &[SettingMapEntry {
+                        key: "gtk-theme".into(),
+                        value: SettingValue::String("x".into()),
+                    }],
+                )
+                .unwrap_err(),
+            backend
+                .set_if_unchanged(SCHEMA, "gtk-theme", &SettingValue::String("x".into()), version)
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, ErrorCode::PermissionDenied, "{}", error.message);
+        }
+    }
+
+    /// The guard's boundary is EXACTLY the host's own key table: every key the
+    /// host publishes is readable, and nothing else is.
+    #[test]
+    fn the_guard_is_exactly_the_hosts_own_key_table() {
+        let backend = LinuxSettingsBackend::new();
+        let source = gio::SettingsSchemaSource::default().expect("the host publishes a source");
+        let schema = source.lookup(SCHEMA, true).expect("installed");
+        let installed = schema.list_keys();
+        assert!(!installed.is_empty(), "the host's own table is not empty");
+        for key in &installed {
+            // Every key the host's own table carries answers a value: the
+            // guard refuses nothing the host itself published.
+            let result = backend.get(SCHEMA, key.as_str()).expect("get");
+            assert!(
+                matches!(result, SettingResult::Value(_)),
+                "the host's own key {key} must answer a value"
+            );
+        }
+        // And the boundary is that table: a key outside it is the contract's
+        // `NotFound`, with the reason.
+        let absent = absent_key(SCHEMA);
+        assert!(!schema.has_key(&absent));
+        match backend.get(SCHEMA, &absent).expect("get") {
+            SettingResult::Error(error) => not_found(&error, &absent),
+            other => panic!("a key outside the host's table is the error arm: {other:?}"),
+        }
+    }
 }
