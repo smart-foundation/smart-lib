@@ -26,9 +26,10 @@ extern crate std;
 
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use capnp::capability::Client;
 use capnp::message::ReaderOptions;
@@ -45,6 +46,20 @@ use crate::transport::channel::{ByteStream, Channel, TransportError};
 use super::router::{InterfaceRouter, Route};
 use super::stream::PumpedStream;
 use super::CapabilityClass;
+
+/// One command a domain publishes through the registry (cli.capnp's
+/// `CommandRegistration`, minus what the engine fills in).
+#[derive(Clone, Debug)]
+pub struct DomainCommand {
+    /// The path the user types ("net status").
+    pub path: &'static str,
+    /// The interface the command calls, as the schema spells it ("Network").
+    pub interface: &'static str,
+    /// The method the command calls, as the schema spells it ("getStatus").
+    pub method: &'static str,
+    /// The one-line summary the registry publishes.
+    pub summary: &'static str,
+}
 
 /// A domain this service serves over the contract's own call model.
 ///
@@ -72,6 +87,22 @@ pub trait ServedDomain {
         Vec::new()
     }
 
+    /// The commands this domain publishes through the registry
+    /// (cli.capnp). The engine publishes them by NAME; the ordinal and the
+    /// schema's node tree are resolved from the generated contract table and
+    /// the schema tree, never written by hand.
+    fn commands(&self) -> Vec<DomainCommand> {
+        Vec::new()
+    }
+
+    /// This domain's schema node tree (the contract's own
+    /// `CodeGeneratorRequest` for the schema), published in the registry's
+    /// open metadata so a client that never compiled the schema can still
+    /// address its methods.
+    fn schema_tree(&self) -> Option<&'static [u8]> {
+        None
+    }
+
     /// Build the server for one connection, at the class that connection
     /// earned.
     fn build(&self, class: CapabilityClass) -> Box<dyn ClientHook>;
@@ -84,6 +115,8 @@ pub struct Service {
     discovery: Arc<super::discovery::DiscoveryState>,
     abi: Arc<super::abi::AbiState>,
     capabilities: Arc<super::capability::CapabilityState>,
+    registry: Arc<super::cli::RegistryState>,
+    schema_trees: Arc<Mutex<Vec<(u64, &'static [u8])>>>,
 }
 
 impl Service {
@@ -94,16 +127,44 @@ impl Service {
             discovery: Arc::new(super::discovery::DiscoveryState::new()),
             abi: Arc::new(super::abi::AbiState::new()),
             capabilities: Arc::new(super::capability::CapabilityState::new()),
+            registry: Arc::new(super::cli::RegistryState::new()),
+            schema_trees: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Add a domain. The domain's discovery descriptor is registered with
-    /// the service's discovery state, so a client can look it up.
+    /// the service's discovery state, so a client can look it up; its
+    /// commands are published in the registry, so a client can read the
+    /// surface — and its schema's node tree, so a client that never
+    /// compiled the schema can still address the methods.
     pub fn with_domain(mut self, domain: Arc<dyn ServedDomain>) -> Self {
         self.discovery
             .register_domain(domain.as_ref(), &self.discovery_endpoints());
+        for command in domain.commands() {
+            self.registry.publish(super::cli::PublishedCommand {
+                path: command.path.to_string(),
+                schema_id: domain.service_id(),
+                interface: command.interface.to_string(),
+                method: command.method.to_string(),
+                domain: domain.name().to_string(),
+                summary: command.summary.to_string(),
+                unavailable: None,
+            });
+        }
+        if let Some(tree) = domain.schema_tree() {
+            if let Ok(mut guard) = self.schema_trees.lock() {
+                if !guard.iter().any(|(id, _)| *id == domain.service_id()) {
+                    guard.push((domain.service_id(), tree));
+                }
+            }
+        }
         self.domains.push(domain);
         self
+    }
+
+    /// The registry state (what the service publishes about its surface).
+    pub fn registry(&self) -> &Arc<super::cli::RegistryState> {
+        &self.registry
     }
 
     /// The endpoints this service publishes for its domains. Set by the
@@ -158,6 +219,10 @@ impl Service {
         routes.push(Route {
             interface_id: super::capability::INTERFACE_ID,
             hook: super::capability::server(self.capabilities.clone(), class),
+        });
+        routes.push(Route {
+            interface_id: super::cli::INTERFACE_ID,
+            hook: super::cli::server(self.registry.clone(), self.schema_trees.clone()),
         });
         InterfaceRouter::new(routes).as_client()
     }

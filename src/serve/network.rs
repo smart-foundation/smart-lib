@@ -28,6 +28,8 @@ extern crate std;
 
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -47,7 +49,7 @@ use crate::schema::network_capnp::{counter_subscription, status_subscription};
 use crate::schema::types_capnp;
 
 use super::errors;
-use super::service::ServedDomain;
+use super::service::{DomainCommand, ServedDomain};
 use super::CapabilityClass;
 
 /// The network service: the domain's backend, and the class this
@@ -1289,6 +1291,123 @@ where
 
     fn category(&self) -> &'static str {
         "network"
+    }
+
+    /// The commands this domain publishes through the registry
+    /// (cli.capnp). The engine publishes them by NAME; the method's ordinal
+    /// and the schema's node tree come from the generated contract table and
+    /// the schema tree — never from a literal written here.
+    fn commands(&self) -> Vec<DomainCommand> {
+        vec![
+            DomainCommand {
+                path: "status",
+                interface: "Network",
+                method: "getStatus",
+                summary: "the network's overall status",
+            },
+            DomainCommand {
+                path: "interfaces",
+                interface: "Network",
+                method: "getInterfaces",
+                summary: "the host's interfaces",
+            },
+            DomainCommand {
+                path: "networking",
+                interface: "Network",
+                method: "isNetworkingEnabled",
+                summary: "whether networking is enabled",
+            },
+            DomainCommand {
+                path: "radios",
+                interface: "Network",
+                method: "listRadioStates",
+                summary: "the radio states",
+            },
+            DomainCommand {
+                path: "wifi scan",
+                interface: "Network",
+                method: "wifiScan",
+                summary: "scan for wifi networks",
+            },
+            DomainCommand {
+                path: "wifi list",
+                interface: "Network",
+                method: "listKnownWifiNetworks",
+                summary: "the known wifi networks",
+            },
+            DomainCommand {
+                path: "wifi connect",
+                interface: "Network",
+                method: "wifiConnect",
+                summary: "connect to a wifi network",
+            },
+            DomainCommand {
+                path: "wifi disconnect",
+                interface: "Network",
+                method: "wifiDisconnect",
+                summary: "disconnect from a wifi network",
+            },
+            DomainCommand {
+                path: "wifi forget",
+                interface: "Network",
+                method: "forgetWifiNetwork",
+                summary: "forget a known wifi network",
+            },
+            DomainCommand {
+                path: "dns servers",
+                interface: "Network",
+                method: "getDnsServers",
+                summary: "the configured DNS servers",
+            },
+            DomainCommand {
+                path: "routes",
+                interface: "Network",
+                method: "getRoutes",
+                summary: "the routing table",
+            },
+            DomainCommand {
+                path: "firewall rules",
+                interface: "Network",
+                method: "getFirewallRules",
+                summary: "the firewall rules",
+            },
+            DomainCommand {
+                path: "proxy",
+                interface: "Network",
+                method: "getProxyConfig",
+                summary: "the proxy configuration",
+            },
+            DomainCommand {
+                path: "vpn",
+                interface: "Network",
+                method: "listVpnProfiles",
+                summary: "the VPN profiles",
+            },
+            DomainCommand {
+                path: "ping",
+                interface: "Network",
+                method: "ping",
+                summary: "ping a host",
+            },
+            DomainCommand {
+                path: "traceroute",
+                interface: "Network",
+                method: "traceroute",
+                summary: "trace a route to a host",
+            },
+            DomainCommand {
+                path: "bandwidth",
+                interface: "Network",
+                method: "getCounters",
+                summary: "the traffic counters",
+            },
+        ]
+    }
+
+    /// The network schema's node tree: what a client that never compiled
+    /// `network.capnp` needs in order to address these methods.
+    fn schema_tree(&self) -> Option<&'static [u8]> {
+        Some(include_bytes!(concat!(env!("OUT_DIR"), "/schemas/network.schema.bin")))
     }
 
     fn build(&self, class: CapabilityClass) -> Box<dyn ClientHook> {

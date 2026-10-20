@@ -100,11 +100,10 @@ fn main() -> ExitCode {
     let service = Arc::new(build_service());
 
     // The endpoint this service is reachable at, published in the contract's
-    // own `ServiceEndpoint` (with the open transport token).
-    let endpoints = vec![PublishedEndpoint {
-        transport: scheme.clone(),
-        address: address.clone(),
-    }];
+    // own `ServiceEndpoint` (with the open transport token, and — in the
+    // endpoint's open metadata — the CALL MODEL this service speaks and the
+    // CARRIER it is reachable over).
+    let endpoints = vec![PublishedEndpoint::new(&scheme, &address)];
     service.set_endpoints(endpoints);
 
     eprintln!("smart-service: serving the contract on {scheme} at {address}");

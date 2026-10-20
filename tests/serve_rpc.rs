@@ -295,10 +295,10 @@ fn build_service(backend: Arc<MockBackend>) -> Arc<Service> {
         minor: 1,
     });
     let service = service.with_domain(Arc::new(NetworkDomain::new(backend)));
-    service.set_endpoints(vec![PublishedEndpoint {
-        transport: "unix".to_string(),
-        address: "/tmp/smart-lib-rpc-test.sock".to_string(),
-    }]);
+    service.set_endpoints(vec![PublishedEndpoint::new(
+        "unix",
+        "/tmp/smart-lib-rpc-test.sock",
+    )]);
     Arc::new(service)
 }
 
@@ -661,6 +661,65 @@ fn discovery_resolves_a_name_without_failing_when_it_is_unknown() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Read one entry of an open metadata map.
+fn metadata_of(
+    map: Option<smart_lib::schema::types_capnp::string_map::Reader<'_>>,
+    key: &str,
+) -> Option<String> {
+    let map = map?;
+    for entry in map.get_entries().into_iter().flatten() {
+        let entry_key = text(entry.get_key().expect("the key"));
+        if entry_key == key {
+            return Some(text(entry.get_value().expect("the value")));
+        }
+    }
+    None
+}
+
+#[test]
+fn the_discovery_publishes_the_call_model_and_the_carrier() {
+    let backend = Arc::new(MockBackend::default());
+    let service = build_service(Arc::clone(&backend));
+    let path = socket_path();
+
+    let published = run_client(service, &path, CapabilityClass::Control, |session| {
+        let discovery_client: discovery::Client = session.interface();
+        let response = session
+            .run(async move {
+                let mut request = discovery_client.lookup_request();
+                {
+                    let params = request.get();
+                    let mut filter = params.init_filter();
+                    filter.set_name("network");
+                }
+                request.send().promise.await
+            })
+            .expect("the call answers");
+        let results = response.get().expect("the results");
+        let services = results.get_services().expect("the service list");
+        let descriptor = services.get(0);
+        let endpoint = descriptor.get_endpoints().expect("the endpoints").get(0);
+        (
+            metadata_of(descriptor.get_metadata().ok(), "callModel"),
+            metadata_of(endpoint.get_metadata().ok(), "callModel"),
+            metadata_of(endpoint.get_metadata().ok(), "carrier"),
+        )
+    });
+    // The CALL MODEL the service speaks, published in the descriptor's open
+    // metadata — a client reads it before it dials.
+    assert_eq!(
+        published.0.as_deref(),
+        Some(smart_lib::serve::CALL_MODEL),
+        "the descriptor must publish the call model"
+    );
+    // The endpoint publishes the call model AND the carrier: what the
+    // service speaks, and where it answers.
+    assert_eq!(published.1.as_deref(), Some(smart_lib::serve::CALL_MODEL));
+    assert_eq!(published.2.as_deref(), Some("unix"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // The ABI handshake
 // ═══════════════════════════════════════════════════════════════════════
@@ -712,6 +771,79 @@ fn the_abi_handshake_answers_the_schema_intersection() {
 }
 
 #[test]
+fn the_abi_handshake_answers_only_the_schemas_the_caller_declared() {
+    let backend = Arc::new(MockBackend::default());
+    let service = build_service(Arc::clone(&backend));
+    let path = socket_path();
+    let network_schema = smart_lib::domains::network::availability::NETWORK_SCHEMA_ID;
+
+    // The caller declares the schema this service speaks: the intersection
+    // is that schema.
+    let agreed = run_client(Arc::clone(&service), &path, CapabilityClass::Control, move |session| {
+        let abi_client: abi_service::Client = session.interface();
+        let response = session
+            .run(async move {
+                let mut request = abi_client.handshake_request();
+                {
+                    let params = request.get();
+                    let request = params.init_request();
+                    let mut caller = request.init_caller_abi();
+                    caller.set_namespace("smart-protocol");
+                    let mut schemas = caller.init_schema_versions(1);
+                    let mut schema = schemas.reborrow().get(0);
+                    schema.set_id(network_schema);
+                    schema.set_name("smart-protocol/network");
+                }
+                request.send().promise.await
+            })
+            .expect("the call answers");
+        let handshake = response
+            .get()
+            .expect("the results")
+            .get_response()
+            .expect("the response");
+        let matched = matched_arm(handshake);
+        let schemas = matched.get_schema_versions().expect("the schemas");
+        (schemas.len(), schemas.get(0).get_id())
+    });
+    assert_eq!(agreed.0, 1);
+    assert_eq!(agreed.1, network_schema);
+
+    // The caller declares a schema this service does NOT speak: the
+    // intersection is EMPTY. The service never claims an agreement it did
+    // not reach.
+    let foreign = run_client(Arc::clone(&service), &path, CapabilityClass::Control, move |session| {
+        let abi_client: abi_service::Client = session.interface();
+        let response = session
+            .run(async move {
+                let mut request = abi_client.handshake_request();
+                {
+                    let params = request.get();
+                    let request = params.init_request();
+                    let mut caller = request.init_caller_abi();
+                    caller.set_namespace("smart-protocol");
+                    let mut schemas = caller.init_schema_versions(1);
+                    let mut schema = schemas.reborrow().get(0);
+                    schema.set_id(0xdead_beef_dead_beef);
+                    schema.set_name("smart-protocol/something-else");
+                }
+                request.send().promise.await
+            })
+            .expect("the call answers");
+        let handshake = response
+            .get()
+            .expect("the results")
+            .get_response()
+            .expect("the response");
+        let matched = matched_arm(handshake);
+        matched.get_schema_versions().expect("the schemas").len()
+    });
+    assert_eq!(foreign, 0);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn the_abi_handshake_refuses_a_foreign_contract_family_honestly() {
     let backend = Arc::new(MockBackend::default());
     let service = build_service(Arc::clone(&backend));
@@ -743,6 +875,92 @@ fn the_abi_handshake_refuses_a_foreign_contract_family_honestly() {
         code,
         smart_lib::schema::types_capnp::ErrorCode::ProtocolViolation
     );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// The command registry
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn the_registry_publishes_the_method_identity_and_the_schema_tree() {
+    let backend = Arc::new(MockBackend::default());
+    let service = build_service(Arc::clone(&backend));
+    let path = socket_path();
+
+    let published = run_client(service, &path, CapabilityClass::Control, |session| {
+        let cli_client: smart_lib::schema::cli_capnp::cli_service::Client = session.interface();
+        let response = session
+            .run(async move {
+                let mut request = cli_client.list_commands_request();
+                {
+                    let params = request.get();
+                    let mut page = params.init_pagination();
+                    page.set_offset(0);
+                    page.set_limit(1024);
+                }
+                request.send().promise.await
+            })
+            .expect("the call answers");
+        let results = response.get().expect("the results");
+        let commands = results.get_commands().expect("the commands");
+        let registration = commands.get(0);
+        let method_id = metadata_of(registration.get_metadata().ok(), "methodId");
+        let schema = metadata_of(registration.get_metadata().ok(), "capnpSchema");
+        (
+            text(registration.get_command_path().expect("the path")),
+            text(registration.get_interface_name().expect("the interface")),
+            text(registration.get_method_name().expect("the method")),
+            method_id,
+            schema.map(|hex| hex.len()),
+        )
+    });
+
+    // The command the domain published.
+    assert_eq!(published.0, "status");
+    assert_eq!(published.1, "Network");
+    assert_eq!(published.2, "getStatus");
+    // The method's IDENTITY: the ordinal the schema declares, published in
+    // the registration's open metadata. It is the compiler's own number, not
+    // a constant written here.
+    assert_eq!(
+        published.3.as_deref(),
+        Some("1"),
+        "the registration must publish the method's ordinal"
+    );
+    // The schema's node tree: hex, so a client that never compiled the
+    // schema can still address its methods.
+    let tree_len = published.4.expect("the schema tree must be published");
+    assert!(tree_len > 1000, "the schema tree looks empty: {tree_len}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_registry_does_not_execute_commands() {
+    let backend = Arc::new(MockBackend::default());
+    let service = build_service(Arc::clone(&backend));
+    let path = socket_path();
+
+    // The registry is the authority on the SURFACE; it does not run
+    // commands. The refusal names the truth.
+    let refused = run_client(service, &path, CapabilityClass::Control, |session| {
+        let cli_client: smart_lib::schema::cli_capnp::cli_service::Client = session.interface();
+        let response = session
+            .run(async move {
+                let mut request = cli_client.execute_request();
+                {
+                    let params = request.get();
+                    let mut command = params.init_request();
+                    command.set_command("status");
+                }
+                request.send().promise.await
+            });
+        let error = response.err().expect("the call must be refused");
+        error.extra
+    });
+    assert!(refused.contains("notSupported"), "{refused}");
 
     let _ = std::fs::remove_file(&path);
 }

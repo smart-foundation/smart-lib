@@ -45,7 +45,7 @@ use codegen::modules::{DomainModule, SCHEMA_MODULE};
 
 /// Foundation schemas: never feature-gated, always compiled. Their own imports
 /// (`types.capnp` only) are pulled in by `schema_set`.
-const FOUNDATION: [&str; 3] = ["abi.capnp", "capability.capnp", "types.capnp"];
+const FOUNDATION: [&str; 4] = ["abi.capnp", "capability.capnp", "cli.capnp", "types.capnp"];
 
 /// The triad as declared in `Cargo.toml`. One pair of constants so the versions
 /// cannot drift between the dependency line, the failure message and
@@ -66,6 +66,15 @@ const CODEGEN_REQUEST_FILE: &str = "codegeneratorrequest.bin";
 /// method, ordinal, shape flags). Exposed at compile time as
 /// `SMART_LIB_CODEGEN_INVENTORY`.
 const CODEGEN_INVENTORY_FILE: &str = "codegen-inventory.txt";
+
+/// The GENERATED contract table (method ordinals, interface type ids),
+/// derived from the same request. Included by `src/lib.rs`.
+const CONTRACT_FILE: &str = "contract.rs";
+
+/// The per-schema node trees: the contract's own `CodeGeneratorRequest` for
+/// ONE schema, hex-encodable and publishable in a registry's open metadata
+/// so a client that never compiled the schema can still address its methods.
+const SCHEMA_TREE_DIR: &str = "schemas";
 
 fn main() {
     let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR"));
@@ -101,6 +110,8 @@ fn main() {
     codegen::post_process_dir(&out_dir);
     write_modules(&out_dir, &manifest_dir, &files, &enabled_domains, &triad);
     emit_inventory(&out_dir, &files, &enabled_domains, &triad);
+    write_contract(&out_dir, &files);
+    write_schema_trees(&binary, &schema_dir, &out_dir, &files);
 }
 
 /// Read back the raw CodeGeneratorRequest capnpc just consumed, turn it into the
@@ -194,6 +205,76 @@ fn emit_inventory(
 /// True for the always-compiled foundation files.
 fn file_is_foundation(file: &str) -> bool {
     FOUNDATION.contains(&file)
+}
+
+/// Emit `OUT_DIR/contract.rs`: the GENERATED method ordinals and interface
+/// type ids, read from the same `CodeGeneratorRequest` the codegen consumed.
+///
+/// The engine publishes a registry (cli.capnp) whose `CommandRegistration`
+/// names a method but has no field for its ordinal; the ordinal the registry
+/// publishes is the one the compiler declared — never a literal in the
+/// engine's source.
+fn write_contract(out_dir: &Path, files: &[String]) {
+    let request_path = out_dir.join(CODEGEN_REQUEST_FILE);
+    let bytes = std::fs::read(&request_path).unwrap_or_else(|e| {
+        panic!(
+            "build.rs: cannot read the CodeGeneratorRequest at {}: {e}",
+            request_path.display()
+        )
+    });
+    let message = capnp::serialize::read_message(
+        &mut &bytes[..],
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap_or_else(|e| panic!("build.rs: cannot decode the CodeGeneratorRequest: {e}"));
+    let request: capnp::schema_capnp::code_generator_request::Reader<'_> = message
+        .get_root()
+        .unwrap_or_else(|e| panic!("build.rs: no root in the CodeGeneratorRequest: {e}"));
+    let table = codegen::contract::render(&request);
+    std::fs::write(out_dir.join(CONTRACT_FILE), table).unwrap_or_else(|e| {
+        panic!("build.rs: cannot write {CONTRACT_FILE}: {e}");
+    });
+    // The table is only meaningful for the compiled set: a schema that is off
+    // has no entry, and a caller that asks for it gets `None` — never a
+    // guess.
+    let _ = files;
+}
+
+/// Emit `OUT_DIR/schemas/<stem>.schema.bin`: the contract's own node tree for
+/// ONE schema (the `CodeGeneratorRequest` the compiler produces for it).
+///
+/// This is what a service publishes in its registry's open metadata, so a
+/// client that has NEVER compiled the schema can still address its methods:
+/// the tree carries the interface's type id and every method's shapes, and the
+/// registry carries the method's ordinal.
+fn write_schema_trees(binary: &str, schema_dir: &Path, out_dir: &Path, files: &[String]) {
+    let dir = out_dir.join(SCHEMA_TREE_DIR);
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("build.rs: cannot create {}: {e}", dir.display()));
+    for file in files {
+        let stem = codegen::modules::schema_file_to_stem(file);
+        let output = Command::new(binary)
+            .arg("compile")
+            .arg("-o-")
+            .arg("--src-prefix")
+            .arg(schema_dir)
+            .arg("--import-path")
+            .arg(schema_dir)
+            .arg(schema_dir.join(file))
+            .output()
+            .unwrap_or_else(|e| {
+                panic!("build.rs: cannot run `{binary} compile` for {file}: {e}");
+            });
+        if !output.status.success() {
+            panic!(
+                "build.rs: `{binary} compile -o-` failed for {file}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let path = dir.join(format!("{stem}.schema.bin"));
+        std::fs::write(&path, &output.stdout)
+            .unwrap_or_else(|e| panic!("build.rs: cannot write {}: {e}", path.display()));
+    }
 }
 
 /// The request's requested-file set must equal the compiled set, as multisets.

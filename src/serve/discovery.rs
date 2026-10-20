@@ -14,6 +14,22 @@
 //! one). The engine publishes the token its own transport registry answers
 //! to — never a closed enum of paradigms, and never a transport the
 //! registry does not hold.
+//!
+//! # The CALL MODEL and the CARRIER are both published
+//!
+//! The contract's own comment for `ServiceEndpoint.transport` names the CALL
+//! MODEL ("capnp", "rest", "grpc"), while the engine's transport registry is
+//! keyed on the CARRIER ("unix", "tcp"). One field, two vocabularies — so
+//! this engine publishes both, in the contract's open metadata:
+//!
+//! * the descriptor's `metadata` carries `callModel` — what this service
+//!   speaks;
+//! * the endpoint's `metadata` carries `callModel` and `carrier` — what this
+//!   service speaks, and the carrier it answers at.
+//!
+//! A client that does not speak the published call model refuses the endpoint
+//! **with a reason** (never a silent wrong protocol); a client that reads the
+//! carrier knows where to dial.
 
 // The crate is `no_std` (law #1); this module is the std-gated seam.
 extern crate std;
@@ -21,6 +37,7 @@ extern crate std;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use std::sync::Mutex;
@@ -48,6 +65,31 @@ pub struct PublishedEndpoint {
     pub transport: String,
     /// The address in the transport's own vocabulary.
     pub address: String,
+    /// The endpoint's open metadata: the CALL MODEL this service speaks and
+    /// the CARRIER it is reachable over (both contract-legal map entries —
+    /// see [`crate::serve::CALL_MODEL`]).
+    pub metadata: Vec<(String, String)>,
+}
+
+impl PublishedEndpoint {
+    /// An endpoint on a carrier, publishing the call model and the carrier
+    /// in the open metadata.
+    pub fn new(transport: &str, address: &str) -> Self {
+        Self {
+            transport: transport.to_string(),
+            address: address.to_string(),
+            metadata: vec![
+                (
+                    crate::serve::METADATA_CALL_MODEL.to_string(),
+                    crate::serve::CALL_MODEL.to_string(),
+                ),
+                (
+                    crate::serve::METADATA_CARRIER.to_string(),
+                    transport.to_string(),
+                ),
+            ],
+        }
+    }
 }
 
 /// One registered service: the contract's own descriptor.
@@ -65,6 +107,8 @@ pub struct RegisteredService {
     pub state: ServiceState,
     /// The endpoints the service answers at.
     pub endpoints: Vec<PublishedEndpoint>,
+    /// The service's open metadata: the CALL MODEL this service speaks.
+    pub metadata: Vec<(String, String)>,
 }
 
 /// The state a registered service is in (the contract's `ServiceState`).
@@ -125,7 +169,39 @@ impl DiscoveryState {
     /// Publish the endpoints this service is reachable at, and update every
     /// registered service with them (the endpoint is a property of the
     /// service, not of the moment it was registered).
+    ///
+    /// Every published endpoint carries the CALL MODEL this service speaks
+    /// and the CARRIER it answers over, in the endpoint's open metadata — a
+    /// client reads them before it dials, and never has to guess.
     pub fn set_endpoints(&self, endpoints: Vec<PublishedEndpoint>) {
+        let endpoints: Vec<PublishedEndpoint> = endpoints
+            .into_iter()
+            .map(|endpoint| {
+                let mut metadata = endpoint.metadata.clone();
+                if !metadata
+                    .iter()
+                    .any(|(key, _)| key == crate::serve::METADATA_CALL_MODEL)
+                {
+                    metadata.push((
+                        crate::serve::METADATA_CALL_MODEL.to_string(),
+                        crate::serve::CALL_MODEL.to_string(),
+                    ));
+                }
+                if !metadata
+                    .iter()
+                    .any(|(key, _)| key == crate::serve::METADATA_CARRIER)
+                {
+                    metadata.push((
+                        crate::serve::METADATA_CARRIER.to_string(),
+                        endpoint.transport.clone(),
+                    ));
+                }
+                PublishedEndpoint {
+                    metadata,
+                    ..endpoint
+                }
+            })
+            .collect();
         if let Ok(mut guard) = self.endpoints.lock() {
             *guard = endpoints.clone();
         }
@@ -145,6 +221,12 @@ impl DiscoveryState {
             required_capability_ids: domain.required_capability_ids(),
             state: ServiceState::Online,
             endpoints: endpoints.to_vec(),
+            // The CALL MODEL this service speaks, published in the
+            // descriptor's open metadata: a client reads it before it dials.
+            metadata: vec![(
+                crate::serve::METADATA_CALL_MODEL.to_string(),
+                crate::serve::CALL_MODEL.to_string(),
+            )],
         };
         self.register(service);
     }
@@ -194,6 +276,19 @@ impl DiscoveryState {
     }
 }
 
+/// Write an open metadata map (the contract's `T.StringMap`).
+fn write_metadata(
+    entries: &[(String, String)],
+    builder: &mut crate::schema::types_capnp::string_map::Builder<'_>,
+) {
+    let mut map = builder.reborrow().init_entries(entries.len() as u32);
+    for (index, (key, value)) in entries.iter().enumerate() {
+        let mut entry = map.reborrow().get(index as u32);
+        entry.set_key(key);
+        entry.set_value(value);
+    }
+}
+
 /// Write a registered service into the contract's `ServiceDescriptor`.
 fn write_descriptor(
     service: &RegisteredService,
@@ -216,6 +311,7 @@ fn write_descriptor(
         let mut entry = endpoints.reborrow().get(index as u32);
         entry.set_transport(&endpoint.transport);
         entry.set_address(&endpoint.address);
+        write_metadata(&endpoint.metadata, &mut entry.reborrow().init_metadata());
     }
     let mut required = builder
         .reborrow()
@@ -223,6 +319,7 @@ fn write_descriptor(
     for (index, capability) in service.required_capability_ids.iter().enumerate() {
         required.reborrow().get(index as u32).set_id(*capability);
     }
+    write_metadata(&service.metadata, &mut builder.reborrow().init_metadata());
 }
 
 /// Write a service's runtime health, in the contract's own `ServiceHealth`.
@@ -558,6 +655,7 @@ impl discovery_registry::Server for DiscoveryRegistryServer {
                     ContractServiceState::Unknown => ServiceState::Unknown,
                 },
                 endpoints: Vec::new(),
+                metadata: Vec::new(),
             };
             state.register(service);
             results.get().set_success(());
@@ -602,16 +700,15 @@ impl discovery_registry::Server for DiscoveryRegistryServer {
                 let mut updated = Vec::new();
                 for index in 0..endpoints.len() {
                     let endpoint = endpoints.get(index);
-                    updated.push(PublishedEndpoint {
-                        transport: alloc::string::String::from_utf8_lossy(
-                            endpoint.get_transport()?.as_bytes(),
-                        )
-                        .into_owned(),
-                        address: alloc::string::String::from_utf8_lossy(
-                            endpoint.get_address()?.as_bytes(),
-                        )
-                        .into_owned(),
-                    });
+                    let transport = alloc::string::String::from_utf8_lossy(
+                        endpoint.get_transport()?.as_bytes(),
+                    )
+                    .into_owned();
+                    let address = alloc::string::String::from_utf8_lossy(
+                        endpoint.get_address()?.as_bytes(),
+                    )
+                    .into_owned();
+                    updated.push(PublishedEndpoint::new(&transport, &address));
                 }
                 service.endpoints = updated;
             }

@@ -69,6 +69,7 @@ extern crate std;
 
 pub mod abi;
 pub mod capability;
+pub mod cli;
 pub mod discovery;
 pub mod errors;
 pub mod router;
@@ -210,3 +211,29 @@ pub fn text_of(reader: capnp::text::Reader<'_>) -> alloc::string::String {
 pub fn orderly_close() -> crate::transport::channel::CloseReason {
     crate::transport::channel::CloseReason::Shutdown
 }
+
+/// The **call model** this service speaks: the contract's own ("capnp").
+///
+/// `discovery.capnp`'s `ServiceEndpoint.transport` names a transport token,
+/// and its own comment reads "capnp", "rest", "grpc" — that vocabulary is the
+/// CALL MODEL, while the engine's transport registry is keyed on the CARRIER
+/// ("unix", "tcp"). The contract has one field and two vocabularies, so this
+/// engine publishes BOTH, in the contract-legal open metadata:
+///
+/// * the descriptor's `metadata` carries `callModel` — what the service
+///   speaks;
+/// * the endpoint's `metadata` carries `callModel` **and** `carrier` — what
+///   the service speaks, and the carrier it is reachable over.
+///
+/// A client that reads an endpoint whose call model it does not speak refuses
+/// it with a reason (never a silent wrong protocol); a client that reads the
+/// carrier knows where to dial. The founder's ruling on the schema (a
+/// declared `callModel` field, or a redefinition of `transport`) is reported,
+/// not assumed — the schema tree is not edited here.
+pub const CALL_MODEL: &str = "capnp";
+
+/// The metadata key the **call model** is published under.
+pub const METADATA_CALL_MODEL: &str = "callModel";
+
+/// The metadata key the **carrier** (the transport) is published under.
+pub const METADATA_CARRIER: &str = "carrier";

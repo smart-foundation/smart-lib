@@ -153,15 +153,35 @@ impl abi_service::Server for AbiServer {
             }
             // The intersection: the schemas the caller declared that this
             // service actually speaks.
+            //
+            // A caller that declares NOTHING has nothing to intersect: the
+            // answer is then this service's own catalogue (what it speaks),
+            // exactly as `list` answers — never a fabricated agreement. A
+            // caller that DOES declare gets the true intersection: the
+            // schemas both sides speak, and nothing else (abi.capnp: "agree
+            // on an intersection before either commits to a call").
             let supported = state.supported();
+            let declared: Vec<u64> = caller
+                .get_schema_versions()?
+                .iter()
+                .map(|entry| entry.get_id())
+                .collect();
+            let agreed: Vec<&SupportedAbi> = if declared.is_empty() {
+                supported.iter().collect()
+            } else {
+                supported
+                    .iter()
+                    .filter(|entry| declared.contains(&entry.schema_id))
+                    .collect()
+            };
             let mut matched = builder.init_response().init_matched();
             matched.set_namespace(NAMESPACE);
             let mut version = matched.reborrow().init_version();
             version.set_major(MAJOR);
             version.set_minor(MINOR);
             version.set_patch(0);
-            let mut schemas = matched.reborrow().init_schema_versions(supported.len() as u32);
-            for (index, entry) in supported.iter().enumerate() {
+            let mut schemas = matched.reborrow().init_schema_versions(agreed.len() as u32);
+            for (index, entry) in agreed.iter().enumerate() {
                 write_schema(entry, &mut schemas.reborrow().get(index as u32));
             }
             Ok(())

@@ -30,6 +30,7 @@
 
 use std::path::Path;
 
+pub mod contract;
 pub mod inventory;
 pub mod modules;
 
