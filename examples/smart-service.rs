@@ -51,6 +51,36 @@ use smart_lib::serve::network::NetworkDomain;
 #[cfg(feature = "domain-network")]
 use smart_lib::platforms::linux::network::LinuxNetworkBackend;
 
+#[cfg(feature = "domain-files")]
+use smart_lib::serve::files::FilesDomain;
+#[cfg(feature = "domain-files")]
+use smart_lib::platforms::linux::files::LinuxFilesBackend;
+
+#[cfg(feature = "domain-process")]
+use smart_lib::serve::process::ProcessDomain;
+#[cfg(feature = "domain-process")]
+use smart_lib::platforms::linux::process::LinuxProcessBackend;
+
+#[cfg(feature = "domain-settings")]
+use smart_lib::serve::settings::SettingsDomain;
+#[cfg(feature = "domain-settings")]
+use smart_lib::platforms::linux::settings::LinuxSettingsBackend;
+
+#[cfg(feature = "domain-logging")]
+use smart_lib::serve::logging::LoggingDomain;
+#[cfg(feature = "domain-logging")]
+use smart_lib::platforms::linux::logging::LinuxLoggingBackend;
+
+#[cfg(feature = "domain-clock")]
+use smart_lib::serve::clock::ClockDomain;
+#[cfg(feature = "domain-clock")]
+use smart_lib::platforms::linux::clock::LinuxClockBackend;
+
+#[cfg(feature = "domain-time")]
+use smart_lib::serve::time::TimeDomain;
+#[cfg(feature = "domain-time")]
+use smart_lib::platforms::linux::time::LinuxTimeBackend;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let scheme = flag_value(&args, "--transport").unwrap_or_else(|| "unix".to_string());
@@ -168,6 +198,92 @@ fn build_service() -> Service {
         service.abi().publish(SupportedAbi {
             schema_id: domain.service_id(),
             name: "smart-protocol/network".to_string(),
+            major: 0,
+            minor: 1,
+        });
+        service = service.with_domain(domain);
+    }
+
+    // ── The six domains of the S1 batch ─────────────────────────────────
+    //
+    // Each one contributes one line: the backend over the host's own state,
+    // the domain that serves it, and the ABI it is spoken at. The set is
+    // data — the daemon's accept loop, the discovery descriptors, the
+    // registry's command surface and the unavailable list all follow from
+    // it.
+
+    #[cfg(feature = "domain-files")]
+    {
+        let backend = LinuxFilesBackend::new();
+        let domain = Arc::new(FilesDomain::new(Arc::new(backend)));
+        service.abi().publish(SupportedAbi {
+            schema_id: domain.service_id(),
+            name: "smart-protocol/files".to_string(),
+            major: 0,
+            minor: 1,
+        });
+        service = service.with_domain(domain);
+    }
+
+    #[cfg(feature = "domain-process")]
+    {
+        let backend = LinuxProcessBackend::new();
+        let domain = Arc::new(ProcessDomain::new(Arc::new(backend)));
+        service.abi().publish(SupportedAbi {
+            schema_id: domain.service_id(),
+            name: "smart-protocol/process".to_string(),
+            major: 0,
+            minor: 1,
+        });
+        service = service.with_domain(domain);
+    }
+
+    #[cfg(feature = "domain-settings")]
+    {
+        let backend = LinuxSettingsBackend::new();
+        let domain = Arc::new(SettingsDomain::new(Arc::new(backend)));
+        service.abi().publish(SupportedAbi {
+            schema_id: domain.service_id(),
+            name: "smart-protocol/settings".to_string(),
+            major: 0,
+            minor: 1,
+        });
+        service = service.with_domain(domain);
+    }
+
+    #[cfg(feature = "domain-logging")]
+    {
+        let backend = LinuxLoggingBackend::new();
+        let domain = Arc::new(LoggingDomain::new(Arc::new(backend)));
+        service.abi().publish(SupportedAbi {
+            schema_id: domain.service_id(),
+            name: "smart-protocol/logging".to_string(),
+            major: 0,
+            minor: 1,
+        });
+        service = service.with_domain(domain);
+    }
+
+    #[cfg(feature = "domain-clock")]
+    {
+        let backend = LinuxClockBackend::new();
+        let domain = Arc::new(ClockDomain::new(Arc::new(backend)));
+        service.abi().publish(SupportedAbi {
+            schema_id: domain.service_id(),
+            name: "smart-protocol/clock".to_string(),
+            major: 0,
+            minor: 1,
+        });
+        service = service.with_domain(domain);
+    }
+
+    #[cfg(feature = "domain-time")]
+    {
+        let backend = LinuxTimeBackend::new();
+        let domain = Arc::new(TimeDomain::new(Arc::new(backend)));
+        service.abi().publish(SupportedAbi {
+            schema_id: domain.service_id(),
+            name: "smart-protocol/time".to_string(),
             major: 0,
             minor: 1,
         });

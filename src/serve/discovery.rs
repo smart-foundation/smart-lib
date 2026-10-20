@@ -214,19 +214,33 @@ impl DiscoveryState {
 
     /// Register a served domain's descriptor.
     pub fn register_domain(&self, domain: &dyn ServedDomain, endpoints: &[PublishedEndpoint]) {
+        let mut metadata = vec![(
+            crate::serve::METADATA_CALL_MODEL.to_string(),
+            crate::serve::CALL_MODEL.to_string(),
+        )];
+        // The domain's own capability tokens, in the open metadata where an
+        // open vocabulary belongs (the contract's `requiredCapabilityIds`
+        // carries opaque numeric handles, not words).
+        let tokens = domain.capability_tokens();
+        if !tokens.is_empty() {
+            metadata.push((
+                crate::serve::METADATA_CAPABILITIES.to_string(),
+                tokens.join(", "),
+            ));
+        }
         let service = RegisteredService {
             id: domain.service_id(),
             name: domain.name().to_string(),
             category: domain.category().to_string(),
             required_capability_ids: domain.required_capability_ids(),
-            state: ServiceState::Online,
+            // The state is the DOMAIN'S OWN: a service that cannot answer
+            // part of its contract is `degraded`, and the missing part is
+            // named in the registry.
+            state: domain.state(),
             endpoints: endpoints.to_vec(),
             // The CALL MODEL this service speaks, published in the
             // descriptor's open metadata: a client reads it before it dials.
-            metadata: vec![(
-                crate::serve::METADATA_CALL_MODEL.to_string(),
-                crate::serve::CALL_MODEL.to_string(),
-            )],
+            metadata,
         };
         self.register(service);
     }

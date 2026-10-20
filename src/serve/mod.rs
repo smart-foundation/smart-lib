@@ -68,6 +68,7 @@
 extern crate std;
 
 pub mod abi;
+pub mod availability;
 pub mod capability;
 pub mod cli;
 pub mod discovery;
@@ -76,8 +77,20 @@ pub mod router;
 pub mod service;
 pub mod stream;
 
+#[cfg(feature = "domain-clock")]
+pub mod clock;
+#[cfg(feature = "domain-files")]
+pub mod files;
+#[cfg(feature = "domain-logging")]
+pub mod logging;
 #[cfg(feature = "domain-network")]
 pub mod network;
+#[cfg(feature = "domain-process")]
+pub mod process;
+#[cfg(feature = "domain-settings")]
+pub mod settings;
+#[cfg(feature = "domain-time")]
+pub mod time;
 
 pub use router::{InterfaceRouter, Route};
 pub use service::{ClientSession, ServeError, ServedDomain, Service};
@@ -237,3 +250,11 @@ pub const METADATA_CALL_MODEL: &str = "callModel";
 
 /// The metadata key the **carrier** (the transport) is published under.
 pub const METADATA_CARRIER: &str = "carrier";
+
+/// The metadata key the **domain's own capability tokens** are published
+/// under, in the discovery descriptor's open metadata.
+///
+/// The contract's `requiredCapabilityIds` is a list of opaque numeric
+/// `T.CapabilityHandle`s; a domain's capabilities are an open vocabulary of
+/// words, so the words travel here.
+pub const METADATA_CAPABILITIES: &str = "capabilities";

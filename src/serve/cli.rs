@@ -26,6 +26,9 @@
 //! |---|---|
 //! | `methodId` | the method's capnp ordinal, decimal text |
 //! | `capnpSchema` | the schema's node tree (the contract's own `CodeGeneratorRequest`), hex |
+//! | `reason` | why the command cannot run: the engine's own reason class and words |
+//! | `degraded` | the named degraded capability, when the command answers but not completely |
+//! | `composes` | the other contract methods one verb composes, comma separated |
 //!
 //! The schema's tree is identical for every command of that schema, so a
 //! service publishes it ONCE per schema (on the first registration of that
@@ -79,8 +82,19 @@ pub struct PublishedCommand {
     pub domain: String,
     /// The one-line summary.
     pub summary: String,
-    /// Why the command cannot run right now, when it cannot.
+    /// The sort key within the domain (lower sorts first).
+    pub order: u32,
+    /// Whether a bare invocation (no arguments) is meaningful.
+    pub no_args_valid: bool,
+    /// Why the command cannot run right now, when it cannot: the contract's
+    /// own `AvailabilityReason` and the domain's own reason.
     pub unavailable: Option<(AvailabilityReason, String)>,
+    /// The named degraded capability, when the command answers but not
+    /// completely.
+    pub degraded: Option<String>,
+    /// The registration's open metadata: the other contract methods one verb
+    /// composes, and whatever else the domain publishes about it.
+    pub metadata: Vec<(String, String)>,
 }
 
 /// The registry state: the commands this host publishes.
@@ -218,9 +232,12 @@ fn write_registration(
         let mut presentation = builder.reborrow().init_presentation();
         presentation.set_domain(&command.domain);
         presentation.set_summary(&command.summary);
+        presentation.set_order(command.order);
+        presentation.set_no_args_valid(command.no_args_valid);
     }
     // The metadata: the method's identity and the schema's node tree — the
-    // two things the contract's registration does not carry.
+    // two things the contract's registration does not carry — plus the
+    // domain's own words about this command.
     let mut metadata = Vec::new();
     if let Some(stem) = stem_for(command.schema_id, &command.interface) {
         if let Some(ordinal) = crate::contract::method_id(stem, &command.interface, &command.method) {
@@ -235,6 +252,12 @@ fn write_registration(
     }
     if !detail.is_empty() {
         metadata.push(("reason".to_string(), detail));
+    }
+    if let Some(degraded) = &command.degraded {
+        metadata.push(("degraded".to_string(), degraded.clone()));
+    }
+    for (key, value) in &command.metadata {
+        metadata.push((key.clone(), value.clone()));
     }
     write_metadata(&metadata, &mut builder.reborrow().init_metadata());
 }
@@ -371,21 +394,28 @@ impl cli_service::Server for CliServer {
             syntax.set_grammar(&grammar);
             syntax.reborrow().init_version().set_major(0);
             syntax.reborrow().init_version().set_minor(1);
-            // The domains the grammar covers, with their command counts.
-            let mut domains: Vec<(String, usize)> = Vec::new();
+            // The domains the grammar covers, with their command counts — and
+            // how many of them cannot run right now, so a client that knows
+            // a domain is missing can say so.
+            let mut domains: Vec<(String, usize, usize)> = Vec::new();
             for command in &view.commands {
-                match domains.iter_mut().find(|(id, _)| *id == command.domain) {
-                    Some(entry) => entry.1 += 1,
-                    None => domains.push((command.domain.clone(), 1)),
+                let unavailable = usize::from(command.unavailable.is_some());
+                match domains.iter_mut().find(|(id, _, _)| *id == command.domain) {
+                    Some(entry) => {
+                        entry.1 += 1;
+                        entry.2 += unavailable;
+                    }
+                    None => domains.push((command.domain.clone(), 1, unavailable)),
                 }
             }
             let mut list = syntax.reborrow().init_domains(domains.len() as u32);
-            for (index, (id, count)) in domains.iter().enumerate() {
+            for (index, (id, count, unavailable)) in domains.iter().enumerate() {
                 let mut entry = list.reborrow().get(index as u32);
                 entry.set_id(id);
                 entry.set_label(id);
                 entry.set_description("the commands this service publishes for it");
                 entry.set_command_count(*count as u32);
+                entry.set_unavailable_count(*unavailable as u32);
             }
             Ok(())
         }

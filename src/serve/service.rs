@@ -49,6 +49,10 @@ use super::CapabilityClass;
 
 /// One command a domain publishes through the registry (cli.capnp's
 /// `CommandRegistration`, minus what the engine fills in).
+///
+/// The presentation fields are the contract's own `CommandPresentation`
+/// (`domain`, `summary`, `order`, `noArgsValid`), and the availability is
+/// the domain's **own** matrix row — the registry never invents a reason.
 #[derive(Clone, Debug)]
 pub struct DomainCommand {
     /// The path the user types ("net status").
@@ -59,6 +63,82 @@ pub struct DomainCommand {
     pub method: &'static str,
     /// The one-line summary the registry publishes.
     pub summary: &'static str,
+    /// The sort key within the domain (lower sorts first).
+    pub order: u32,
+    /// Whether a bare invocation (no arguments) is meaningful.
+    pub no_args_valid: bool,
+    /// Why the command cannot run right now, when it cannot: the matrix's
+    /// reason class token and the row's own words.
+    pub unavailable: Option<(&'static str, &'static str)>,
+    /// The named degraded capability, when the row is `DEGRADED`: the command
+    /// still answers, but not completely.
+    pub degraded: Option<&'static str>,
+    /// The registration's open metadata: the other contract methods one verb
+    /// composes, under the stable `composes` key.
+    pub metadata: Vec<(&'static str, &'static str)>,
+}
+
+impl DomainCommand {
+    /// A command that answers, with the domain's own matrix row deciding
+    /// whether it is available, degraded, or unavailable.
+    pub fn new(
+        path: &'static str,
+        interface: &'static str,
+        method: &'static str,
+        summary: &'static str,
+        order: u32,
+        no_args_valid: bool,
+    ) -> Self {
+        Self {
+            path,
+            interface,
+            method,
+            summary,
+            order,
+            no_args_valid,
+            unavailable: None,
+            degraded: None,
+            metadata: Vec::new(),
+        }
+    }
+
+    /// The command, with the other contract methods the verb composes listed
+    /// under the stable `composes` key.
+    pub fn composing(
+        path: &'static str,
+        interface: &'static str,
+        method: &'static str,
+        summary: &'static str,
+        order: u32,
+        no_args_valid: bool,
+        composes: &'static str,
+    ) -> Self {
+        Self {
+            path,
+            interface,
+            method,
+            summary,
+            order,
+            no_args_valid,
+            unavailable: None,
+            degraded: None,
+            metadata: alloc::vec![("composes", composes)],
+        }
+    }
+
+    /// The command, with the domain's **own** availability row deciding
+    /// whether it can run, and what it is missing.
+    ///
+    /// The row is the engine's, read from the domain's availability matrix:
+    /// the registry never invents a reason, and never publishes a command
+    /// as available that the engine cannot answer.
+    pub fn with_row(mut self, row: Option<super::availability::MatrixRow>) -> Self {
+        if let Some(row) = row {
+            self.unavailable = row.unavailable_class();
+            self.degraded = row.degraded();
+        }
+        self
+    }
 }
 
 /// A domain this service serves over the contract's own call model.
@@ -87,12 +167,35 @@ pub trait ServedDomain {
         Vec::new()
     }
 
+    /// The domain's own capability tokens (law #6), published in the
+    /// discovery descriptor's open metadata.
+    ///
+    /// The contract's `requiredCapabilityIds` is a list of opaque
+    /// `T.CapabilityHandle`s — numbers — while a domain's tokens are an open
+    /// vocabulary of words. The numeric field therefore carries only the
+    /// handles the engine really holds (the connection's class, published
+    /// through the capability service), and the tokens travel in the
+    /// descriptor's open metadata, where an open vocabulary belongs.
+    fn capability_tokens(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// The commands this domain publishes through the registry
     /// (cli.capnp). The engine publishes them by NAME; the ordinal and the
     /// schema's node tree are resolved from the generated contract table and
     /// the schema tree, never written by hand.
     fn commands(&self) -> Vec<DomainCommand> {
         Vec::new()
+    }
+
+    /// The state this service is in, as the contract's `ServiceState`.
+    ///
+    /// The default is `Online`: a domain that serves its whole surface.
+    /// A domain that answers `notSupported` for part of its matrix is
+    /// `Degraded` — it serves most of the surface, and the missing part is
+    /// named in the registry.
+    fn state(&self) -> super::discovery::ServiceState {
+        super::discovery::ServiceState::Online
     }
 
     /// This domain's schema node tree (the contract's own
@@ -141,6 +244,20 @@ impl Service {
         self.discovery
             .register_domain(domain.as_ref(), &self.discovery_endpoints());
         for command in domain.commands() {
+            // The availability is the DOMAIN'S OWN matrix row: the class
+            // token maps onto the contract's `AvailabilityReason`, and the
+            // row's words ride the registration's open metadata.
+            let unavailable = command.unavailable.map(|(class, reason)| {
+                (
+                    super::availability::reason_for(class),
+                    super::availability::detail(class, reason),
+                )
+            });
+            let metadata = command
+                .metadata
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
             self.registry.publish(super::cli::PublishedCommand {
                 path: command.path.to_string(),
                 schema_id: domain.service_id(),
@@ -148,7 +265,11 @@ impl Service {
                 method: command.method.to_string(),
                 domain: domain.name().to_string(),
                 summary: command.summary.to_string(),
-                unavailable: None,
+                order: command.order,
+                no_args_valid: command.no_args_valid,
+                unavailable,
+                degraded: command.degraded.map(|reason| reason.to_string()),
+                metadata,
             });
         }
         if let Some(tree) = domain.schema_tree() {

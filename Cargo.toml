@@ -41,7 +41,18 @@ path = "src/lib.rs"
 # non-default feature sets fail to compile the example target.
 [[example]]
 name = "smart-service"
-required-features = ["rpc", "domain-network", "domain-discovery", "std"]
+required-features = [
+  "rpc",
+  "domain-network",
+  "domain-discovery",
+  "domain-files",
+  "domain-process",
+  "domain-settings",
+  "domain-logging",
+  "domain-clock",
+  "domain-time",
+  "std",
+]
 
 # The founder's privileged exact state read for the runit service cell (the
 # physical limit: /run/runit/supervise.<name>/stat is root-only on this host,
@@ -61,7 +72,7 @@ required-features = ["domain-network", "std"]
 # The default set is deliberately NOT "everything": charter law #2 exists to stop
 # the old all-domains-at-once build. An application enables the domains it uses;
 # `--all-features` is reserved for a build-graph integrity check.
-default = ["std", "rpc", "domain-files", "domain-network", "domain-discovery", "domain-audio", "domain-system"]
+default = ["std", "rpc", "domain-files", "domain-network", "domain-discovery", "domain-audio", "domain-system", "domain-process", "domain-settings", "domain-logging", "domain-clock", "domain-time"]
 
 # ─── std ────────────────────────────────────────────────────────────────
 # Opt-in widening only. The core stays no_std + alloc (law #1); `std` turns on
