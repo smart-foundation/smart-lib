@@ -45,6 +45,18 @@ pub enum NetworkAction {
     Interfaces,
     /// The observable radio states (enabled, hard-blocked, soft-blocked).
     Radios,
+    /// The host's routing table (kernel RTM_GETROUTE).
+    Routes,
+    /// Per-interface byte/packet/error/drop counters.
+    Counters { name: String },
+    /// The host's proxy configuration (/etc/environment).
+    Proxy,
+    /// Enable the host networking master switch (gated).
+    On,
+    /// Disable the host networking master switch (gated).
+    Off,
+    /// Mobile data + roaming state.
+    Mobile,
     /// One interface: its type and why it is (or is not) usable.
     Interface {
         name: String,
@@ -208,6 +220,70 @@ fn evaluate_network(
             Ok(Value::List(
                 radios.items.iter().map(render::radio_value).collect(),
             ))
+        }
+        Some(NetworkAction::Routes) => {
+            let routes = backend.get_routes(all)?;
+            Ok(Value::List(routes.items.iter().map(|r| Value::Object(vec![
+                ("destination".into(), Value::String(r.destination_cidr.clone())),
+                ("gateway".into(), Value::String(r.gateway.clone())),
+                ("metric".into(), Value::Number(r.metric as f64)),
+                ("interface_id".into(), Value::Number(r.interface_id.get() as f64)),
+            ])).collect()))
+        }
+        Some(NetworkAction::Counters { name }) => {
+            let interfaces = backend.get_interfaces(all)?;
+            let Some(iface) = interfaces.items.iter().find(|i| i.name == *name) else {
+                return Err(SmartError::NotFound(format!("no interface named {name}")));
+            };
+            let c = backend.get_counters(iface.id, smart_lib::core::values::Duration::from_nanos(0))?;
+            Ok(Value::Object(vec![
+                ("interface".into(), Value::String(name.clone())),
+                ("bytes_in".into(), Value::Number(c.bytes_in as f64)),
+                ("bytes_out".into(), Value::Number(c.bytes_out as f64)),
+                ("packets_in".into(), Value::Number(c.packets_in as f64)),
+                ("packets_out".into(), Value::Number(c.packets_out as f64)),
+                ("errors_in".into(), Value::Number(c.errors_in as f64)),
+                ("errors_out".into(), Value::Number(c.errors_out as f64)),
+                ("drops_in".into(), Value::Number(c.drops_in as f64)),
+                ("drops_out".into(), Value::Number(c.drops_out as f64)),
+            ]))
+        }
+        Some(NetworkAction::Proxy) => {
+            let p = backend.get_proxy_config()?;
+            Ok(Value::Object(vec![
+                ("enabled".into(), Value::Bool(p.enabled)),
+                ("url".into(), Value::String(p.url.clone())),
+                ("bypass".into(), Value::List(p.bypass.iter().map(|(k,v)| Value::Object(vec![
+                    ("key".into(), Value::String(k.clone())),
+                    ("value".into(), Value::String(v.clone())),
+                ])).collect())),
+            ]))
+        }
+        Some(NetworkAction::On) => {
+            if !guard.allowed {
+                return Err(SmartError::not_supported(
+                    "network on: a host-mutating verb — run with --force or confirm in the REPL".to_string(),
+                ));
+            }
+            backend.set_networking_enabled(true)?;
+            Ok(Value::String("networking enabled".into()))
+        }
+        Some(NetworkAction::Off) => {
+            if !guard.allowed {
+                return Err(SmartError::not_supported(
+                    "network off: a host-mutating verb — run with --force or confirm in the REPL".to_string(),
+                ));
+            }
+            backend.set_networking_enabled(false)?;
+            Ok(Value::String("networking disabled".into()))
+        }
+        Some(NetworkAction::Mobile) => {
+            let md = backend.is_mobile_data_enabled()?;
+            let dr = backend.is_data_roaming_enabled()?;
+            Ok(Value::Object(vec![
+                ("mobile_data".into(), Value::Bool(md)),
+                ("data_roaming".into(), Value::Bool(dr)),
+            ]))
         }
         Some(NetworkAction::Interface { name, state }) => {
             let interfaces = backend.get_interfaces(all)?;

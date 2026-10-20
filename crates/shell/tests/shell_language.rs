@@ -233,20 +233,21 @@ fn a_host_write_is_refused_without_acceptance() {
 fn an_unmigrated_domain_answers_from_the_queue() {
     let mut sh = shell();
     // The domain commands answer the honest pending reason and touch no
-    // engine seam. (clipboard is real now, so audio is the pending example.)
+    // engine seam. (the batch-6 six are real now, so window is the pending
+    // example.)
     assert!(matches!(
-        sh.exec_cmd(&Shell::parse("audio")).unwrap(),
+        sh.exec_cmd(&Shell::parse("window foo")).unwrap(),
         Value::Null
     ));
     assert!(matches!(
-        sh.exec_cmd(&Shell::parse("media volume 75")).unwrap(),
+        sh.exec_cmd(&Shell::parse("package list")).unwrap(),
         Value::Null
     ));
     // The selector surface answers the same way.
-    let err = sh.exec_cmd(&Shell::parse("@audio/volume")).unwrap_err();
+    let err = sh.exec_cmd(&Shell::parse("@window/tree")).unwrap_err();
     assert!(
         err.to_string().contains("migration pending")
-            && err.to_string().contains("platforms/linux/audio.rs"),
+            && err.to_string().contains("platforms/linux/window.rs"),
         "the honest answer names the archive body: {err}"
     );
 }

@@ -99,13 +99,14 @@ fn the_status_section_carries_the_four_state_hoststate() {
 #[test]
 fn a_still_queued_selector_answers_from_the_queue() {
     let backend = host();
-    // A domain that is still queued (audio) is answered from the migration
-    // queue's archive note — clipboard is real now, so it is no longer the
+    // A domain that is still queued (window) is answered from the migration
+    // queue's archive note — the batch-6 six (database, queue, appindex,
+    // manifest, vcard, content) are real now, so they are no longer the
     // example of an honest pending answer.
-    let err = evaluate(&parse("@audio/volume").unwrap(), &backend).unwrap_err();
+    let err = evaluate(&parse("@window/tree").unwrap(), &backend).unwrap_err();
     assert!(
         err.to_string().contains("migration pending")
-            && err.to_string().contains("platforms/linux/audio.rs"),
+            && err.to_string().contains("platforms/linux/window.rs"),
         "the selector's honest answer names the archive body: {err}"
     );
     // And the engine was never asked for it.

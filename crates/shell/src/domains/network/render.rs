@@ -510,6 +510,7 @@ fn render_human(cmd: &super::NetworkCmd, value: &Value) -> String {
                 format!("  {} {} — {}", "✓".green(), verb.green(), result)
             }
         },
+        _ => value.display(),
     }
 }
 

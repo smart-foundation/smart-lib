@@ -101,6 +101,15 @@ const LIVE_DOMAIN_GLOSS: &[(&str, &str)] = &[
     ("logging", "the host's sinks and logs: sinks/domains/tail/entries/follow"),
     ("clock", "clocks, timerfds and alarms — the session's ledger keeps them live"),
     ("time", "wall time, TAI, the contract's calendars and their arithmetic"),
+    ("audio", "the host's sinks, sources and streams (writes gated)"),
+    ("media", "the session's MPRIS players (writes gated)"),
+    ("power", "the host's battery and profiles (writes gated)"),
+    ("database", "the engine's namespaced key/value store (writes gated)"),
+    ("queue", "the engine's FIFO store (writes gated)"),
+    ("appindex", "the host's desktop-entry corpus: list, search, stats"),
+    ("manifest", "the engine's manifest store: resolve, validate (writes gated)"),
+    ("vcard", "RFC 6350 cards: parse, format, import, export (writes gated)"),
+    ("content", "the engine's content store: query, get (writes gated)"),
 ];
 
 #[derive(Debug, Clone)]
@@ -213,6 +222,30 @@ pub struct Shell {
     clock_backend: Option<Box<crate::domains::clock::Backend>>,
     #[cfg(feature = "domain-time")]
     time_backend: Option<Box<crate::domains::time::Backend>>,
+    #[cfg(feature = "domain-audio")]
+    audio_backend: Option<Box<crate::domains::audio::Backend>>,
+    #[cfg(feature = "domain-media")]
+    media_backend: Option<Box<crate::domains::media::Backend>>,
+    #[cfg(feature = "domain-power")]
+    power_backend: Option<Box<crate::domains::power::Backend>>,
+    // ── the Batch 6 six ───────────────────────────────────────────────────
+    // The engine's own stores: the namespaced key/value store, the FIFO, the
+    // desktop-entry index, the manifest store, the vCard store and the content
+    // store. They live in the engine's process memory, so the session keeps
+    // ONE backend per domain — a write a line makes is a read the next line
+    // can see.
+    #[cfg(feature = "domain-database")]
+    database_backend: Option<Box<crate::domains::database::Backend>>,
+    #[cfg(feature = "domain-queue")]
+    queue_backend: Option<Box<crate::domains::queue::Backend>>,
+    #[cfg(feature = "domain-appindex")]
+    appindex_backend: Option<Box<crate::domains::appindex::Backend>>,
+    #[cfg(feature = "domain-manifest")]
+    manifest_backend: Option<Box<crate::domains::manifest::Backend>>,
+    #[cfg(feature = "domain-vcard")]
+    vcard_backend: Option<Box<crate::domains::vcard::Backend>>,
+    #[cfg(feature = "domain-content")]
+    content_backend: Option<Box<crate::domains::content::Backend>>,
 }
 
 impl Shell {
@@ -240,6 +273,24 @@ impl Shell {
             clock_backend: None,
             #[cfg(feature = "domain-time")]
             time_backend: None,
+            #[cfg(feature = "domain-audio")]
+            audio_backend: None,
+            #[cfg(feature = "domain-media")]
+            media_backend: None,
+            #[cfg(feature = "domain-power")]
+            power_backend: None,
+            #[cfg(feature = "domain-database")]
+            database_backend: None,
+            #[cfg(feature = "domain-queue")]
+            queue_backend: None,
+            #[cfg(feature = "domain-appindex")]
+            appindex_backend: None,
+            #[cfg(feature = "domain-manifest")]
+            manifest_backend: None,
+            #[cfg(feature = "domain-vcard")]
+            vcard_backend: None,
+            #[cfg(feature = "domain-content")]
+            content_backend: None,
         }
     }
 
@@ -393,6 +444,164 @@ impl Shell {
         self.time_backend = Some(backend);
     }
 
+    /// The session's audio backend, built once.
+    #[cfg(feature = "domain-audio")]
+    pub fn audio(&mut self) -> &crate::domains::audio::Backend {
+        let built = self.audio_backend.is_none() as u64;
+        self.session.note_read("audio", built);
+        if self.audio_backend.is_none() {
+            self.audio_backend = Some(Box::new(
+                smart_lib::platforms::linux::audio::LinuxAudioBackend::new(),
+            ) as Box<crate::domains::audio::Backend>);
+        }
+        self.audio_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-audio")]
+    pub fn set_audio(&mut self, backend: Box<crate::domains::audio::Backend>) {
+        self.audio_backend = Some(backend);
+    }
+
+    /// The session's media backend, built once.
+    #[cfg(feature = "domain-media")]
+    pub fn media(&mut self) -> &crate::domains::media::Backend {
+        let built = self.media_backend.is_none() as u64;
+        self.session.note_read("media", built);
+        if self.media_backend.is_none() {
+            self.media_backend = Some(Box::new(
+                smart_lib::platforms::linux::media::LinuxMediaBackend::new(),
+            ) as Box<crate::domains::media::Backend>);
+        }
+        self.media_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-media")]
+    pub fn set_media(&mut self, backend: Box<crate::domains::media::Backend>) {
+        self.media_backend = Some(backend);
+    }
+
+    /// The session's power backend, built once.
+    #[cfg(feature = "domain-power")]
+    pub fn power(&mut self) -> &crate::domains::power::Backend {
+        let built = self.power_backend.is_none() as u64;
+        self.session.note_read("power", built);
+        if self.power_backend.is_none() {
+            self.power_backend = Some(Box::new(
+                smart_lib::platforms::linux::power::LinuxPowerBackend::new(),
+            ) as Box<crate::domains::power::Backend>);
+        }
+        self.power_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-power")]
+    pub fn set_power(&mut self, backend: Box<crate::domains::power::Backend>) {
+        self.power_backend = Some(backend);
+    }
+
+    /// The session's database backend, built once: the engine's own
+    /// namespaced key/value store, which lives in this process's memory.
+    #[cfg(feature = "domain-database")]
+    pub fn database(&mut self) -> &crate::domains::database::Backend {
+        let built = self.database_backend.is_none() as u64;
+        self.session.note_read("database", built);
+        if self.database_backend.is_none() {
+            self.database_backend = Some(Box::new(
+                smart_lib::platforms::linux::database::LinuxDatabaseBackend::new(),
+            ) as Box<crate::domains::database::Backend>);
+        }
+        self.database_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-database")]
+    pub fn set_database(&mut self, backend: Box<crate::domains::database::Backend>) {
+        self.database_backend = Some(backend);
+    }
+
+    /// The session's queue backend, built once: the engine's own FIFO store.
+    #[cfg(feature = "domain-queue")]
+    pub fn queue(&mut self) -> &crate::domains::queue::Backend {
+        let built = self.queue_backend.is_none() as u64;
+        self.session.note_read("queue", built);
+        if self.queue_backend.is_none() {
+            self.queue_backend = Some(Box::new(
+                smart_lib::platforms::linux::queue::LinuxQueueBackend::new(),
+            ) as Box<crate::domains::queue::Backend>);
+        }
+        self.queue_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-queue")]
+    pub fn set_queue(&mut self, backend: Box<crate::domains::queue::Backend>) {
+        self.queue_backend = Some(backend);
+    }
+
+    /// The session's appindex backend, built once: the host's own
+    /// freedesktop desktop-entry corpus, read natively.
+    #[cfg(feature = "domain-appindex")]
+    pub fn appindex(&mut self) -> &crate::domains::appindex::Backend {
+        let built = self.appindex_backend.is_none() as u64;
+        self.session.note_read("appindex", built);
+        if self.appindex_backend.is_none() {
+            self.appindex_backend = Some(Box::new(
+                smart_lib::platforms::linux::appindex::LinuxAppindexBackend::new(),
+            ) as Box<crate::domains::appindex::Backend>);
+        }
+        self.appindex_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-appindex")]
+    pub fn set_appindex(&mut self, backend: Box<crate::domains::appindex::Backend>) {
+        self.appindex_backend = Some(backend);
+    }
+
+    /// The session's manifest backend, built once: the engine's own manifest
+    /// store.
+    #[cfg(feature = "domain-manifest")]
+    pub fn manifest(&mut self) -> &crate::domains::manifest::Backend {
+        let built = self.manifest_backend.is_none() as u64;
+        self.session.note_read("manifest", built);
+        if self.manifest_backend.is_none() {
+            self.manifest_backend = Some(Box::new(
+                smart_lib::platforms::linux::manifest::LinuxManifestBackend::new(),
+            ) as Box<crate::domains::manifest::Backend>);
+        }
+        self.manifest_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-manifest")]
+    pub fn set_manifest(&mut self, backend: Box<crate::domains::manifest::Backend>) {
+        self.manifest_backend = Some(backend);
+    }
+
+    /// The session's vcard backend, built once: the engine's own RFC 6350
+    /// parser, formatter and contact store.
+    #[cfg(feature = "domain-vcard")]
+    pub fn vcard(&mut self) -> &crate::domains::vcard::Backend {
+        let built = self.vcard_backend.is_none() as u64;
+        self.session.note_read("vcard", built);
+        if self.vcard_backend.is_none() {
+            self.vcard_backend = Some(Box::new(
+                smart_lib::platforms::linux::vcard::LinuxVcardBackend::new(),
+            ) as Box<crate::domains::vcard::Backend>);
+        }
+        self.vcard_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-vcard")]
+    pub fn set_vcard(&mut self, backend: Box<crate::domains::vcard::Backend>) {
+        self.vcard_backend = Some(backend);
+    }
+
+    /// The session's content backend, built once: the engine's own content
+    /// store.
+    #[cfg(feature = "domain-content")]
+    pub fn content(&mut self) -> &crate::domains::content::Backend {
+        let built = self.content_backend.is_none() as u64;
+        self.session.note_read("content", built);
+        if self.content_backend.is_none() {
+            self.content_backend = Some(Box::new(
+                smart_lib::platforms::linux::content::LinuxContentBackend::new(),
+            ) as Box<crate::domains::content::Backend>);
+        }
+        self.content_backend.as_deref().expect("built just above")
+    }
+    #[cfg(feature = "domain-content")]
+    pub fn set_content(&mut self, backend: Box<crate::domains::content::Backend>) {
+        self.content_backend = Some(backend);
+    }
+
     /// Build the shell with an explicitly-connected clipboard backend (the live
     /// X11/Wayland selection path when the host has a seat). Network is carried
     /// the same way as [`Shell::new`].
@@ -423,6 +632,24 @@ impl Shell {
             clock_backend: None,
             #[cfg(feature = "domain-time")]
             time_backend: None,
+            #[cfg(feature = "domain-audio")]
+            audio_backend: None,
+            #[cfg(feature = "domain-media")]
+            media_backend: None,
+            #[cfg(feature = "domain-power")]
+            power_backend: None,
+            #[cfg(feature = "domain-database")]
+            database_backend: None,
+            #[cfg(feature = "domain-queue")]
+            queue_backend: None,
+            #[cfg(feature = "domain-appindex")]
+            appindex_backend: None,
+            #[cfg(feature = "domain-manifest")]
+            manifest_backend: None,
+            #[cfg(feature = "domain-vcard")]
+            vcard_backend: None,
+            #[cfg(feature = "domain-content")]
+            content_backend: None,
         }
     }
 
@@ -517,6 +744,70 @@ impl Shell {
                         &sel,
                     ));
                 }
+
+                #[cfg(feature = "domain-audio")]
+                if domain == "audio" {
+                    return Ok(selector::resolve(
+                        crate::domains::audio::selector_root(self.audio())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-media")]
+                if domain == "media" {
+                    return Ok(selector::resolve(
+                        crate::domains::media::selector_root(self.media())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-power")]
+                if domain == "power" {
+                    return Ok(selector::resolve(
+                        crate::domains::power::selector_root(self.power())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-database")]
+                if domain == "database" {
+                    return Ok(selector::resolve(
+                        crate::domains::database::selector_root(self.database())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-queue")]
+                if domain == "queue" {
+                    return Ok(selector::resolve(
+                        crate::domains::queue::selector_root(self.queue())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-appindex")]
+                if domain == "appindex" {
+                    return Ok(selector::resolve(
+                        crate::domains::appindex::selector_root(self.appindex())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-manifest")]
+                if domain == "manifest" {
+                    return Ok(selector::resolve(
+                        crate::domains::manifest::selector_root(self.manifest())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-vcard")]
+                if domain == "vcard" {
+                    return Ok(selector::resolve(
+                        crate::domains::vcard::selector_root(self.vcard())?,
+                        &sel,
+                    ));
+                }
+                #[cfg(feature = "domain-content")]
+                if domain == "content" {
+                    return Ok(selector::resolve(
+                        crate::domains::content::selector_root(self.content())?,
+                        &sel,
+                    ));
+                }
                 match domain {
                     #[cfg(not(feature = "domain-network"))]
                     "network" => {
@@ -537,6 +828,48 @@ impl Shell {
                         return Err(SmartError::unavailable(
                             "the shell was built without the domain-service feature — the \
                              @service selector needs the engine's service domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-database"))]
+                    "database" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-database feature — the \
+                             @database selector needs the engine's database domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-queue"))]
+                    "queue" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-queue feature — the \
+                             @queue selector needs the engine's queue domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-appindex"))]
+                    "appindex" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-appindex feature — the \
+                             @appindex selector needs the engine's appindex domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-manifest"))]
+                    "manifest" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-manifest feature — the \
+                             @manifest selector needs the engine's manifest domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-vcard"))]
+                    "vcard" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-vcard feature — the \
+                             @vcard selector needs the engine's vcard domain",
+                        ))
+                    }
+                    #[cfg(not(feature = "domain-content"))]
+                    "content" => {
+                        return Err(SmartError::unavailable(
+                            "the shell was built without the domain-content feature — the \
+                             @content selector needs the engine's content domain",
                         ))
                     }
                     other => Err(SmartError::Failed(migrate::pending_reason(other))),
@@ -719,6 +1052,24 @@ impl Shell {
             "clock" => self.exec_clock(args, render),
             #[cfg(feature = "domain-time")]
             "time" => self.exec_time(args, render),
+            #[cfg(feature = "domain-audio")]
+            "audio" => self.exec_audio(args, render),
+            #[cfg(feature = "domain-media")]
+            "media" => self.exec_media(args, render),
+            #[cfg(feature = "domain-power")]
+            "power" => self.exec_power(args, render),
+            #[cfg(feature = "domain-database")]
+            "database" => self.exec_database(args, render),
+            #[cfg(feature = "domain-queue")]
+            "queue" => self.exec_queue(args, render),
+            #[cfg(feature = "domain-appindex")]
+            "appindex" => self.exec_appindex(args, render),
+            #[cfg(feature = "domain-manifest")]
+            "manifest" => self.exec_manifest(args, render),
+            #[cfg(feature = "domain-vcard")]
+            "vcard" => self.exec_vcard(args, render),
+            #[cfg(feature = "domain-content")]
+            "content" => self.exec_content(args, render),
             "migrate" => {
                 if render {
                     print!("{}", migrate::render_queue(&OutputFormat::Human));
@@ -978,6 +1329,177 @@ impl Shell {
             Ok(Value::Null)
         } else {
             time::evaluate(&cmd, self.time())
+        }
+    }
+
+    #[cfg(feature = "domain-audio")]
+    fn exec_audio(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::audio::{self, AudioCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["audio".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = AudioCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = audio::WriteGuard { allowed: self.accept_write(audio::write_intent(&cmd), "")? };
+        if render {
+            audio::run(&cmd, &OutputFormat::Human, self.audio(), guard)?;
+            Ok(Value::Null)
+        } else {
+            audio::evaluate(&cmd, self.audio(), guard)
+        }
+    }
+
+    #[cfg(feature = "domain-media")]
+    fn exec_media(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::media::{self, MediaCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["media".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = MediaCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = media::WriteGuard { allowed: self.accept_write(media::write_intent(&cmd), "")? };
+        if render {
+            media::run(&cmd, &OutputFormat::Human, self.media(), guard)?;
+            Ok(Value::Null)
+        } else {
+            media::evaluate(&cmd, self.media(), guard)
+        }
+    }
+
+    #[cfg(feature = "domain-power")]
+    fn exec_power(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::power::{self, PowerCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["power".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = PowerCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = power::WriteGuard { allowed: self.accept_write(power::write_intent(&cmd), "")? };
+        if render {
+            power::run(&cmd, &OutputFormat::Human, self.power(), guard)?;
+            Ok(Value::Null)
+        } else {
+            power::evaluate(&cmd, self.power(), guard)
+        }
+    }
+
+    /// The database domain: the engine's own namespaced key/value store.
+    #[cfg(feature = "domain-database")]
+    fn exec_database(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::database::{self, DatabaseCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["database".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = DatabaseCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = database::WriteGuard {
+            allowed: self.accept_write(database::write_intent(&cmd), "")?,
+        };
+        if render {
+            database::run(&cmd, &OutputFormat::Human, self.database(), guard)?;
+            Ok(Value::Null)
+        } else {
+            database::evaluate(&cmd, self.database(), guard)
+        }
+    }
+
+    /// The queue domain: the engine's own FIFO store.
+    #[cfg(feature = "domain-queue")]
+    fn exec_queue(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::queue::{self, QueueCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["queue".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = QueueCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = queue::WriteGuard {
+            allowed: self.accept_write(queue::write_intent(&cmd), "")?,
+        };
+        if render {
+            queue::run(&cmd, &OutputFormat::Human, self.queue(), guard)?;
+            Ok(Value::Null)
+        } else {
+            queue::evaluate(&cmd, self.queue(), guard)
+        }
+    }
+
+    /// The appindex domain: the host's own desktop-entry corpus.
+    #[cfg(feature = "domain-appindex")]
+    fn exec_appindex(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::appindex::{self, AppindexCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["appindex".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = AppindexCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = appindex::WriteGuard {
+            allowed: self.accept_write(appindex::write_intent(&cmd), "")?,
+        };
+        if render {
+            appindex::run(&cmd, &OutputFormat::Human, self.appindex(), guard)?;
+            Ok(Value::Null)
+        } else {
+            appindex::evaluate(&cmd, self.appindex(), guard)
+        }
+    }
+
+    /// The manifest domain: the engine's own manifest store.
+    #[cfg(feature = "domain-manifest")]
+    fn exec_manifest(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::manifest::{self, ManifestCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["manifest".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = ManifestCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = manifest::WriteGuard {
+            allowed: self.accept_write(manifest::write_intent(&cmd), "")?,
+        };
+        if render {
+            manifest::run(&cmd, &OutputFormat::Human, self.manifest(), guard)?;
+            Ok(Value::Null)
+        } else {
+            manifest::evaluate(&cmd, self.manifest(), guard)
+        }
+    }
+
+    /// The vcard domain: the engine's own RFC 6350 parser and formatter.
+    #[cfg(feature = "domain-vcard")]
+    fn exec_vcard(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::vcard::{self, VcardCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["vcard".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = VcardCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = vcard::WriteGuard {
+            allowed: self.accept_write(vcard::write_intent(&cmd), "")?,
+        };
+        if render {
+            vcard::run(&cmd, &OutputFormat::Human, self.vcard(), guard)?;
+            Ok(Value::Null)
+        } else {
+            vcard::evaluate(&cmd, self.vcard(), guard)
+        }
+    }
+
+    /// The content domain: the engine's own content store.
+    #[cfg(feature = "domain-content")]
+    fn exec_content(&mut self, args: &str, render: bool) -> SmartResult<Value> {
+        use crate::domains::content::{self, ContentCmd};
+        use clap::Parser;
+        let mut argv: Vec<String> = vec!["content".to_string()];
+        argv.extend(args.split_whitespace().map(str::to_string));
+        let cmd = ContentCmd::try_parse_from(argv)
+            .map_err(|e| SmartError::invalid_argument(e.to_string().trim().to_string()))?;
+        let guard = content::WriteGuard {
+            allowed: self.accept_write(content::write_intent(&cmd), "")?,
+        };
+        if render {
+            content::run(&cmd, &OutputFormat::Human, self.content(), guard)?;
+            Ok(Value::Null)
+        } else {
+            content::evaluate(&cmd, self.content(), guard)
         }
     }
 
@@ -1912,11 +2434,11 @@ pub fn accept_write(
         // Stdin is the caller's program, never an answer: the verb says so
         // and refuses, which is what `--json` answers with under script mode.
         return Err(SmartError::not_supported(format!(
-            "refusing `{question}`: it changes host state and this caller is driving stdin \
-             itself (script mode), so there is no operator to ask. Answer the interactive \
-             `(y/N)` prompt when running interactively, pipe a `y` line to a one-shot \
-             invocation, or pass `--force` to accept the write explicitly (the live \
-             bring-back proof is founder-run)."
+            "refusing `{question}`: it CHANGES state — the host's own, or the engine's own \
+             store — and this caller is driving stdin itself (script mode), so there is no \
+             operator to ask. Answer the interactive `(y/N)` prompt when running interactively, \
+             pipe a `y` line to a one-shot invocation, or pass `--force` to accept the write \
+             explicitly (the live bring-back proof is founder-run)."
         )));
     }
     match crate::confirm::ask(&question) {
@@ -1925,10 +2447,10 @@ pub fn accept_write(
             "{question} — the operator answered no; nothing was written"
         ))),
         crate::confirm::Answer::NoInput => Err(SmartError::not_supported(format!(
-            "refusing `{question}`: it changes host state and there is no operator to ask \
-             (non-interactive). Answer the interactive `(y/N)` prompt when running interactively, \
-             pipe a `y` line, or pass `--force` to accept the write explicitly (the live \
-             bring-back proof is founder-run)."
+            "refusing `{question}`: it CHANGES state — the host's own, or the engine's own \
+             store — and there is no operator to ask (non-interactive). Answer the interactive \
+             `(y/N)` prompt when running interactively, pipe a `y` line, or pass `--force` to \
+             accept the write explicitly (the live bring-back proof is founder-run)."
         ))),
     }
 }

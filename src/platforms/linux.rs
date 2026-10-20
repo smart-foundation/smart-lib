@@ -85,3 +85,53 @@ pub mod process;
 #[cfg(feature = "domain-settings")]
 #[path = "linux/settings.rs"]
 pub mod settings;
+
+// The audio domain's native backend (law #9): /sys/class/sound device
+// enumeration plus the PulseAudio client seam for volume/mute.
+#[cfg(feature = "domain-audio")]
+#[path = "linux/audio.rs"]
+pub mod audio;
+
+// The media domain's native backend (law #9): MPRIS over the session bus.
+#[cfg(feature = "domain-media")]
+#[path = "linux/media.rs"]
+pub mod media;
+
+// The power domain's native backend (law #9): /sys/class/power_supply and
+// /sys/class/backlight, no upower shellout.
+#[cfg(feature = "domain-power")]
+#[path = "linux/power.rs"]
+pub mod power;
+
+// The database domain's native backend (law #9): an in-process key-value store
+// over the host's own filesystem-backed namespaces — no SQL engine shellout.
+#[cfg(feature = "domain-database")]
+#[path = "linux/database.rs"]
+pub mod database;
+
+// The queue domain's native backend (law #9): an in-process FIFO over the
+// host's own memory — no broker shellout.
+#[cfg(feature = "domain-queue")]
+#[path = "linux/queue.rs"]
+pub mod queue;
+
+// The appindex domain's native backend (law #9): an in-process index over the
+// host's own application metadata — no shellout.
+#[cfg(feature = "domain-appindex")]
+#[path = "linux/appindex.rs"]
+pub mod appindex;
+
+// The manifest domain's native backend (law #9): an in-process manifest store.
+#[cfg(feature = "domain-manifest")]
+#[path = "linux/manifest.rs"]
+pub mod manifest;
+
+// The vcard domain's native backend (law #9): in-process vCard parse/format.
+#[cfg(feature = "domain-vcard")]
+#[path = "linux/vcard.rs"]
+pub mod vcard;
+
+// The content domain's native backend (law #9): an in-process content store.
+#[cfg(feature = "domain-content")]
+#[path = "linux/content.rs"]
+pub mod content;

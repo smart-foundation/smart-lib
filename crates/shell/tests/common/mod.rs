@@ -7,6 +7,9 @@
 
 use std::cell::RefCell;
 
+/// The Batch 6 fixtures: the six domains whose engine body landed with the
+/// engine's Batch 4 (database, queue, appindex, manifest, vcard, content).
+pub mod batch6;
 use smart_lib::core::ids::{NetworkInterfaceId, SecretKeyId};
 use smart_lib::core::values::Duration;
 use smart_lib::domains::network::types::{

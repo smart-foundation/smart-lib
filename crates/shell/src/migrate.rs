@@ -60,13 +60,13 @@ pub struct Domain {
 /// The queue. The order is the recon's value order, past the real-today domains
 /// — network, clipboard, service, and the batch-4 six the engine landed in one
 /// commit (files, process, settings, logging, clock, time, each native and
-/// live-proven with the contract's own rows answered by measured reasons). The
-/// positions below are contiguous: a landed domain leaves the queue and the
-/// queue closes the gap. What remains: queue 8/8, then the partial ones by
-/// real-method ratio (media 8/13, database 8/14), then the thin ones (audio
-/// 6/7, power 4/7), then the multi-backend domains (window 10/36 across four
-/// WMs, package's 19 managers, compositor's 9 backends) — each of those is its
-/// own wave with its own live proof in the shell.
+/// live-proven with the contract's own rows answered by measured reasons), the
+/// batch-5 three (audio, media, power) and the batch-6 six (database, queue,
+/// appindex, manifest, vcard, content). The positions below are contiguous: a
+/// landed domain leaves the queue and the queue closes the gap. What remains:
+/// the multi-backend domains (window 10/36 across four WMs, package's 19
+/// managers, compositor's 9 backends) — each of those is its own wave with its
+/// own live proof in the shell.
 pub const QUEUE: &[Domain] = &[
     Domain {
         name: "network",
@@ -86,10 +86,11 @@ pub const QUEUE: &[Domain] = &[
     // ── the ordered queue (C2: one dispatch per domain, in this order) ──
     Domain {
         name: "queue",
-        status: Status::MigratedPending,
-        order: Some(1),
-        archive: "platforms/linux/queue.rs (real body, 60 lines)",
-        count: "8/8 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the engine's own in-process FIFO — named queues of byte payloads behind one mutex, with the contract's own enqueue/dequeue/peek/clearQueue/deleteQueue surface (no broker shellout; the store lives in the engine's process memory)",
+        count: "native · 7 REAL / 0 DEGRADED / 26 UNAVAILABLE",
     },
     Domain {
         name: "service",
@@ -101,17 +102,19 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "media",
-        status: Status::MigratedPending,
-        order: Some(2),
-        archive: "platforms/linux/media.rs (real body, 95 lines)",
-        count: "8/13 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: MPRIS over the session bus (dbus crate) — listPlayers/getPlayer/play/pause/stop/next/previous/seek/getMetadata/getPosition/setVolume/setPosition/openUri/subscribePlayer/getSupportedFormats (live-proven)",
+        count: "native · 15 REAL / 0 DEGRADED / 24 UNAVAILABLE",
     },
     Domain {
         name: "database",
-        status: Status::MigratedPending,
-        order: Some(3),
-        archive: "platforms/linux/database.rs (real body, 99 lines)",
-        count: "8/14 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the engine's own in-process namespaced key/value store — namespaces of keys to byte payloads behind one mutex, with the contract's own listKeys/listNamespaces paging (no SQL engine shellout; the store lives in the engine's process memory)",
+        count: "native · 27 REAL / 0 DEGRADED / 49 UNAVAILABLE",
     },
     Domain {
         name: "files",
@@ -123,17 +126,19 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "audio",
-        status: Status::MigratedPending,
-        order: Some(4),
-        archive: "platforms/linux/audio.rs (real body, 173 lines)",
-        count: "6/7 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: PulseAudio client library (libpulse) via FFI threaded mainloop — getState/listDevices/listStreams/setVolume/setMute/setStreamVolume/setStreamMute + subscriptions (live-proven, no shellout)",
+        count: "native · 12 REAL / 4 DEGRADED / 84 UNAVAILABLE",
     },
     Domain {
         name: "power",
-        status: Status::MigratedPending,
-        order: Some(5),
-        archive: "platforms/linux/power.rs (real body, 294 lines)",
-        count: "4/7 methods",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: UPower D-Bus (system bus) for battery + cpufreq sysfs for profiles; /sys/class/power_supply fallback (live-proven, no shellout)",
+        count: "native · 5 REAL / 1 DEGRADED / 16 UNAVAILABLE",
     },
     Domain {
         name: "process",
@@ -146,21 +151,21 @@ pub const QUEUE: &[Domain] = &[
     Domain {
         name: "window",
         status: Status::MigratedPending,
-        order: Some(6),
+        order: Some(1),
         archive: "platforms/linux/window.rs (real body, 412 lines)",
         count: "10/36 methods",
     },
     Domain {
         name: "package",
         status: Status::MigratedPending,
-        order: Some(7),
+        order: Some(2),
         archive: "platforms/linux/package/ (19 managers: apt, dnf, pacman, …)",
         count: "19 managers",
     },
     Domain {
         name: "compositor",
         status: Status::MigratedPending,
-        order: Some(8),
+        order: Some(3),
         archive: "platforms/linux/compositor/ (9 backends: sway, hyprland, i3, …)",
         count: "9 backends",
     },
@@ -195,10 +200,11 @@ pub const QUEUE: &[Domain] = &[
     },
     Domain {
         name: "appindex",
-        status: Status::ArchiveBodyExists,
+        status: Status::RealToday,
         order: None,
-        archive: "platforms/linux/appindex.rs (real body, 110 lines)",
-        count: "archive body",
+        archive:
+            "engine: the host's OWN freedesktop desktop-entry corpus — the .desktop files under the XDG data directories, read with read_dir and the entry format's own INI grammar (177 entries on this host). No gtk-launch, no xdg-open shellout",
+        count: "native · 5 REAL / 3 DEGRADED / 11 UNAVAILABLE",
     },
     Domain {
         name: "calendar",
@@ -322,6 +328,34 @@ pub const QUEUE: &[Domain] = &[
         archive:
             "engine: the kernel's own clocks — clock_gettime/clock_getres for the readings,              timerfd_create + timerfd_settime for a real timerfd (a periodic timer that expired              three times reports 3), nanosleep on the caller's own thread, /proc/stat's btime,              and the measured chrony verdict with the root-only state dir named (live-proven)",
         count: "native · 25 REAL / 5 DEGRADED / 0 UNAVAILABLE",
+    },
+    // ── the Batch 6 domains the ORIGINAL shell never hosted ──────────────
+    // The engine has a real body for each and the shell's command surface
+    // answers them today, so they join the board as real-today — not as a
+    // queue position, and not as an archive body to salvage.
+    Domain {
+        name: "manifest",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the engine's own in-process manifest store — real manifests with real names, versions, entry points and dependencies, and a REAL validation (a required dependency no manifest in the store offers is an error the caller is told about)",
+        count: "native · 5 REAL / 0 DEGRADED / 11 UNAVAILABLE",
+    },
+    Domain {
+        name: "vcard",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the engine's OWN in-process RFC 6350 parser and formatter — groups, the open parameter list, line unfolding, the backslash escapes, structured values, base64 binary values, URI values and dates; the contract's normative mapping table row by row, and the two rows the canonical tree cannot carry reported as warnings",
+        count: "native · 7 REAL / 0 DEGRADED / 1 UNAVAILABLE",
+    },
+    Domain {
+        name: "content",
+        status: Status::RealToday,
+        order: None,
+        archive:
+            "engine: the engine's own in-process content store — real items with real ids, versions, timestamps, payloads and tags, and the contract's own optimistic-concurrency check (a write presenting a stale version is refused with a conflict, never a silent overwrite)",
+        count: "native · 10 REAL / 0 DEGRADED / 47 UNAVAILABLE",
     },
     // ── archive-only: the archive holds a placeholder (available() = false) ──
     Domain {
@@ -554,19 +588,21 @@ pub fn render_queue(format: &crate::OutputFormat) -> String {
                 "●".blue().bold()
             ));
             out.push_str(
-                "    process, settings, logging, clock, time — all native, all live-proven) and\n",
-            );
-            out.push_str("    service: queue 8/8 (a whole body next), then the partial ones by\n");
-            out.push_str(
-                "    real-method ratio (media 8/13, database 8/14), then the thin ones (audio\n",
+                "    process, settings, logging, clock, time — all native, all live-proven), the\n",
             );
             out.push_str(
-                "    6/7, power 4/7), then the multi-backend domains (window 10/36 across four\n",
+                "    batch-5 three (audio, media, power) and the batch-6 six (database, queue,\n",
             );
             out.push_str(
-                "    WMs, package's 19 managers, compositor's 9 backends). Each migration is\n",
+                "    appindex, manifest, vcard, content). What remains is the multi-backend\n",
             );
-            out.push_str("    its own wave with its own live proof in the shell.\n");
+            out.push_str(
+                "    domains (window 10/36 across four WMs, package's 19 managers, compositor's\n",
+            );
+            out.push_str(
+                "    9 backends). Each migration is its own wave with its own live proof in the\n",
+            );
+            out.push_str("    shell.\n");
             out.push_str(&format!(
                 "\n  {} A domain not yet migrated answers honestly from this table:\n",
                 "●".blue().bold()

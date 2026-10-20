@@ -595,6 +595,15 @@ mod tests {
             "settings",
             "logging",
             "clock",
+            "audio",
+            "media",
+            "power",
+            "database",
+            "queue",
+            "appindex",
+            "manifest",
+            "vcard",
+            "content",
         ];
         expected.sort_unstable();
         let mut seen = live.clone();
@@ -602,7 +611,7 @@ mod tests {
         assert_eq!(
             seen,
             expected,
-            "help lists what the board says is live — all nine, not a hardcoded three"
+            "help lists what the board says is live — all eighteen, not a hardcoded three"
         );
     }
 

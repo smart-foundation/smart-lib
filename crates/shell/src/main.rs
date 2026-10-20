@@ -23,6 +23,24 @@ use shell::domains::logging::LoggingCmd;
 use shell::domains::clock::ClockCmd;
 #[cfg(feature = "domain-time")]
 use shell::domains::time::TimeCmd;
+#[cfg(feature = "domain-audio")]
+use shell::domains::audio::AudioCmd;
+#[cfg(feature = "domain-media")]
+use shell::domains::media::MediaCmd;
+#[cfg(feature = "domain-power")]
+use shell::domains::power::PowerCmd;
+#[cfg(feature = "domain-database")]
+use shell::domains::database::DatabaseCmd;
+#[cfg(feature = "domain-queue")]
+use shell::domains::queue::QueueCmd;
+#[cfg(feature = "domain-appindex")]
+use shell::domains::appindex::AppindexCmd;
+#[cfg(feature = "domain-manifest")]
+use shell::domains::manifest::ManifestCmd;
+#[cfg(feature = "domain-vcard")]
+use shell::domains::vcard::VcardCmd;
+#[cfg(feature = "domain-content")]
+use shell::domains::content::ContentCmd;
 use shell::migrate;
 use shell::shell::run_shell_with;
 use shell::{OutputFormat, SmartError};
@@ -41,7 +59,7 @@ pub struct Cli {
     pub interactive: bool,
     /// Accept the host write a mutating verb performs (the live bring-back
     /// proof is founder-run; charter law #8).
-    #[arg(long, global = true, help = "Accept host-mutating verbs (files write/edit/rm, process signal, settings set, network wifi on/off, clipboard set, service start/stop/restart, apply)")]
+    #[arg(long, global = true, help = "Accept host-mutating verbs (files write/edit/rm, process signal, settings set, network wifi on/off, clipboard set, service start/stop/restart, database/queue/appindex/manifest/vcard/content writes, apply)")]
     pub force: bool,
     /// Print the plan of a host-mutating verb and perform no write.
     #[arg(long, global = true, help = "Show what a mutating verb would do (with the target's type/size/mtime) and perform no write")]
@@ -80,6 +98,33 @@ pub enum DomainCommand {
     /// What time it is — the kernel clock, TZif zone, contract calendar math.
     #[cfg(feature = "domain-time")]
     Time(TimeCmd),
+    /// Audio — the host's PulseAudio/PipeWire sink/source/streams.
+    #[cfg(feature = "domain-audio")]
+    Audio(AudioCmd),
+    /// Media players — MPRIS over the session bus.
+    #[cfg(feature = "domain-media")]
+    Media(MediaCmd),
+    /// Power — battery, profiles, charging.
+    #[cfg(feature = "domain-power")]
+    Power(PowerCmd),
+    /// The engine's own namespaced key/value store.
+    #[cfg(feature = "domain-database")]
+    Database(DatabaseCmd),
+    /// The engine's own FIFO store.
+    #[cfg(feature = "domain-queue")]
+    Queue(QueueCmd),
+    /// The host's own application index — the desktop-entry corpus.
+    #[cfg(feature = "domain-appindex")]
+    Appindex(AppindexCmd),
+    /// The engine's own manifest store.
+    #[cfg(feature = "domain-manifest")]
+    Manifest(ManifestCmd),
+    /// vCards — the engine's own RFC 6350 parser and formatter.
+    #[cfg(feature = "domain-vcard")]
+    Vcard(VcardCmd),
+    /// The engine's own content store.
+    #[cfg(feature = "domain-content")]
+    Content(ContentCmd),
     /// The domain migration queue, as data.
     Migrate {
         #[command(subcommand)]
@@ -114,6 +159,24 @@ impl fmt::Debug for DomainCommand {
             DomainCommand::Clock(_) => write!(f, "DomainCommand::Clock(...)"),
             #[cfg(feature = "domain-time")]
             DomainCommand::Time(_) => write!(f, "DomainCommand::Time(...)"),
+            #[cfg(feature = "domain-audio")]
+            DomainCommand::Audio(_) => write!(f, "DomainCommand::Audio(...)"),
+            #[cfg(feature = "domain-media")]
+            DomainCommand::Media(_) => write!(f, "DomainCommand::Media(...)"),
+            #[cfg(feature = "domain-power")]
+            DomainCommand::Power(_) => write!(f, "DomainCommand::Power(...)"),
+            #[cfg(feature = "domain-database")]
+            DomainCommand::Database(_) => write!(f, "DomainCommand::Database(...)"),
+            #[cfg(feature = "domain-queue")]
+            DomainCommand::Queue(_) => write!(f, "DomainCommand::Queue(...)"),
+            #[cfg(feature = "domain-appindex")]
+            DomainCommand::Appindex(_) => write!(f, "DomainCommand::Appindex(...)"),
+            #[cfg(feature = "domain-manifest")]
+            DomainCommand::Manifest(_) => write!(f, "DomainCommand::Manifest(...)"),
+            #[cfg(feature = "domain-vcard")]
+            DomainCommand::Vcard(_) => write!(f, "DomainCommand::Vcard(...)"),
+            #[cfg(feature = "domain-content")]
+            DomainCommand::Content(_) => write!(f, "DomainCommand::Content(...)"),
             DomainCommand::Migrate { .. } => write!(f, "DomainCommand::Migrate(...)"),
         }
     }
@@ -284,6 +347,114 @@ fn main() {
             use shell::domains::time;
             let backend = smart_lib::platforms::linux::time::LinuxTimeBackend::new();
             match time::run(cmd, &cli.output, &backend) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-audio")]
+        Some(DomainCommand::Audio(cmd)) => {
+            use shell::domains::audio;
+            let backend = smart_lib::platforms::linux::audio::LinuxAudioBackend::new();
+            let guard = audio::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), audio::write_intent(cmd), ""),
+            };
+            match audio::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-media")]
+        Some(DomainCommand::Media(cmd)) => {
+            use shell::domains::media;
+            let backend = smart_lib::platforms::linux::media::LinuxMediaBackend::new();
+            let guard = media::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), media::write_intent(cmd), ""),
+            };
+            match media::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-power")]
+        Some(DomainCommand::Power(cmd)) => {
+            use shell::domains::power;
+            let backend = smart_lib::platforms::linux::power::LinuxPowerBackend::new();
+            let guard = power::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), power::write_intent(cmd), ""),
+            };
+            match power::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-database")]
+        Some(DomainCommand::Database(cmd)) => {
+            use shell::domains::database;
+            let backend = smart_lib::platforms::linux::database::LinuxDatabaseBackend::new();
+            let guard = database::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), database::write_intent(cmd), ""),
+            };
+            match database::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-queue")]
+        Some(DomainCommand::Queue(cmd)) => {
+            use shell::domains::queue;
+            let backend = smart_lib::platforms::linux::queue::LinuxQueueBackend::new();
+            let guard = queue::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), queue::write_intent(cmd), ""),
+            };
+            match queue::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-appindex")]
+        Some(DomainCommand::Appindex(cmd)) => {
+            use shell::domains::appindex;
+            let backend = smart_lib::platforms::linux::appindex::LinuxAppindexBackend::new();
+            let guard = appindex::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), appindex::write_intent(cmd), ""),
+            };
+            match appindex::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-manifest")]
+        Some(DomainCommand::Manifest(cmd)) => {
+            use shell::domains::manifest;
+            let backend = smart_lib::platforms::linux::manifest::LinuxManifestBackend::new();
+            let guard = manifest::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), manifest::write_intent(cmd), ""),
+            };
+            match manifest::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-vcard")]
+        Some(DomainCommand::Vcard(cmd)) => {
+            use shell::domains::vcard;
+            let backend = smart_lib::platforms::linux::vcard::LinuxVcardBackend::new();
+            let guard = vcard::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), vcard::write_intent(cmd), ""),
+            };
+            match vcard::run(cmd, &cli.output, &backend, guard) {
+                Ok(value) => emit(&cli.output, &value),
+                Err(e) => report(e, cli.output),
+            }
+        }
+        #[cfg(feature = "domain-content")]
+        Some(DomainCommand::Content(cmd)) => {
+            use shell::domains::content;
+            let backend = smart_lib::platforms::linux::content::LinuxContentBackend::new();
+            let guard = content::WriteGuard {
+                allowed: accepted(&cli.output, gate(&cli), content::write_intent(cmd), ""),
+            };
+            match content::run(cmd, &cli.output, &backend, guard) {
                 Ok(value) => emit(&cli.output, &value),
                 Err(e) => report(e, cli.output),
             }

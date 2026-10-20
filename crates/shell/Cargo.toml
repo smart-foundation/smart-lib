@@ -44,6 +44,15 @@ default = [
     "domain-logging",
     "domain-clock",
     "domain-time",
+    "domain-audio",
+    "domain-media",
+    "domain-power",
+    "domain-database",
+    "domain-queue",
+    "domain-appindex",
+    "domain-manifest",
+    "domain-vcard",
+    "domain-content",
 ]
 # The six Batch 4 domains, each a real engine half.
 # files — the anchor: statx/getdents/inotify/copy_file_range/mmap + the CAS store
@@ -58,6 +67,23 @@ domain-logging = ["smart-lib/domain-logging"]
 domain-clock = ["smart-lib/domain-clock"]
 # time — CLOCK_REALTIME, the host's TZif zone, the contract's calendar kernels
 domain-time = ["smart-lib/domain-time"]
+# Batch 5 domains
+domain-audio = ["smart-lib/domain-audio"]
+domain-media = ["smart-lib/domain-media"]
+domain-power = ["smart-lib/domain-power"]
+# The six Batch 6 domains, each a real engine half:
+# database — the engine's own namespaced key/value store
+domain-database = ["smart-lib/domain-database"]
+# queue — the engine's own FIFO store
+domain-queue = ["smart-lib/domain-queue"]
+# appindex — the host's own freedesktop desktop-entry corpus
+domain-appindex = ["smart-lib/domain-appindex"]
+# manifest — the engine's own manifest store
+domain-manifest = ["smart-lib/domain-manifest"]
+# vcard — the engine's own RFC 6350 parser and formatter
+domain-vcard = ["smart-lib/domain-vcard"]
+# content — the engine's own content store
+domain-content = ["smart-lib/domain-content"]
 # The network domain's engine half. With it off the shell still builds (the
 # engine crate compiles without the schema), but the network commands answer
 # honestly that the engine was built without the domain.
