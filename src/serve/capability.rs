@@ -29,7 +29,8 @@ use capnp::capability::FromClientHook;
 use capnp::private::capability::ClientHook;
 
 use crate::schema::capability_capnp::{
-    capability, capability_service, Operation as ContractOperation,
+    capability, capability_service, capability_subscription,
+    Operation as ContractOperation,
 };
 
 use super::errors;
@@ -291,6 +292,122 @@ impl capability_service::Server for CapabilityServer {
         )))
     }
 
+    /// Watch the capability set change: the contract's own capability.
+    fn subscribe(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::SubscribeParams,
+        mut results: capability_service::SubscribeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let server = CapabilitySubscriptionServer;
+            let client: capability_subscription::Client = capnp_rpc::new_client(server);
+            results.get().set_subscription(client);
+            Ok(())
+        }
+    }
+
+    /// Refreshing a capability is the capability authority's job.
+    fn refresh(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::RefreshParams,
+        _results: capability_service::RefreshResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service publishes capabilities; it does not \
+             refresh them",
+        )))
+    }
+
+    /// A controlled revocation is the capability authority's job.
+    fn revoke_controlled(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::RevokeControlledParams,
+        _results: capability_service::RevokeControlledResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service publishes capabilities; it does not \
+             revoke them",
+        )))
+    }
+
+    /// Groups are an authority feature this service does not hold.
+    fn create_group(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::CreateGroupParams,
+        _results: capability_service::CreateGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service holds no capability groups",
+        )))
+    }
+
+    /// The groups this service holds: none, and that is the truth.
+    fn list_groups(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::ListGroupsParams,
+        mut results: capability_service::ListGroupsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let mut builder = results.get();
+            builder.reborrow().init_groups(0);
+            builder.set_total_count(0);
+            Ok(())
+        }
+    }
+
+    /// Evaluating a condition is the authority's job.
+    fn evaluate_condition(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::EvaluateConditionParams,
+        _results: capability_service::EvaluateConditionResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service publishes capabilities; it does not \
+             evaluate their conditions",
+        )))
+    }
+
+    /// The audit trail is the authority's own record.
+    fn query_audit(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::QueryAuditParams,
+        _results: capability_service::QueryAuditResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service keeps no capability audit trail",
+        )))
+    }
+
+    /// The audit export is the authority's own record.
+    fn export_audit(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::ExportAuditParams,
+        _results: capability_service::ExportAuditResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service keeps no capability audit trail",
+        )))
+    }
+
+    /// The compliance report is the authority's own record.
+    fn generate_compliance_report(
+        self: std::rc::Rc<Self>,
+        _params: capability_service::GenerateComplianceReportParams,
+        _results: capability_service::GenerateComplianceReportResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service keeps no capability audit trail, \
+             so it cannot produce a compliance report",
+        )))
+    }
+
     /// Revocation is the capability authority's job.
     fn revoke(
         self: std::rc::Rc<Self>,
@@ -302,6 +419,52 @@ impl capability_service::Server for CapabilityServer {
             "notSupported: no-backend: this service publishes capabilities; it does not \
              revoke them",
         )))
+    }
+}
+
+/// The capability subscription: the contract's own capability. No event
+/// has been published yet, so the pull is honestly empty.
+pub struct CapabilitySubscriptionServer;
+
+impl Clone for CapabilitySubscriptionServer {
+    fn clone(&self) -> Self {
+        Self
+    }
+}
+
+impl capability_subscription::Server for CapabilitySubscriptionServer {
+    fn pull(
+        self: std::rc::Rc<Self>,
+        _params: capability_subscription::PullParams,
+        mut results: capability_subscription::PullResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            results.get().init_events(0);
+            Ok(())
+        }
+    }
+
+    fn cancel(
+        self: std::rc::Rc<Self>,
+        _params: capability_subscription::CancelParams,
+        mut results: capability_subscription::CancelResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            results.get().set_success(());
+            Ok(())
+        }
+    }
+
+    fn pull_paginated(
+        self: std::rc::Rc<Self>,
+        _params: capability_subscription::PullPaginatedParams,
+        mut results: capability_subscription::PullPaginatedResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let mut builder = results.get();
+            builder.reborrow().init_result().init_events(0);
+            Ok(())
+        }
     }
 }
 

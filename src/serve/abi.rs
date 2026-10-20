@@ -25,7 +25,9 @@ use std::sync::Mutex;
 use capnp::capability::FromClientHook;
 use capnp::private::capability::ClientHook;
 
-use crate::schema::abi_capnp::{abi, abi_service, schema_version, SchemaSupportStatus};
+use crate::schema::abi_capnp::{
+    abi, abi_service, abi_subscription, schema_version, SchemaSupportStatus,
+};
 use crate::schema::types_capnp;
 
 
@@ -232,6 +234,71 @@ impl abi_service::Server for AbiServer {
         }
     }
 
+    /// Watch the ABI catalogue change: the contract's own capability.
+    fn subscribe(
+        self: std::rc::Rc<Self>,
+        _params: abi_service::SubscribeParams,
+        mut results: abi_service::SubscribeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let server = AbiSubscriptionServer;
+            let client: abi_subscription::Client = capnp_rpc::new_client(server);
+            results.get().set_subscription(client);
+            Ok(())
+        }
+    }
+
+    /// Cancel an ABI subscription.
+    fn cancel(
+        self: std::rc::Rc<Self>,
+        _params: abi_service::CancelParams,
+        mut results: abi_service::CancelResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            results.get().set_success(());
+            Ok(())
+        }
+    }
+
+    /// The difference between two ABIs, in the contract's own `AbiDiff`.
+    fn diff(
+        self: std::rc::Rc<Self>,
+        params: abi_service::DiffParams,
+        mut results: abi_service::DiffResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let params = params.get()?;
+            let from = params.get_from()?;
+            let to = params.get_to()?;
+            let builder = results.get();
+            let mut diff = builder.init_diff();
+            // The schemas this service added: the ones `to` has and `from`
+            // does not.
+            let from_schemas = from.get_schema_versions()?;
+            let to_schemas = to.get_schema_versions()?;
+            let mut added = Vec::new();
+            for index in 0..to_schemas.len() {
+                let candidate = to_schemas.get(index);
+                let candidate_id = candidate.get_id();
+                let mut known = false;
+                for other in 0..from_schemas.len() {
+                    if from_schemas.get(other).get_id() == candidate_id {
+                        known = true;
+                        break;
+                    }
+                }
+                if !known {
+                    added.push(candidate_id);
+                }
+            }
+            let mut list = diff.reborrow().init_added_schemas(added.len() as u32);
+            for (index, id) in added.iter().enumerate() {
+                list.reborrow().get(index as u32).set_id(*id);
+            }
+            Ok(())
+        }
+    }
+
     /// Every ABI this service speaks.
     fn list(
         self: std::rc::Rc<Self>,
@@ -254,6 +321,40 @@ impl abi_service::Server for AbiServer {
                 write_schema(entry, &mut schemas.reborrow().get(0));
             }
             builder.set_total_count(supported.len() as u32);
+            Ok(())
+        }
+    }
+}
+
+/// The ABI subscription: the contract's own capability. No event has been
+/// published yet, so the pull is honestly empty.
+pub struct AbiSubscriptionServer;
+
+impl Clone for AbiSubscriptionServer {
+    fn clone(&self) -> Self {
+        Self
+    }
+}
+
+impl abi_subscription::Server for AbiSubscriptionServer {
+    fn pull(
+        self: std::rc::Rc<Self>,
+        _params: abi_subscription::PullParams,
+        mut results: abi_subscription::PullResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            results.get().init_events(0);
+            Ok(())
+        }
+    }
+
+    fn cancel(
+        self: std::rc::Rc<Self>,
+        _params: abi_subscription::CancelParams,
+        mut results: abi_subscription::CancelResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            results.get().set_success(());
             Ok(())
         }
     }

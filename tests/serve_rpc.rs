@@ -15,7 +15,6 @@
 
 extern crate std;
 
-use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -919,12 +918,14 @@ fn the_bytes_on_the_wire_are_capnp_messages() {
         let mut bytes = Vec::new();
         capnp::serialize::write_message(&mut bytes, &request).expect("serialize");
         socket.write_all(&bytes).expect("write");
-        // And the server's answer is a capnp message too.
-        let mut answer = Vec::new();
-        let mut buffer = [0u8; 4096];
-        let read = socket.read(&mut buffer).expect("read");
-        assert!(read > 0, "the server must answer");
-        answer.extend_from_slice(&buffer[..read]);
+        // And the server's answer is a capnp message too. The read is
+        // capnp's own deserializer over the socket: it reads exactly one
+        // message, however the stream chops it up.
+        let answer = capnp::serialize::read_message(
+            &mut socket,
+            capnp::message::ReaderOptions::new(),
+        )
+        .expect("the server's bytes are a capnp message");
         let _ = sender.send((bytes, answer));
     });
     let channel = listener.accept().expect("accept");
@@ -948,13 +949,7 @@ fn the_bytes_on_the_wire_are_capnp_messages() {
     );
 
     // And the server's answer is a capnp message as well.
-    let mut cursor = &answer[..];
-    let message = capnp::serialize::read_message(
-        &mut cursor,
-        capnp::message::ReaderOptions::new(),
-    )
-    .expect("the server's bytes are a capnp message");
-    let rpc = message
+    let rpc = answer
         .get_root::<capnp_rpc::rpc_capnp::message::Reader<'_>>()
         .expect("the message is an rpc-capnp message");
     assert!(
@@ -1060,7 +1055,7 @@ fn the_contract_answers_in_process_without_a_wire_at_all() {
     let response = futures::executor::block_on(async move {
         let mut request = network.get_interfaces_request();
         {
-            let mut params = request.get();
+            let params = request.get();
             let mut pagination = params.init_pagination();
             pagination.set_offset(0);
             pagination.set_limit(4);
@@ -1085,4 +1080,121 @@ fn the_capability_mask_is_read_from_the_kernels_own_line() {
     assert_eq!(mask & (1u64 << 12), 1u64 << 12);
     assert!(smart_lib::serve::cap_mask_from_status("Name:\tdaemon\n").is_none());
     assert!(smart_lib::serve::cap_mask_from_status("CapEff:\tnothex\n").is_none());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// The rest of the foundation surfaces
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn the_runtime_health_of_a_registered_service_is_answered() {
+    let backend = Arc::new(MockBackend::default());
+    let service = build_service(Arc::clone(&backend));
+    let path = socket_path();
+
+    let health = run_client(service, &path, CapabilityClass::Control, |session| {
+        let discovery_client: discovery::Client = session.interface();
+        let response = session
+            .run(async move {
+                let mut request = discovery_client.get_runtime_health_request();
+                {
+                    let params = request.get();
+                    let mut service_id = params.init_service_id();
+                    service_id.set_id(
+                        smart_lib::domains::network::availability::NETWORK_SCHEMA_ID,
+                    );
+                }
+                request.send().promise.await
+            })
+            .expect("the call answers");
+        let health = response
+            .get()
+            .expect("the results")
+            .get_health()
+            .expect("the health");
+        (
+            health.get_state().expect("the state"),
+            health.get_last_check_passed(),
+            health.get_fault_count(),
+            health.get_since_valid(),
+        )
+    });
+    assert_eq!(
+        health.0,
+        smart_lib::schema::discovery_capnp::ServiceState::Online
+    );
+    assert!(health.1, "the last check passed: the service is serving");
+    assert_eq!(health.2, 0);
+    // No transition has been observed: `sinceValid` false, never a
+    // fabricated "it changed zero microseconds ago".
+    assert!(!health.3);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_registry_refuses_a_field_it_does_not_model() {
+    let backend = Arc::new(MockBackend::default());
+    let service = build_service(Arc::clone(&backend));
+    let path = socket_path();
+
+    let refusal = run_client(service, &path, CapabilityClass::Control, |session| {
+        let discovery_client: discovery::Client = session.interface();
+        let response = session
+            .run(async move {
+                let mut request = discovery_client.registry_request();
+                {
+                    let params = request.get();
+                    // The authority capability: the contract's own.
+                    let _ = params.init_authority();
+                }
+                request.send().promise.await
+            })
+            .expect("the call answers");
+        let registry = response
+            .get()
+            .expect("the results")
+            .get_service()
+            .expect("the registry capability");
+        // The registry is the gated surface, and it is a capability the
+        // caller holds.
+        let outcome = session.run(async move {
+            let mut request = registry.deregister_request();
+            {
+                let params = request.get();
+                let mut service_id = params.init_service_id();
+                service_id.set_id(0xdead_beef);
+            }
+            request.send().promise.await
+        });
+        match outcome {
+            Ok(response) => {
+                let result = response.get().expect("the results");
+                match result.which().expect("the void-result arm") {
+                    smart_lib::schema::types_capnp::void_result::Which::Error(error) => {
+                        let error = error.expect("the error");
+                        (
+                            true,
+                            String::from_utf8_lossy(
+                                error.get_message().expect("the message").as_bytes(),
+                            )
+                            .into_owned(),
+                        )
+                    }
+                    _ => (false, String::new()),
+                }
+            }
+            Err(error) => (true, error.extra),
+        }
+    });
+    // Deregistering an unknown service is a notFound, not a crash and not
+    // a silent success.
+    assert!(refusal.0, "the registry must answer");
+    assert!(
+        refusal.1.contains("notFound"),
+        "the answer must be the contract's own code: {}",
+        refusal.1
+    );
+
+    let _ = std::fs::remove_file(&path);
 }

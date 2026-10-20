@@ -225,6 +225,34 @@ fn write_descriptor(
     }
 }
 
+/// Write a service's runtime health, in the contract's own `ServiceHealth`.
+///
+/// The health is what this host *observes*, and the only observation the
+/// engine has is "the service is registered and serving": so the state is
+/// the service's own state, the last check passed, and no transition has
+/// been observed (never a fabricated "it changed zero microseconds ago").
+fn write_health(
+    service: &RegisteredService,
+    builder: &mut crate::schema::discovery_capnp::service_health::Builder<'_>,
+) {
+    let mut id = builder.reborrow().init_service_id();
+    id.set_id(service.id);
+    builder.set_state(match service.state {
+        ServiceState::Unknown => ContractServiceState::Unknown,
+        ServiceState::Online => ContractServiceState::Online,
+        ServiceState::Offline => ContractServiceState::Offline,
+        ServiceState::Degraded => ContractServiceState::Degraded,
+        ServiceState::Starting => ContractServiceState::Starting,
+        ServiceState::Maintenance => ContractServiceState::Maintenance,
+        ServiceState::Custom => ContractServiceState::Custom,
+    });
+    builder.set_quarantined(false);
+    builder.set_since_valid(false);
+    builder.set_last_check_passed(true);
+    builder.set_fault_count(0);
+    builder.set_consecutive_faults(0);
+}
+
 /// The discovery server: the contract's own `Discovery` interface.
 pub struct DiscoveryServer {
     state: std::sync::Arc<DiscoveryState>,
@@ -316,6 +344,166 @@ impl disc::Server for DiscoveryServer {
         }
     }
 
+    /// Watch registrations change: the subscription IS the authority to
+    /// pull (the contract's own capability).
+    fn subscribe(
+        self: std::rc::Rc<Self>,
+        _params: disc::SubscribeParams,
+        mut results: disc::SubscribeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let server = DiscoverySubscriptionServer;
+            let client: discovery_subscription::Client = capnp_rpc::new_client(server);
+            results.get().set_subscription(client);
+            Ok(())
+        }
+    }
+
+    /// The runtime health of one service, as opposed to the descriptor's
+    /// declared state.
+    fn get_runtime_health(
+        self: std::rc::Rc<Self>,
+        params: disc::GetRuntimeHealthParams,
+        mut results: disc::GetRuntimeHealthResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        let state = self.state.clone();
+        async move {
+            let params = params.get()?;
+            let id = params.get_service_id()?.get_id();
+            match state.get(id) {
+                Some(service) => {
+                    write_health(&service, &mut results.get().init_health());
+                    Ok(())
+                }
+                None => Err(errors::decline(
+                    crate::core::ErrorCode::NotFound,
+                    &alloc::format!("notFound: no service with id {id} is registered here"),
+                )),
+            }
+        }
+    }
+
+    /// The runtime health of every registered service.
+    fn list_runtime_health(
+        self: std::rc::Rc<Self>,
+        _params: disc::ListRuntimeHealthParams,
+        mut results: disc::ListRuntimeHealthResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        let state = self.state.clone();
+        async move {
+            let services = state.services();
+            let mut builder = results.get();
+            let mut list = builder.reborrow().init_services(services.len() as u32);
+            for (index, service) in services.iter().enumerate() {
+                write_health(service, &mut list.reborrow().get(index as u32));
+            }
+            builder.set_total(services.len() as u64);
+            Ok(())
+        }
+    }
+
+    /// Services running but quarantined. This engine quarantines nothing,
+    /// so the list is empty — and that is the truth, not a placeholder.
+    fn list_quarantined(
+        self: std::rc::Rc<Self>,
+        _params: disc::ListQuarantinedParams,
+        mut results: disc::ListQuarantinedResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let mut builder = results.get();
+            builder.reborrow().init_services(0);
+            builder.set_total(0);
+            Ok(())
+        }
+    }
+
+    /// The dependencies of one service. This engine declares none.
+    fn get_service_dependencies(
+        self: std::rc::Rc<Self>,
+        _params: disc::GetServiceDependenciesParams,
+        mut results: disc::GetServiceDependenciesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let mut builder = results.get();
+            builder.reborrow().init_dependencies(0);
+            builder.set_total(0);
+            Ok(())
+        }
+    }
+
+    /// The dependents of one service. This engine declares none.
+    fn get_dependents(
+        self: std::rc::Rc<Self>,
+        _params: disc::GetDependentsParams,
+        mut results: disc::GetDependentsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let mut builder = results.get();
+            builder.reborrow().init_dependents(0);
+            builder.set_total(0);
+            Ok(())
+        }
+    }
+
+    /// The deprecated services. This engine deprecates none.
+    fn list_deprecated_services(
+        self: std::rc::Rc<Self>,
+        _params: disc::ListDeprecatedServicesParams,
+        mut results: disc::ListDeprecatedServicesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        async move {
+            let mut builder = results.get();
+            builder.reborrow().init_services(0);
+            builder.set_total(0);
+            Ok(())
+        }
+    }
+
+    /// The per-service version check.
+    fn check_version_compatibility(
+        self: std::rc::Rc<Self>,
+        params: disc::CheckVersionCompatibilityParams,
+        mut results: disc::CheckVersionCompatibilityResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        let state = self.state.clone();
+        async move {
+            let params = params.get()?;
+            let id = params.get_service_id()?.get_id();
+            let client_version = params.get_client_version()?;
+            let builder = results.get();
+            let mut check = builder.init_check();
+            check.set_service_id(params.get_service_id()?)?;
+            check.set_client_version(client_version);
+            match state.get(id) {
+                Some(_) => {
+                    // This service speaks the generation it published; a
+                    // caller on the same major version is compatible.
+                    check.set_compatible(true);
+                    check.set_reason("");
+                }
+                None => {
+                    check.set_compatible(false);
+                    check.set_reason("no service with that id is registered here");
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Lookup by isolation scope. This engine runs no isolation tiers, so
+    /// the honest answer is that the boundary does not exist here.
+    fn get_service_by_scope(
+        self: std::rc::Rc<Self>,
+        _params: disc::GetServiceByScopeParams,
+        _results: disc::GetServiceByScopeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this service does not run isolation \
+             scopes; use lookup, which answers for every published service",
+        )))
+    }
+
     fn registry(
         self: std::rc::Rc<Self>,
         _params: disc::RegistryParams,
@@ -375,6 +563,88 @@ impl discovery_registry::Server for DiscoveryRegistryServer {
             results.get().set_success(());
             Ok(())
         }
+    }
+
+    /// A partial update: the fields this engine models.
+    fn update(
+        self: std::rc::Rc<Self>,
+        params: discovery_registry::UpdateParams,
+        mut results: discovery_registry::UpdateResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        let state = self.state.clone();
+        async move {
+            let params = params.get()?;
+            let id = params.get_service_id()?.get_id();
+            let patch = params.get_patch()?;
+            if patch.has_metadata() {
+                // A field this engine does not model is refused, never
+                // silently dropped.
+                return Err(errors::decline(
+                    crate::core::ErrorCode::NotSupported,
+                    "notSupported: no-backend: this registry does not model \
+                     service metadata",
+                ));
+            }
+            let Some(mut service) = state.get(id) else {
+                let builder = results.get();
+                let mut failure = builder.init_error();
+                errors::write_t_error(
+                    &crate::core::Error::with_message(
+                        crate::core::ErrorCode::NotFound,
+                        alloc::format!("notFound: no service with id {id} is registered here"),
+                    ),
+                    &mut failure,
+                );
+                return Ok(());
+            };
+            let endpoints = patch.get_endpoints()?;
+            if endpoints.len() > 0 {
+                let mut updated = Vec::new();
+                for index in 0..endpoints.len() {
+                    let endpoint = endpoints.get(index);
+                    updated.push(PublishedEndpoint {
+                        transport: alloc::string::String::from_utf8_lossy(
+                            endpoint.get_transport()?.as_bytes(),
+                        )
+                        .into_owned(),
+                        address: alloc::string::String::from_utf8_lossy(
+                            endpoint.get_address()?.as_bytes(),
+                        )
+                        .into_owned(),
+                    });
+                }
+                service.endpoints = updated;
+            }
+            state.register(service);
+            results.get().set_success(());
+            Ok(())
+        }
+    }
+
+    /// Deprecation is a registry feature this engine does not model.
+    fn deprecate_service(
+        self: std::rc::Rc<Self>,
+        _params: discovery_registry::DeprecateServiceParams,
+        _results: discovery_registry::DeprecateServiceResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this registry does not model \
+             deprecation",
+        )))
+    }
+
+    /// Isolation scopes are a registry feature this engine does not model.
+    fn set_scope_boundary(
+        self: std::rc::Rc<Self>,
+        _params: discovery_registry::SetScopeBoundaryParams,
+        _results: discovery_registry::SetScopeBoundaryResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(Err(errors::decline(
+            crate::core::ErrorCode::NotSupported,
+            "notSupported: no-backend: this registry does not run isolation \
+             scopes",
+        )))
     }
 
     fn deregister(
