@@ -511,40 +511,6 @@ pub mod tests {
     }
 
     #[test]
-    fn core_works() {
-        let dir = corpus("core");
-        let backend = LinuxAppindexBackend::with_dirs(vec![dir.clone()]);
-        let page = backend
-            .list_apps(Pagination {
-                offset: 0,
-                limit: 10,
-            })
-            .expect("list");
-        assert_eq!(page.total, 2);
-        let stats = backend.get_stats().expect("stats");
-        assert_eq!(stats.total_apps, 2);
-        assert!(backend.get_app("alpha.desktop").is_ok());
-        assert!(backend
-            .search_apps(
-                &AppSearchFilter {
-                    name_contains: "editor".to_string(),
-                    ..AppSearchFilter::default()
-                },
-                Pagination {
-                    offset: 0,
-                    limit: 10
-                }
-            )
-            .expect("search")
-            .items
-            .len()
-            == 1);
-        assert!(backend.get_pinned().expect("pinned").is_empty());
-        assert!(backend.appindex_caps().contains(&"appindex.xdg"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn the_index_lists_the_hosts_own_desktop_entries() {
         let dir = corpus("list");
         let backend = LinuxAppindexBackend::with_dirs(vec![dir.clone()]);
@@ -675,20 +641,53 @@ pub mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `getPinned` answers with the engine's OWN pinned set: the set the
+    /// engine holds in its own memory, and nothing else.
     #[test]
-    fn the_pinned_set_is_the_engines_own_memory() {
+    fn get_pinned_answers_with_the_engines_own_pinned_set() {
         let dir = corpus("pinned");
         let backend = LinuxAppindexBackend::with_dirs(vec![dir.clone()]);
+        // A fresh engine holds nothing.
         assert!(backend.get_pinned().expect("pinned").is_empty());
+        // And a pin the engine recorded is in the set it answers with.
         backend.pin_app("alpha.desktop").expect("pin");
         let pinned = backend.get_pinned().expect("pinned");
         assert_eq!(pinned.len(), 1);
         assert_eq!(pinned[0].id, "alpha.desktop");
-        assert!(pinned[0].pinned);
-        backend.unpin_app("alpha.desktop").expect("unpin");
-        assert!(backend.get_pinned().expect("pinned").is_empty());
+        assert!(pinned[0].pinned, "the answer says the entry is pinned");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `pinApp` records the pin in the engine's OWN memory: the entry joins
+    /// the pinned set, and an id the corpus does not hold is refused.
+    #[test]
+    fn pin_app_records_the_pin_in_the_engines_own_memory() {
+        let dir = corpus("pin");
+        let backend = LinuxAppindexBackend::with_dirs(vec![dir.clone()]);
+        backend.pin_app("alpha.desktop").expect("pin");
+        let pinned = backend.get_pinned().expect("pinned");
+        assert_eq!(pinned.len(), 1, "the pin is in the engine's own set");
+        assert_eq!(pinned[0].id, "alpha.desktop");
         // An id the corpus does not hold cannot be pinned.
-        assert!(backend.pin_app("nope.desktop").is_err());
+        let error = backend.pin_app("nope.desktop").expect_err("no such entry");
+        assert_eq!(error.code, crate::core::ErrorCode::NotFound);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `unpinApp` takes the pin back out of the engine's own memory: the
+    /// set is empty again, and an entry that was never pinned is a no-op.
+    #[test]
+    fn unpin_app_takes_the_pin_back_out_of_the_engines_own_memory() {
+        let dir = corpus("unpin");
+        let backend = LinuxAppindexBackend::with_dirs(vec![dir.clone()]);
+        backend.pin_app("alpha.desktop").expect("pin");
+        backend.unpin_app("alpha.desktop").expect("unpin");
+        assert!(
+            backend.get_pinned().expect("pinned").is_empty(),
+            "the pin is gone from the engine's own set"
+        );
+        // Unpinning an entry that was never pinned is the honest no-op.
+        backend.unpin_app("beta.desktop").expect("unpin");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

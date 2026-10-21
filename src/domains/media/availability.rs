@@ -14,25 +14,30 @@ pub struct MethodAvailability { pub name: &'static str, pub ordinal: u16, pub st
 impl MethodAvailability {
   const fn real(name: &'static str, ordinal: u16, l3: &'static str) -> Self { MethodAvailability { name, ordinal, status: AvailStatus::Real, reason_class: None, reason: "", l3_test: Some(l3) } }
   const fn degraded(name: &'static str, ordinal: u16, l3: &'static str, detail: &'static str) -> Self { MethodAvailability { name, ordinal, status: AvailStatus::Degraded, reason_class: None, reason: detail, l3_test: Some(l3) } }
+  /// A method this platform serves with a stated limit and NO automated proof:
+  /// the verb is host-mutating, so a test that exercised it would change the
+  /// host (charter law #8). The row says so instead of naming a test that
+  /// proves nothing.
+  const fn degraded_unproven(name: &'static str, ordinal: u16, detail: &'static str) -> Self { MethodAvailability { name, ordinal, status: AvailStatus::Degraded, reason_class: None, reason: detail, l3_test: None } }
   const fn unavailable(name: &'static str, ordinal: u16, class: ReasonClass, reason: &'static str) -> Self { MethodAvailability { name, ordinal, status: AvailStatus::Unavailable, reason_class: Some(class), reason, l3_test: None } }
 }
 
 pub const MEDIA_AVAILABILITY: &[MethodAvailability] = &[
-    MethodAvailability::real("listPlayers", 0, "l3_linux_media::core_works"),
-    MethodAvailability::real("getPlayer", 1, "l3_linux_media::core_works"),
-    MethodAvailability::real("play", 2, "l3_linux_media::core_works"),
-    MethodAvailability::real("pause", 3, "l3_linux_media::core_works"),
-    MethodAvailability::real("stop", 4, "l3_linux_media::core_works"),
-    MethodAvailability::real("next", 5, "l3_linux_media::core_works"),
-    MethodAvailability::real("previous", 6, "l3_linux_media::core_works"),
-    MethodAvailability::real("seek", 7, "l3_linux_media::core_works"),
-    MethodAvailability::real("getMetadata", 8, "l3_linux_media::core_works"),
-    MethodAvailability::real("getPosition", 9, "l3_linux_media::core_works"),
-    MethodAvailability::real("setVolume", 10, "l3_linux_media::core_works"),
-    MethodAvailability::real("setPosition", 11, "l3_linux_media::core_works"),
-    MethodAvailability::real("openUri", 12, "l3_linux_media::core_works"),
-    MethodAvailability::real("subscribePlayer", 13, "l3_linux_media::core_works"),
-    MethodAvailability::real("getSupportedFormats", 14, "l3_linux_media::core_works"),
+    MethodAvailability::real("listPlayers", 0, "l3_linux_media::list_players_answers_with_the_hosts_own_players"),
+    MethodAvailability::real("getPlayer", 1, "l3_linux_media::get_player_reads_one_entry_natively"),
+    MethodAvailability::degraded_unproven("play", 2, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::degraded_unproven("pause", 3, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::degraded_unproven("stop", 4, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::degraded_unproven("next", 5, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::degraded_unproven("previous", 6, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::degraded_unproven("seek", 7, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::real("getMetadata", 8, "l3_linux_media::get_metadata_reads_the_players_own_metadata"),
+    MethodAvailability::real("getPosition", 9, "l3_linux_media::get_position_reads_the_players_own_position"),
+    MethodAvailability::degraded_unproven("setVolume", 10, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::degraded_unproven("setPosition", 11, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::degraded_unproven("openUri", 12, "the MPRIS write path is host-mutating: a live proof would move the founder's own player (law #8), so no automated test exercises this verb; the founder runs it against the real bus"),
+    MethodAvailability::real("subscribePlayer", 13, "l3_linux_media::subscribe_player_mints_a_subscription"),
+    MethodAvailability::real("getSupportedFormats", 14, "l3_linux_media::get_supported_formats_answers_with_the_hosts_own_list"),
     MethodAvailability::unavailable("transcode", 15, ReasonClass::NoBackend, "no native MPRIS support for this surface on this host"),
     MethodAvailability::unavailable("getRecommendations", 16, ReasonClass::NoBackend, "no native MPRIS support for this surface on this host"),
     MethodAvailability::unavailable("getAnalytics", 17, ReasonClass::NoBackend, "no native MPRIS support for this surface on this host"),

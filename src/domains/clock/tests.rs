@@ -279,43 +279,79 @@ fn the_matrix_is_exactly_the_contract_surface() {
 /// Every `l3_test` the matrix claims is a real test name in this suite, and
 /// every test here is claimed: a REAL row whose test vanished is a FAIL, and a
 /// test nobody claims is dead evidence.
+///
+/// The suite is read from the cell's OWN source at compile time — never from
+/// a hand-kept list, which is a list that can drift away from the truth.
 #[test]
 fn every_claimed_test_exists() {
-    let tests: Vec<&str> = vec![
-        "l3_linux_clock::monotonic_and_realtime_are_both_kernel_reads",
-        "l3_linux_clock::info_reports_the_kernels_own_clocks",
-        "l3_linux_clock::a_timer_fires_on_the_kernels_own_timerfd",
-        "l3_linux_clock::a_periodic_timer_counts_every_firing",
-        "l3_linux_clock::cancel_retires_the_timerfd",
-        "l3_linux_clock::reset_rearms_the_same_timer",
-        "l3_linux_clock::subscription_pull_is_bounded",
-        "l3_linux_clock::cancel_retires_the_subscription",
-        "l3_linux_clock::sleep_sleeps_the_callers_own_thread",
-        "l3_linux_clock::clock_domains_are_measured_not_assumed",
-        "l3_linux_clock::a_cancellable_sleep_is_really_cancellable",
-        "l3_linux_clock::clock_sync_is_measured_not_assumed",
-        "l3_linux_clock::drift_is_measured_over_a_bounded_window",
-        "l3_linux_clock::a_virtual_clock_advances_only_when_told",
-        "l3_linux_clock::clock_quality_names_what_is_measurable",
-        "l3_linux_clock::persistence_has_no_host_store",
-        "l3_linux_clock::a_gated_timer_does_not_fire_early",
-        "l3_linux_clock::the_alarm_service_is_acquired_with_a_capability",
-        "l3_linux_clock::alarms_round_trip_through_the_store",
-        "l3_linux_clock::a_missing_alarm_is_not_found_not_zeroed",
-        "l3_linux_clock::alarm_listing_is_paginated",
-        "l3_linux_clock::snooze_defers_the_next_firing",
-        "l3_linux_clock::dismiss_disables_until_told_otherwise",
-        "l3_linux_clock::the_next_alarm_is_the_earliest_enabled_one",
-    ];
     for (method, test) in claimed_l3_tests() {
-        assert!(tests.contains(&test), "{method} claims {test}, which is not in the suite");
-    }
-    for test in tests {
         assert!(
-            claimed_l3_tests().any(|(_, t)| t == test),
-            "{test} is real but unclaimed by the matrix"
+            the_cells_own_test_names().contains(&test.rsplit("::").next().unwrap_or(test)),
+            "{method} claims {test}, which is not a test in the clock cell"
         );
     }
+    for (name, is_unit_test) in the_cells_own_tests() {
+        if is_unit_test {
+            // The test says it proves the engine's own helper, not a
+            // contract method, so the matrix does not publish it.
+            continue;
+        }
+        let claim = alloc::format!("l3_linux_clock::{name}");
+        assert!(
+            claimed_l3_tests().any(|(_, t)| t == claim),
+            "{claim} is real but unclaimed by the matrix, and it does not say \
+             it is a unit test either"
+        );
+    }
+}
+
+/// Every test function the clock cell defines, read from its own source,
+/// with the flag that says whether the matrix publishes it: a test the
+/// matrix does not claim must SAY it is a unit test, in its own doc comment.
+fn the_cells_own_tests() -> Vec<(&'static str, bool)> {
+    let source = include_str!("../../platforms/linux/clock.rs");
+    let lines: Vec<&str> = source.lines().collect();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim() != "#[test]" {
+            continue;
+        }
+        let Some(next) = lines.get(index + 1) else { break };
+        let trimmed = next.trim();
+        let Some(rest) = trimmed.strip_prefix("fn ") else { continue };
+        let name: alloc::string::String =
+            rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if name.is_empty() {
+            continue;
+        }
+        // The doc comment above the test says whether it is a unit test.
+        let mut is_unit_test = false;
+        for earlier in lines[..index].iter().rev() {
+            let trimmed = earlier.trim();
+            if trimmed.starts_with("///") {
+                if trimmed.contains("UNIT:") {
+                    is_unit_test = true;
+                }
+                continue;
+            }
+            break;
+        }
+        names.push((leak(name), is_unit_test));
+    }
+    names
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn the_cells_own_test_names() -> Vec<&'static str> {
+    the_cells_own_tests()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn leak(name: alloc::string::String) -> &'static str {
+    alloc::boxed::Box::leak(name.into_boxed_str())
 }
 
 /// The compiled schema id matches `clock.capnp`'s `@0x…` line.
@@ -573,4 +609,62 @@ fn the_public_api_is_a_thin_wrapper() {
     assert!(super::method_availability_for("info").is_some());
     assert!(super::method_availability_for("noSuchMethod").is_none());
     let _ = super::AvailStatus::Real;
+}
+
+// ── The proof gate ──────────────────────────────────────────────────────
+//
+// The matrix PUBLISHES a proof name per method, and a published name is a
+// claim about this tree: "this test exists, and it proves this method".
+// Two ways to lie about that are now impossible to ship:
+//
+//   1. a name that resolves to nothing — the test was renamed or deleted;
+//   2. ONE name standing for MANY methods — the placeholder pattern, where a
+//      test that proves nothing is published as the proof of a whole surface.
+//
+// The gate is mechanical: the platform cell's own source is read at COMPILE
+// time, so the check is against the real `fn` definitions, not against a
+// hand-kept list that can drift.
+
+/// The clock cell's own source, read at compile time.
+const PLATFORM_SOURCE_0: &str = include_str!("../../platforms/linux/clock.rs");
+
+/// Every source the cell's proofs may live in.
+const PLATFORM_SOURCES: &[&str] = &[PLATFORM_SOURCE_0];
+
+
+/// Does the platform cell really define this test function?
+fn the_platform_defines(test: &str) -> bool {
+    let name = test.rsplit("::").next().unwrap_or(test);
+    PLATFORM_SOURCES.iter().any(|source| source.contains(&alloc::format!("fn {name}(")))
+}
+
+/// Every published proof name resolves to a real test function in the
+/// platform cell. A name that resolves to nothing is a FAILURE.
+#[test]
+fn every_claimed_proof_resolves_to_a_real_test() {
+    for (method, test) in super::availability::claimed_l3_tests() {
+        assert!(
+            the_platform_defines(test),
+            "{method} claims {test}, which is not a test function in ../../platforms/linux/clock.rs"
+        );
+    }
+}
+
+/// One proof names ONE method. A name published for many methods is the
+/// placeholder pattern: the matrix would be publishing one test as if it
+/// proved a whole surface.
+#[test]
+fn one_proof_never_stands_for_many_methods() {
+    let mut counts: alloc::collections::BTreeMap<&str, usize> =
+        alloc::collections::BTreeMap::new();
+    for (_method, test) in super::availability::claimed_l3_tests() {
+        *counts.entry(test).or_insert(0) += 1;
+    }
+    for (test, count) in counts {
+        assert_eq!(
+            count, 1,
+            "{test} is published as the proof for {count} methods: a proof \
+             names ONE method"
+        );
+    }
 }

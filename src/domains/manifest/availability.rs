@@ -170,7 +170,7 @@ pub const MANIFEST_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real(
         "validateDependencies",
         12,
-        "l3_linux_manifest::a_validation_reports_the_dependency_it_cannot_find",
+        "l3_linux_manifest::validate_dependencies_reports_the_dependency_it_cannot_find",
     ),
     MethodAvailability::real(
         "resolveByName",

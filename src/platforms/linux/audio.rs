@@ -626,7 +626,7 @@ impl AudioBackend for LinuxAudioBackend {
         Ok(Page { items, total })
     }
 
-    fn list_streams(&self, _page: Pagination) -> Result<Page<AudioStream>> {
+    fn list_streams(&self, page: Pagination) -> Result<Page<AudioStream>> {
         let conn = unsafe { connect_pulse() }
             .ok_or_else(|| Error::not_supported("no-backend: cannot connect to PulseAudio"))?;
         let streams = unsafe { list_streams(&conn) };
@@ -642,7 +642,10 @@ impl AudioBackend for LinuxAudioBackend {
             });
         }
         let total = out.len() as u64;
-        Ok(Page { items: out, total })
+        let start = page.offset as usize;
+        let limit = page.effective_limit() as usize;
+        let items: Vec<_> = out.into_iter().skip(start).take(limit).collect();
+        Ok(Page { items, total })
     }
 
     fn set_volume(&self, device: AudioDeviceId, volume: f32) -> Result<()> {
@@ -736,23 +739,509 @@ impl AudioBackend for LinuxAudioBackend {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::core::ErrorCode;
     use crate::domains::audio::backend::AudioBackend;
+    use crate::domains::audio::types::{AudioDevice, AudioDeviceType};
 
-    #[test]
-    fn core_works() {
-        let b = LinuxAudioBackend::new();
-        let _ = b.get_state();
-        let _ = b.list_devices(crate::domains::audio::types::Pagination::default());
-        let _ = b.list_streams(crate::domains::audio::types::Pagination::default());
+    /// The host's audio surface is SHARED state. Two tests writing the same
+    /// sink at once would restore each other's values, and a read that lands
+    /// inside another test's write window would see a half-changed host. So
+    /// every test in this module that reads or writes the host's volume or
+    /// mute takes this lock first: the suite never leaves the founder's
+    /// machine in a state another test chose, and never reads one.
+    static HOST_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The whole page. `Pagination::default()` carries a limit of 0, which
+    /// the contract reads as ONE item — a test that wants the host's whole
+    /// list asks for it explicitly.
+    const ALL: Pagination = Pagination { offset: 0, limit: u32::MAX };
+
+    /// A read on a host with no PulseAudio answers the honest `no-backend`
+    /// refusal; on a host with one it answers with the host's own truth.
+    /// The refusal is ASSERTED, never swallowed: an error that does not carry
+    /// the named class is a failure, not a quiet pass.
+    fn read<T>(result: crate::core::Result<T>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                assert!(
+                    error.code == ErrorCode::NotSupported
+                        && error.message.starts_with("no-backend"),
+                    "a failed read must name its class, never a bare error: {error:?}"
+                );
+                None
+            }
+        }
     }
 
-    #[test]
-    fn set_volume_round_trips_through_pulse() {
-        let b = LinuxAudioBackend::new();
-        let devs = b.list_devices(crate::domains::audio::types::Pagination::default()).unwrap();
-        if let Some(d) = devs.items.first() {
-            let _ = b.set_volume(crate::domains::audio::types::AudioDeviceId(d.id), 0.5);
-            let _ = b.set_mute(crate::domains::audio::types::AudioDeviceId(d.id), false);
+    /// The sink the founder's own volume lives on: the default sink when the
+    /// host has one, else the first sink the host reports.
+    fn the_default_sink(devices: &[AudioDevice]) -> Option<&AudioDevice> {
+        devices
+            .iter()
+            .find(|d| d.device_type == AudioDeviceType::Sink && d.is_default)
+            .or_else(|| devices.iter().find(|d| d.device_type == AudioDeviceType::Sink))
+    }
+
+    /// The sink's volume, read back from the host (not from a value the
+    /// backend remembered).
+    fn sink_volume(backend: &LinuxAudioBackend, id: u64) -> Option<f32> {
+        read(backend.list_devices(ALL)).and_then(|page| {
+            page.items
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.volume)
+        })
+    }
+
+    /// The sink's mute flag, read back from the host.
+    fn sink_mute(backend: &LinuxAudioBackend, id: u64) -> Option<bool> {
+        read(backend.list_devices(ALL)).and_then(|page| {
+            page.items
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.mute)
+        })
+    }
+
+    /// The stream's volume, read back from the host.
+    fn stream_volume(backend: &LinuxAudioBackend, id: u64) -> Option<f32> {
+        read(backend.list_streams(ALL)).and_then(|page| {
+            page.items.iter().find(|s| s.id == id).map(|s| s.volume)
+        })
+    }
+
+    /// The stream's mute flag, read back from the host.
+    fn stream_mute(backend: &LinuxAudioBackend, id: u64) -> Option<bool> {
+        read(backend.list_streams(ALL)).and_then(|page| {
+            page.items.iter().find(|s| s.id == id).map(|s| s.mute)
+        })
+    }
+
+    /// Restores a sink's volume when the test ends — on the happy path AND
+    /// on a failed assertion, because `Drop` runs while the panic unwinds.
+    /// (charter law #8: a test never leaves the host changed.)
+    struct VolumeGuard<'a> {
+        backend: &'a LinuxAudioBackend,
+        device: AudioDeviceId,
+        original: f32,
+    }
+
+    impl Drop for VolumeGuard<'_> {
+        fn drop(&mut self) {
+            let _ = self.backend.set_volume(self.device, self.original);
         }
+    }
+
+    /// The same for a sink's mute flag.
+    struct MuteGuard<'a> {
+        backend: &'a LinuxAudioBackend,
+        device: AudioDeviceId,
+        original: bool,
+    }
+
+    impl Drop for MuteGuard<'_> {
+        fn drop(&mut self) {
+            let _ = self.backend.set_mute(self.device, self.original);
+        }
+    }
+
+    /// The same for a stream's volume.
+    struct StreamVolumeGuard<'a> {
+        backend: &'a LinuxAudioBackend,
+        stream: AudioStreamId,
+        original: f32,
+    }
+
+    impl Drop for StreamVolumeGuard<'_> {
+        fn drop(&mut self) {
+            let _ = self.backend.set_stream_volume(self.stream, self.original);
+        }
+    }
+
+    /// The same for a stream's mute flag.
+    struct StreamMuteGuard<'a> {
+        backend: &'a LinuxAudioBackend,
+        stream: AudioStreamId,
+        original: bool,
+    }
+
+    impl Drop for StreamMuteGuard<'_> {
+        fn drop(&mut self) {
+            let _ = self.backend.set_stream_mute(self.stream, self.original);
+        }
+    }
+
+    /// `getState` reports the host's OWN default sink: the volume and mute
+    /// the sink really carries, and the sink's own id as the default output.
+    /// Nothing is invented: the numbers come from the same PulseAudio read
+    /// the device list makes.
+    #[test]
+    fn get_state_reports_the_hosts_own_default_sink() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = match read(backend.get_state()) {
+            Some(state) => state,
+            None => return,
+        };
+        let devices = read(backend.list_devices(ALL)).expect("devices");
+        let sink = the_default_sink(&devices.items).expect("a default sink");
+        // The state's numbers ARE the host sink's numbers.
+        assert!(
+            (state.volume - sink.volume).abs() < 0.001,
+            "the state's volume {} is the sink's own {}",
+            state.volume,
+            sink.volume
+        );
+        assert_eq!(state.mute, sink.mute, "the state's mute is the sink's own");
+        assert_eq!(
+            state.default_output, sink.id,
+            "the default output IS the default sink's id"
+        );
+        // A volume is a real reading, never a placeholder: 0.0 is a legal
+        // value, so the check is the range, not a non-zero.
+        assert!(
+            (0.0..=1.5).contains(&state.volume),
+            "the host's volume is in range, got {}",
+            state.volume
+        );
+    }
+
+    /// `listDevices` enumerates the host's OWN sinks and sources: every entry
+    /// is a device the host has, the ids are distinct, and exactly one sink
+    /// is the default.
+    #[test]
+    fn list_devices_enumerates_the_hosts_own_sinks_and_sources() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let page = match read(backend.list_devices(ALL)) {
+            Some(page) => page,
+            None => return,
+        };
+        assert_eq!(page.total as usize, page.items.len());
+        assert!(!page.items.is_empty(), "a host with a seat has devices");
+        // Distinct ids: the same device is never listed twice.
+        let mut ids: Vec<u64> = page.items.iter().map(|d| d.id).collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "every device has its own id");
+        // Exactly one default sink, and it is a sink.
+        let defaults: Vec<&AudioDevice> = page
+            .items
+            .iter()
+            .filter(|d| d.is_default && d.device_type == AudioDeviceType::Sink)
+            .collect();
+        assert_eq!(defaults.len(), 1, "the host names exactly one default sink");
+        // A source is a source: the two kinds are not conflated.
+        assert!(page
+            .items
+            .iter()
+            .any(|d| d.device_type == AudioDeviceType::Sink));
+        // The pagination is honoured: a page of one is one item.
+        let first = read(backend.list_devices(Pagination { offset: 0, limit: 1 }))
+            .expect("a one-item page");
+        assert_eq!(first.items.len(), 1);
+    }
+
+    /// `listStreams` enumerates the host's OWN sink inputs: the total is the
+    /// host's count, and every stream names the sink it plays into.
+    #[test]
+    fn list_streams_enumerates_the_hosts_own_sink_inputs() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let page = match read(backend.list_streams(ALL)) {
+            Some(page) => page,
+            None => return,
+        };
+        assert_eq!(page.total as usize, page.items.len());
+        // A stream that exists names a device; the id is the host's own.
+        for stream in &page.items {
+            assert!(stream.device != 0 || stream.id == 0);
+        }
+        // The pagination is honoured.
+        let first = read(backend.list_streams(Pagination { offset: 0, limit: 1 }))
+            .expect("a one-item page");
+        assert!(first.items.len() <= 1);
+    }
+
+    /// `setVolume` proves the write path reaches the host AND leaves the host
+    /// exactly as it found it (charter law #8): the sink's own volume is
+    /// read first, a different value is written, the host is asked again and
+    /// reports the new value, and the original value is restored before the
+    /// test ends — on every path, including a failed assertion.
+    #[test]
+    fn set_volume_proves_the_write_path_and_leaves_the_host_as_it_found_it() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let devices = match read(backend.list_devices(ALL)) {
+            Some(page) => page,
+            None => return,
+        };
+        let sink = match the_default_sink(&devices.items) {
+            Some(sink) => sink,
+            None => return,
+        };
+        let device = AudioDeviceId(sink.id);
+        let original = sink.volume;
+        // The guard restores the host's own value even if an assertion below
+        // fails: `Drop` runs while the panic unwinds.
+        let _guard = VolumeGuard {
+            backend: &backend,
+            device,
+            original,
+        };
+        // A value that is definitely NOT the host's, so the read-back proves
+        // the write reached the host rather than echoing the old one.
+        // A value the host can tell apart from its own, but close enough
+        // that the founder's ear is not jolted for the length of the write.
+        let probe = if original >= 0.1 { original - 0.1 } else { original + 0.1 };
+        backend.set_volume(device, probe).expect("set volume");
+        let written = sink_volume(&backend, sink.id).expect("the host reports a volume");
+        assert!(
+            (written - probe).abs() < 0.02,
+            "the host reports the volume that was written: {written} vs {probe}"
+        );
+        // The restore is the point: the host is exactly as it was found.
+        drop(_guard);
+        let restored = sink_volume(&backend, sink.id).expect("the host reports a volume");
+        assert!(
+            (restored - original).abs() < 0.02,
+            "the host is exactly as it was found: {restored} vs {original}"
+        );
+    }
+
+    /// `setMute` proves the write path reaches the host AND leaves the host
+    /// exactly as it found it: the sink's own mute flag is read first, the
+    /// opposite flag is written, the host is asked again and reports it, and
+    /// the original flag is restored before the test ends.
+    #[test]
+    fn set_mute_proves_the_write_path_and_leaves_the_host_as_it_found_it() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let devices = match read(backend.list_devices(ALL)) {
+            Some(page) => page,
+            None => return,
+        };
+        let sink = match the_default_sink(&devices.items) {
+            Some(sink) => sink,
+            None => return,
+        };
+        let device = AudioDeviceId(sink.id);
+        let original = sink.mute;
+        let _guard = MuteGuard {
+            backend: &backend,
+            device,
+            original,
+        };
+        let probe = !original;
+        backend.set_mute(device, probe).expect("set mute");
+        let written = sink_mute(&backend, sink.id).expect("the host reports a mute flag");
+        assert_eq!(
+            written, probe,
+            "the host reports the mute flag that was written"
+        );
+        drop(_guard);
+        let restored = sink_mute(&backend, sink.id).expect("the host reports a mute flag");
+        assert_eq!(restored, original, "the host is exactly as it was found");
+    }
+
+    /// `setStreamVolume` proves the write path reaches the host AND leaves
+    /// the host exactly as it found it, the same way the sink's own volume
+    /// does.
+    #[test]
+    fn set_stream_volume_proves_the_write_path_and_leaves_the_host_as_it_found_it() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let page = match read(backend.list_streams(ALL)) {
+            Some(page) => page,
+            None => return,
+        };
+        let stream = match page.items.first() {
+            Some(stream) => stream,
+            None => return,
+        };
+        let id = stream.id;
+        let original = stream.volume;
+        let _guard = StreamVolumeGuard {
+            backend: &backend,
+            stream: AudioStreamId(id),
+            original,
+        };
+        let probe = if original >= 0.1 { original - 0.1 } else { original + 0.1 };
+        backend
+            .set_stream_volume(AudioStreamId(id), probe)
+            .expect("set stream volume");
+        let written = stream_volume(&backend, id).expect("the host reports a volume");
+        assert!(
+            (written - probe).abs() < 0.02,
+            "the host reports the volume that was written: {written} vs {probe}"
+        );
+        drop(_guard);
+        let restored = stream_volume(&backend, id).expect("the host reports a volume");
+        assert!(
+            (restored - original).abs() < 0.02,
+            "the host is exactly as it was found: {restored} vs {original}"
+        );
+    }
+
+    /// `setStreamMute` proves the write path reaches the host AND leaves the
+    /// host exactly as it found it, the same way the sink's own mute flag
+    /// does.
+    #[test]
+    fn set_stream_mute_proves_the_write_path_and_leaves_the_host_as_it_found_it() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let page = match read(backend.list_streams(ALL)) {
+            Some(page) => page,
+            None => return,
+        };
+        let stream = match page.items.first() {
+            Some(stream) => stream,
+            None => return,
+        };
+        let id = stream.id;
+        let original = stream.mute;
+        let _guard = StreamMuteGuard {
+            backend: &backend,
+            stream: AudioStreamId(id),
+            original,
+        };
+        let probe = !original;
+        backend
+            .set_stream_mute(AudioStreamId(id), probe)
+            .expect("set stream mute");
+        let written = stream_mute(&backend, id).expect("the host reports a mute flag");
+        assert_eq!(
+            written, probe,
+            "the host reports the mute flag that was written"
+        );
+        drop(_guard);
+        let restored = stream_mute(&backend, id).expect("the host reports a mute flag");
+        assert_eq!(restored, original, "the host is exactly as it was found");
+    }
+
+    /// `subscribeState` mints a subscription token the state pull accepts.
+    #[test]
+    fn subscribe_state_mints_a_subscription() {
+        let backend = LinuxAudioBackend::new();
+        let subscription = backend.subscribe_state().expect("subscribe state");
+        // The token is a value the pull takes (the pull answers or refuses
+        // with the host's own truth, never with a fabricated token error).
+        let pulled = backend.pull_state(subscription, 16);
+        assert!(pulled.is_ok() || read(pulled).is_none());
+    }
+
+    /// `pullState` answers with the host's OWN state: the same reading the
+    /// state verb serves, not a cached copy of it.
+    #[test]
+    fn pull_state_answers_with_the_hosts_own_state() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let subscription = backend.subscribe_state().expect("subscribe state");
+        let pulled = match read(backend.pull_state(subscription, 16)) {
+            Some(state) => state,
+            None => return,
+        };
+        let direct = read(backend.get_state()).expect("state");
+        assert_eq!(
+            pulled.default_output, direct.default_output,
+            "the pull names the same default output the state verb does"
+        );
+        assert!(
+            (pulled.volume - direct.volume).abs() < 0.05,
+            "the pull reports the host's own volume"
+        );
+    }
+
+    /// `cancelState` retires the token: the cancel answers, and the honest
+    /// consequence is stated — this backend's subscription is a read-through
+    /// of the host's own state, so a later pull still answers with the
+    /// host's truth rather than a fabricated "cancelled" error.
+    #[test]
+    fn cancel_state_retires_the_subscription() {
+        let backend = LinuxAudioBackend::new();
+        let subscription = backend.subscribe_state().expect("subscribe state");
+        backend.cancel_state(subscription).expect("cancel state");
+        // The read-through survives the cancel: the pull still answers with
+        // the host's own state.
+        let pulled = backend.pull_state(subscription, 16);
+        assert!(pulled.is_ok() || read(pulled).is_none());
+    }
+
+    /// `subscribeDevices` mints a subscription token the device pull accepts.
+    #[test]
+    fn subscribe_devices_mints_a_subscription() {
+        let backend = LinuxAudioBackend::new();
+        let subscription = backend.subscribe_devices().expect("subscribe devices");
+        let pulled = backend.pull_devices(subscription, 16);
+        assert!(pulled.is_ok() || read(pulled).is_none());
+    }
+
+    /// `pullDevices` answers with the host's OWN devices: the same list the
+    /// device listing serves.
+    #[test]
+    fn pull_devices_answers_with_the_hosts_own_devices() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let subscription = backend.subscribe_devices().expect("subscribe devices");
+        let pulled = match read(backend.pull_devices(subscription, 16)) {
+            Some(devices) => devices,
+            None => return,
+        };
+        let listed = read(backend.list_devices(ALL)).expect("devices");
+        assert_eq!(
+            pulled.len(),
+            listed.items.len(),
+            "the pull serves the host's own device list"
+        );
+    }
+
+    /// `cancelDevices` retires the token, and says so honestly.
+    #[test]
+    fn cancel_devices_retires_the_subscription() {
+        let backend = LinuxAudioBackend::new();
+        let subscription = backend.subscribe_devices().expect("subscribe devices");
+        backend.cancel_devices(subscription).expect("cancel devices");
+        let pulled = backend.pull_devices(subscription, 16);
+        assert!(pulled.is_ok() || read(pulled).is_none());
+    }
+
+    /// `subscribeStreams` mints a subscription token the stream pull accepts.
+    #[test]
+    fn subscribe_streams_mints_a_subscription() {
+        let backend = LinuxAudioBackend::new();
+        let subscription = backend.subscribe_streams().expect("subscribe streams");
+        let pulled = backend.pull_streams(subscription, 16);
+        assert!(pulled.is_ok() || read(pulled).is_none());
+    }
+
+    /// `pullStreams` answers with the host's OWN streams: the same list the
+    /// stream listing serves.
+    #[test]
+    fn pull_streams_answers_with_the_hosts_own_streams() {
+        let backend = LinuxAudioBackend::new();
+        let _lock = HOST_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let subscription = backend.subscribe_streams().expect("subscribe streams");
+        let pulled = match read(backend.pull_streams(subscription, 16)) {
+            Some(streams) => streams,
+            None => return,
+        };
+        let listed = read(backend.list_streams(ALL)).expect("streams");
+        assert_eq!(
+            pulled.len(),
+            listed.items.len(),
+            "the pull serves the host's own stream list"
+        );
+    }
+
+    /// `cancelStreams` retires the token, and says so honestly.
+    #[test]
+    fn cancel_streams_retires_the_subscription() {
+        let backend = LinuxAudioBackend::new();
+        let subscription = backend.subscribe_streams().expect("subscribe streams");
+        backend.cancel_streams(subscription).expect("cancel streams");
+        let pulled = backend.pull_streams(subscription, 16);
+        assert!(pulled.is_ok() || read(pulled).is_none());
     }
 }

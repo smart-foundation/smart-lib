@@ -3828,6 +3828,17 @@ mod tests {
         b.cancel_subscription(sub).unwrap();
     }
 
+    /// `subscribeCounters` mints the engine's own subscription token, and the
+    /// counter pull accepts it.
+    #[test]
+    fn subscribe_counters_mints_a_subscription() {
+        let b = happy_backend();
+        let sub = b.subscribe_counters(id_of("enp0s31f6")).unwrap();
+        // The token is a value the pull takes.
+        assert_eq!(b.pull_counters(sub).unwrap().bytes_in, 11_223_344);
+        b.cancel_subscription(sub).unwrap();
+    }
+
     #[test]
     fn cancel_retires_token() {
         let b = happy_backend();
@@ -4030,6 +4041,7 @@ mod tests {
             "counters_fall_back_to_the_seam_when_the_kernel_reports_none",
             "netlink_unavailable_falls_back_to_the_nm_device_view",
             "counter_subscription_bounded_pull",
+            "subscribe_counters_mints_a_subscription",
             "is_networking_enabled_reads_the_policy_sweep_once",
             "data_roaming_reads_the_kernel_wwan_link",
             "cold_store_reads_issue_exactly_one_counted_fallback",

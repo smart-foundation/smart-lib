@@ -127,17 +127,17 @@ pub const CONTENT_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real(
         "trash",
         5,
-        "l3_linux_content::the_trash_holds_what_it_was_given",
+        "l3_linux_content::trash_moves_the_item_into_the_trash",
     ),
     MethodAvailability::real(
         "restore",
         6,
-        "l3_linux_content::the_trash_holds_what_it_was_given",
+        "l3_linux_content::restore_takes_the_item_out_of_the_trash",
     ),
     MethodAvailability::real(
         "emptyTrash",
         7,
-        "l3_linux_content::the_trash_holds_what_it_was_given",
+        "l3_linux_content::empty_trash_empties_the_trash_and_says_how_many",
     ),
     MethodAvailability::real(
         "query",
@@ -147,7 +147,7 @@ pub const CONTENT_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real(
         "get",
         9,
-        "l3_linux_content::a_published_item_is_really_stored",
+        "l3_linux_content::get_reads_the_stored_item_back",
     ),
     MethodAvailability::unavailable(
         "subscribe",

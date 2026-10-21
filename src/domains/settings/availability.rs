@@ -107,12 +107,12 @@ pub const SETTINGS_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real("get", 0, "l3_linux_settings::a_read_is_the_hosts_own_settings_engine"),
     MethodAvailability::degraded("set", 1, "l3_linux_settings::a_write_is_the_hosts_own_engine_and_gated", "the write goes through the host's own engine (a dconf write), which is exactly what `gsettings set` performs — so the mechanism is REAL — and it is GATED: writing a setting is a host-mutating act this library never performs in a build or a test (law #8), and `system.*` needs the platform capability the contract names"),
     MethodAvailability::real("getAll", 2, "l3_linux_settings::a_schema_read_lists_the_hosts_own_keys"),
-    MethodAvailability::degraded("delete", 3, "l3_linux_settings::a_write_is_the_hosts_own_engine_and_gated", "the same gated dconf write as @set: the mechanism is the host's own engine and the act is the founder's"),
-    MethodAvailability::degraded("clear", 4, "l3_linux_settings::a_write_is_the_hosts_own_engine_and_gated", "the same gated dconf write as @set"),
+    MethodAvailability::degraded("delete", 3, "l3_linux_settings::delete_refuses_and_never_writes", "the same gated dconf write as @set: the mechanism is the host's own engine and the act is the founder's"),
+    MethodAvailability::degraded("clear", 4, "l3_linux_settings::clear_refuses_and_never_writes", "the same gated dconf write as @set"),
     MethodAvailability::real("listDomains", 5, "l3_linux_settings::a_domain_list_is_the_hosts_own_schema_source"),
     MethodAvailability::real("watch", 6, "l3_linux_settings::a_watch_reports_the_hosts_own_change_signal"),
-    MethodAvailability::real("watchDomain", 7, "l3_linux_settings::a_watch_reports_the_hosts_own_change_signal"),
-    MethodAvailability::degraded("bulkSet", 8, "l3_linux_settings::a_write_is_the_hosts_own_engine_and_gated", "the same gated dconf write as @set, applied per entry; the read half of the bulk pair is real"),
+    MethodAvailability::real("watchDomain", 7, "l3_linux_settings::watch_domain_watches_the_whole_schema"),
+    MethodAvailability::degraded("bulkSet", 8, "l3_linux_settings::bulk_set_refuses_and_never_writes", "the same gated dconf write as @set, applied per entry; the read half of the bulk pair is real"),
     MethodAvailability::real("bulkGet", 9, "l3_linux_settings::a_bulk_read_answers_every_key"),
     MethodAvailability::degraded("listByCategory", 10, "l3_linux_settings::a_category_listing_reports_the_hosts_own_keys", "MEASURED: the contract's category tokens are conventions, not contract, and this host's schema source does not publish a per-key category (glib's schema carries a summary and a range, not a category), so the listing answers the host's own keys and records the requested category beside each one rather than guessing which keys are `display`"),
     MethodAvailability::unavailable("setAppOverride", 11, ReasonClass::NoPrivilege, "no-privilege: the contract states it — whether app X may override setting Y is a capability decision made at ACQUISITION, not a parameter this service re-decides per call. This host's own engine has no per-app override store to write into either (MEASURED: dconf has no per-app namespace), so the verb refuses with the reason rather than inventing a hierarchy"),
@@ -123,7 +123,7 @@ pub const SETTINGS_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real("getHistory", 16, "l3_linux_settings::a_history_is_the_backends_own_recorded_changes"),
     MethodAvailability::real("getSettingsDiff", 17, "l3_linux_settings::a_delta_read_returns_the_changes_after_the_version"),
     MethodAvailability::real("SettingsSubscription.pull", 0x100, "l3_linux_settings::a_watch_pull_is_bounded_and_cancellable"),
-    MethodAvailability::real("SettingsSubscription.cancel", 0x101, "l3_linux_settings::a_watch_pull_is_bounded_and_cancellable"),
+    MethodAvailability::real("SettingsSubscription.cancel", 0x101, "l3_linux_settings::cancel_settings_retires_the_subscription"),
 ];
 
 /// The Linux platform token for this matrix.

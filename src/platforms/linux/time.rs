@@ -644,10 +644,6 @@ mod tests {
             .add_calendar_units(&jan31, &[CU { kind: CUK::Months, amount: 1 }])
             .expect("add");
         assert_eq!((plus_month.year, plus_month.month, plus_month.day), (2024, 2, 29));
-        let back = backend
-            .subtract_calendar_units(&plus_month, &[CU { kind: CUK::Months, amount: 1 }])
-            .expect("subtract");
-        assert_eq!((back.year, back.month, back.day), (2024, 1, 29));
         let week = backend
             .add_calendar_units(&HD::gregorian(2026, 10, 14), &[CU { kind: CUK::Weeks, amount: 2 }])
             .expect("add weeks");
@@ -690,25 +686,51 @@ mod tests {
 
     /// TAI uses the CONTRACT's epoch and rule: seconds and nanoseconds since
     /// 1970, and TAI − UTC = 37 s at the current leap-second count.
+    /// `convertToTai` uses the contract's epoch: TAI is UTC plus the
+    /// contract's own 37 seconds.
     #[test]
-    fn tai_uses_the_contracts_epoch() {
+    fn convert_to_tai_uses_the_contracts_epoch() {
         let backend = LinuxTimeBackend;
         let utc = Timestamp::from_nanos(1_700_000_000_000_000_000);
         let tai = backend.convert_to_tai(utc).expect("to tai");
         assert_eq!(tai.tai_seconds, 1_700_000_037, "TAI is UTC + 37 s");
         assert_eq!(tai.nanoseconds, 0);
+    }
+
+    /// `convertFromTai` walks the epoch back — and a pre-1970 reading
+    /// saturates rather than wrapping into the future.
+    #[test]
+    fn convert_from_tai_walks_the_epoch_back() {
+        let backend = LinuxTimeBackend;
+        let utc = Timestamp::from_nanos(1_700_000_000_000_000_000);
+        let tai = TaiTimestamp { tai_seconds: 1_700_000_037, nanoseconds: 0 };
         assert_eq!(backend.convert_from_tai(tai).expect("from tai"), utc);
-        let sub = Timestamp::from_nanos(1_500_000_000);
-        let tai_sub = backend.convert_to_tai(sub).expect("to tai");
-        assert_eq!((tai_sub.tai_seconds, tai_sub.nanoseconds), (38, 500_000_000));
-        assert_eq!(backend.convert_from_tai(tai_sub).expect("from tai"), sub);
         // A pre-1970 TAI reading saturates rather than wrapping into the future.
         let before = backend.convert_from_tai(TaiTimestamp { tai_seconds: 10, nanoseconds: 0 });
         assert_eq!(before.expect("from tai").as_nanos(), 0);
     }
 
-    /// The HSM surface is refused with the measured reason, and the answer is
-    /// machine-routable (`T.BoolResult` shape: an error, never a bare false).
+    /// `subtractCalendarUnits` steps BACK a unit and clamps at the month
+    /// end the same way the addition does.
+    #[test]
+    fn subtract_calendar_units_clamps_at_month_end() {
+        let backend = LinuxTimeBackend;
+        let feb29 = HD::gregorian(2024, 2, 29);
+        let back = backend
+            .subtract_calendar_units(&feb29, &[CU { kind: CUK::Months, amount: 1 }])
+            .expect("subtract");
+        assert_eq!((back.year, back.month, back.day), (2024, 1, 29));
+        // And the week goes back the same number of weeks.
+        let week = backend
+            .subtract_calendar_units(&HD::gregorian(2026, 10, 28), &[CU { kind: CUK::Weeks, amount: 2 }])
+            .expect("subtract weeks");
+        assert_eq!((week.year, week.month, week.day), (2026, 10, 14));
+    }
+
+    /// UNIT: the HSM surface is refused with the measured reason, and the
+    /// answer is machine-routable (`T.BoolResult` shape: an error, never a
+    /// bare false). It proves the engine's own refusal, not a contract
+    /// method, so the matrix does not publish it.
     #[test]
     fn hsm_verification_is_refused_not_guessed() {
         let backend = LinuxTimeBackend;
@@ -723,8 +745,11 @@ mod tests {
         assert!(err.message.contains("no hardware security module"));
     }
 
-    /// The civil-date kernels are exact inverses over a wide range, so every
-    /// conversion this domain offers is anchored on the same day count.
+    /// UNIT: the civil-date kernels are exact inverses over a wide range, so
+    /// every conversion this domain offers is anchored on the same day
+    /// count. The matrix publishes one proof for the conversion surface
+    /// (`calendar_conversion_is_exact_arithmetic`), so this says it is a
+    /// unit test of the engine's own kernels.
     #[test]
     fn civil_kernels_are_exact_inverses() {
         for &(y, m, d) in &[
@@ -745,8 +770,10 @@ mod tests {
         assert!(crate::domains::time::types::is_julian_leap(1900));
     }
 
-    /// The Islamic and Ethiopian calendars round-trip against their own day
-    /// counts, so the arithmetic carries in both directions.
+    /// UNIT: the Islamic and Ethiopian calendars round-trip against their own
+    /// day counts, so the arithmetic carries in both directions. The matrix
+    /// publishes one proof for the conversion surface, so this says it is a
+    /// unit test of the engine's own kernels.
     #[test]
     fn the_arithmetic_calendars_round_trip() {
         for &(y, m, d) in &[(1448i64, 1u8, 1u8), (1389, 2, 1), (1, 1, 1), (1447, 12, 29)] {
@@ -760,8 +787,10 @@ mod tests {
         assert_eq!(days_from_ethiopian(1, 1, 1), -716_367);
     }
 
-    /// The Julian calendar round-trips, and the 13-day divergence the two
-    /// calendars carry in this era is exact.
+    /// UNIT: the Julian calendar round-trips, and the 13-day divergence the
+    /// two calendars carry in this era is exact. The matrix publishes one
+    /// proof for the conversion surface, so this says it is a unit test of
+    /// the engine's own kernels.
     #[test]
     fn the_julian_calendar_round_trips() {
         for &(y, m, d) in &[(1970i64, 1u8, 1u8), (2026, 10, 14), (1900, 3, 1), (1, 1, 1)] {

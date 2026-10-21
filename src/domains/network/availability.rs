@@ -197,7 +197,7 @@ pub const NETWORK_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::unavailable("getInterfaceQos", 34, ReasonClass::NoBackend, "QoS rule readout (tc/netem) not implemented"),
     MethodAvailability::real("getCounters", 35, "l3_linux_network::get_counters_serves_the_kernel_stats"),
     MethodAvailability::unavailable("resetCounters", 36, ReasonClass::NoPrivilege, "interface counter reset needs CAP_NET_ADMIN"),
-    MethodAvailability::real("subscribeCounters", 37, "l3_linux_network::counter_subscription_bounded_pull"),
+    MethodAvailability::real("subscribeCounters", 37, "l3_linux_network::subscribe_counters_mints_a_subscription"),
     MethodAvailability::real("pullCounters", 38, "l3_linux_network::counter_subscription_bounded_pull"),
     MethodAvailability::unavailable("checkCaptivePortal", 39, ReasonClass::NoBackend, "captive-portal probe (NM connectivity check) not implemented"),
     MethodAvailability::unavailable("subscribeCaptivePortal", 40, ReasonClass::NoBackend, "captive-portal probe (NM connectivity check) not implemented"),

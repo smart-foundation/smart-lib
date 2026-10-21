@@ -188,25 +188,82 @@ fn the_matrix_is_exactly_the_contract_surface() {
 }
 
 /// Every `l3_test` the matrix claims is a real test name, and every test in the
-/// suite is claimed.
+/// Every `l3_test` the matrix claims is a real test name in this cell, and
+/// every test here is claimed: a row whose test vanished is a FAIL, and a
+/// test nobody claims is dead evidence.
+///
+/// The suite is read from the cell's OWN source at compile time — never from
+/// a hand-kept list, which is a list that can drift away from the truth.
 #[test]
 fn every_claimed_test_exists() {
-    let tests: Vec<&str> = vec![
-        "l3_linux_time::get_date_time_is_the_kernels_own_clock",
-        "l3_linux_time::calendar_conversion_is_exact_arithmetic",
-        "l3_linux_time::calendar_arithmetic_clamps_at_month_end",
-        "l3_linux_time::diff_counts_days_and_breaks_the_year_down",
-        "l3_linux_time::tai_uses_the_contracts_epoch",
-    ];
     for (method, test) in claimed_l3_tests() {
-        assert!(tests.contains(&test), "{method} claims {test}, which is not in the suite");
-    }
-    for test in tests {
         assert!(
-            claimed_l3_tests().any(|(_, t)| t == test),
-            "{test} is real but unclaimed by the matrix"
+            the_cells_own_test_names().contains(&test.rsplit("::").next().unwrap_or(test)),
+            "{method} claims {test}, which is not a test in the time cell"
         );
     }
+    for (name, is_unit_test) in the_cells_own_tests() {
+        if is_unit_test {
+            // The test says it proves the engine's own helper, not a contract
+            // method, so the matrix does not publish it.
+            continue;
+        }
+        let claim = alloc::format!("l3_linux_time::{name}");
+        assert!(
+            claimed_l3_tests().any(|(_, t)| t == claim),
+            "{claim} is real but unclaimed by the matrix, and it does not say \
+             it is a unit test either"
+        );
+    }
+}
+
+/// Every test function the time cell defines, read from its own source,
+/// with the flag that says whether the matrix publishes it: a test the
+/// matrix does not claim must SAY it is a unit test, in its own doc comment.
+fn the_cells_own_tests() -> Vec<(&'static str, bool)> {
+    let source = include_str!("../../platforms/linux/time.rs");
+    let lines: Vec<&str> = source.lines().collect();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim() != "#[test]" {
+            continue;
+        }
+        let Some(next) = lines.get(index + 1) else { break };
+        let trimmed = next.trim();
+        let Some(rest) = trimmed.strip_prefix("fn ") else { continue };
+        let name: alloc::string::String =
+            rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if name.is_empty() {
+            continue;
+        }
+        // The doc comment above the test says whether it is a unit test.
+        let mut is_unit_test = false;
+        for earlier in lines[..index].iter().rev() {
+            let trimmed = earlier.trim();
+            if trimmed.starts_with("///") {
+                if trimmed.contains("UNIT:") {
+                    is_unit_test = true;
+                }
+                continue;
+            }
+            break;
+        }
+        names.push((leak(name), is_unit_test));
+    }
+    names
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn the_cells_own_test_names() -> Vec<&'static str> {
+    the_cells_own_tests()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn leak(name: alloc::string::String) -> &'static str {
+    alloc::boxed::Box::leak(name.into_boxed_str())
 }
 
 /// The compiled schema id matches `time.capnp`'s `@0x…` line.
@@ -358,4 +415,62 @@ fn civil_kernels_anchor_every_calendar_conversion() {
     };
     assert_eq!(diff.years, 1);
     let _ = Duration::from_nanos(1);
+}
+
+// ── The proof gate ──────────────────────────────────────────────────────
+//
+// The matrix PUBLISHES a proof name per method, and a published name is a
+// claim about this tree: "this test exists, and it proves this method".
+// Two ways to lie about that are now impossible to ship:
+//
+//   1. a name that resolves to nothing — the test was renamed or deleted;
+//   2. ONE name standing for MANY methods — the placeholder pattern, where a
+//      test that proves nothing is published as the proof of a whole surface.
+//
+// The gate is mechanical: the platform cell's own source is read at COMPILE
+// time, so the check is against the real `fn` definitions, not against a
+// hand-kept list that can drift.
+
+/// The time cell's own source, read at compile time.
+const PLATFORM_SOURCE_0: &str = include_str!("../../platforms/linux/time.rs");
+
+/// Every source the cell's proofs may live in.
+const PLATFORM_SOURCES: &[&str] = &[PLATFORM_SOURCE_0];
+
+
+/// Does the platform cell really define this test function?
+fn the_platform_defines(test: &str) -> bool {
+    let name = test.rsplit("::").next().unwrap_or(test);
+    PLATFORM_SOURCES.iter().any(|source| source.contains(&alloc::format!("fn {name}(")))
+}
+
+/// Every published proof name resolves to a real test function in the
+/// platform cell. A name that resolves to nothing is a FAILURE.
+#[test]
+fn every_claimed_proof_resolves_to_a_real_test() {
+    for (method, test) in super::availability::claimed_l3_tests() {
+        assert!(
+            the_platform_defines(test),
+            "{method} claims {test}, which is not a test function in ../../platforms/linux/time.rs"
+        );
+    }
+}
+
+/// One proof names ONE method. A name published for many methods is the
+/// placeholder pattern: the matrix would be publishing one test as if it
+/// proved a whole surface.
+#[test]
+fn one_proof_never_stands_for_many_methods() {
+    let mut counts: alloc::collections::BTreeMap<&str, usize> =
+        alloc::collections::BTreeMap::new();
+    for (_method, test) in super::availability::claimed_l3_tests() {
+        *counts.entry(test).or_insert(0) += 1;
+    }
+    for (test, count) in counts {
+        assert_eq!(
+            count, 1,
+            "{test} is published as the proof for {count} methods: a proof \
+             names ONE method"
+        );
+    }
 }

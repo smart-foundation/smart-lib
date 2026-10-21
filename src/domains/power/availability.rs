@@ -18,10 +18,10 @@ impl MethodAvailability {
 }
 
 pub const POWER_AVAILABILITY: &[MethodAvailability] = &[
-    MethodAvailability::real("getBattery", 0, "l3_linux_power::core_works"),
-    MethodAvailability::real("getProfiles", 1, "l3_linux_power::core_works"),
-    MethodAvailability::degraded("setProfile", 2, "l3_linux_power::core_works", "cpufreq energy_performance_preference/scaling_governor write; host-mutating verb, live proof founder-run"),
-    MethodAvailability::real("subscribeBattery", 3, "l3_linux_power::core_works"),
+    MethodAvailability::real("getBattery", 0, "l3_linux_power::get_battery_reads_the_hosts_own_charge"),
+    MethodAvailability::real("getProfiles", 1, "l3_linux_power::get_profiles_answers_with_the_hosts_own_cpufreq_profiles"),
+    MethodAvailability::degraded("setProfile", 2, "l3_linux_power::set_profile_proves_the_write_path_and_leaves_the_host_as_it_found_it", "cpufreq energy_performance_preference/scaling_governor write; the host-mutating verb is proven by a test that reads the active profile, writes another, reads the host back and restores the host exactly as it found it"),
+    MethodAvailability::real("subscribeBattery", 3, "l3_linux_power::subscribe_battery_mints_a_subscription"),
     MethodAvailability::unavailable("suspend", 4, ReasonClass::NoPrivilege, "no-privilege: host power control requires CAP_SYS_BOOT/CAP_SYS_ADMIN for this uid"),
     MethodAvailability::unavailable("hibernate", 5, ReasonClass::NoPrivilege, "no-privilege: host power control requires CAP_SYS_BOOT/CAP_SYS_ADMIN for this uid"),
     MethodAvailability::unavailable("reboot", 6, ReasonClass::NoPrivilege, "no-privilege: host power control requires CAP_SYS_BOOT/CAP_SYS_ADMIN for this uid"),
@@ -29,7 +29,7 @@ pub const POWER_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::unavailable("subscribePowerTelemetry", 8, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
     MethodAvailability::unavailable("getPowerBudget", 9, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
     MethodAvailability::unavailable("setPowerBudget", 10, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
-    MethodAvailability::real("getChargingInfo", 11, "l3_linux_power::core_works"),
+    MethodAvailability::real("getChargingInfo", 11, "l3_linux_power::get_charging_info_answers_with_the_hosts_own_charging_state"),
     MethodAvailability::unavailable("negotiateUsbPd", 12, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
     MethodAvailability::unavailable("getUsbPdContract", 13, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
     MethodAvailability::unavailable("negotiateWirelessCharging", 14, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
@@ -38,7 +38,7 @@ pub const POWER_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::unavailable("getPoEInfo", 17, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
     MethodAvailability::unavailable("configureCellBalancing", 18, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
     MethodAvailability::unavailable("getCellBalancingStatus", 19, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
-    MethodAvailability::real("getFuelGauge", 20, "l3_linux_power::core_works"),
+    MethodAvailability::real("getFuelGauge", 20, "l3_linux_power::get_fuel_gauge_answers_with_the_hosts_own_gauge"),
     MethodAvailability::unavailable("predictThermalRunaway", 21, ReasonClass::NoBackend, "no native UPower/cpufreq surface on this host"),
 ];
 

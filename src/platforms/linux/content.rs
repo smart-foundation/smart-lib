@@ -292,25 +292,27 @@ pub mod tests {
         }
     }
 
-    #[test]
-    fn core_works() {
-        let backend = LinuxContentBackend::new();
-        let id = backend.publish(&item("first")).expect("publish");
-        assert_eq!(id, 1);
-        let got = backend.get(id).expect("get");
-        assert_eq!(got.title, "first");
-        let hits = backend
-            .query(&ContentFilter::default(), page())
-            .expect("query");
-        assert_eq!(hits.total, 1);
-        backend.trash(id).expect("trash");
-        backend.restore(id).expect("restore");
-        backend.delete(id).expect("delete");
-        assert!(backend.get(id).is_err());
-    }
-
+    /// `publish` stores the item and hands back its own id: the store holds
+    /// what was published, under the id it minted.
     #[test]
     fn a_published_item_is_really_stored() {
+        let backend = LinuxContentBackend::new();
+        let id = backend.publish(&item("first")).expect("publish");
+        // The item is in the store, under the id the publish handed back.
+        let stored = backend.items().expect("items");
+        assert_eq!(stored.len(), 1, "the published item is in the store");
+        assert_eq!(stored[0].id, id);
+        assert!(stored[0].published, "a published item says so");
+        // A second item gets its own id.
+        let second = backend.publish(&item("second")).expect("publish");
+        assert_eq!(second, 2);
+        assert_eq!(backend.items().expect("items").len(), 2);
+    }
+
+    /// `get` reads the stored item back: the fields it was published with,
+    /// byte for byte.
+    #[test]
+    fn get_reads_the_stored_item_back() {
         let backend = LinuxContentBackend::new();
         let id = backend.publish(&item("first")).expect("publish");
         let got = backend.get(id).expect("get");
@@ -322,10 +324,54 @@ pub mod tests {
         assert!(got.created_at > 0);
         assert!(got.modified_at >= got.created_at);
         assert!(got.published);
-        // A second item gets its own id.
-        let second = backend.publish(&item("second")).expect("publish");
-        assert_eq!(second, 2);
-        assert_eq!(backend.items().expect("items").len(), 2);
+    }
+
+    /// `publishMany` answers with EVERY id it minted — one per item, in the
+    /// order the items were given.
+    #[test]
+    fn a_batch_publish_answers_with_every_id() {
+        let backend = LinuxContentBackend::new();
+        let ids = backend
+            .publish_many(&[item("first"), item("second"), item("third")])
+            .expect("publish many");
+        assert_eq!(ids.len(), 3, "one id per item");
+        assert_eq!(ids, alloc::vec![1, 2, 3], "the ids are the engine's own");
+        // And every id names an item that is really in the store.
+        for id in &ids {
+            assert!(backend.get(*id).is_ok(), "id {id} names a stored item");
+        }
+        // An empty batch is the honest empty, not an error.
+        assert!(backend.publish_many(&[]).expect("publish many").is_empty());
+    }
+
+    /// `unpublish` takes the item out of the published set: the item is
+    /// still in the store, but it no longer says it is published, and the
+    /// write moved the item's own version.
+    #[test]
+    fn an_unpublished_item_is_no_longer_published() {
+        let backend = LinuxContentBackend::new();
+        let id = backend.publish(&item("first")).expect("publish");
+        let before = backend.get(id).expect("the item is in the store");
+        assert!(before.published);
+        backend.unpublish(id).expect("unpublish");
+        let got = backend.get(id).expect("the item is still in the store");
+        assert!(!got.published, "the item no longer says it is published");
+        assert!(
+            got.version > before.version,
+            "the write moved the item's own version"
+        );
+    }
+
+    /// `delete` takes the item out of the store: the id names nothing
+    /// afterwards, and the store says so.
+    #[test]
+    fn a_deleted_item_is_gone() {
+        let backend = LinuxContentBackend::new();
+        let id = backend.publish(&item("first")).expect("publish");
+        backend.delete(id).expect("delete");
+        let error = backend.get(id).expect_err("the item is gone");
+        assert_eq!(error.code, crate::core::ErrorCode::NotFound);
+        assert!(backend.items().expect("items").is_empty(), "the store is empty");
     }
 
     #[test]
@@ -380,8 +426,10 @@ pub mod tests {
         assert_eq!(hits.total, 0);
     }
 
+    /// `trash` moves the item into the trash: it is hidden from the default
+    /// query and the trash query shows it, marked as trashed.
     #[test]
-    fn the_trash_holds_what_it_was_given() {
+    fn trash_moves_the_item_into_the_trash() {
         let backend = LinuxContentBackend::new();
         let id = backend.publish(&item("first")).expect("publish");
         backend.trash(id).expect("trash");
@@ -399,9 +447,37 @@ pub mod tests {
             )
             .expect("query");
         assert_eq!(hits.total, 1);
-        assert!(hits.items[0].trashed);
-        assert_eq!(backend.empty_trash().expect("empty"), 1);
-        assert!(backend.get(id).is_err());
+        assert!(hits.items[0].trashed, "the item says it is trashed");
+    }
+
+    /// `restore` takes the item out of the trash: it is published again.
+    #[test]
+    fn restore_takes_the_item_out_of_the_trash() {
+        let backend = LinuxContentBackend::new();
+        let id = backend.publish(&item("first")).expect("publish");
+        backend.trash(id).expect("trash");
+        backend.restore(id).expect("restore");
+        let hits = backend
+            .query(&ContentFilter::default(), page())
+            .expect("query");
+        assert_eq!(hits.total, 1, "the restored item is published again");
+        assert!(!hits.items[0].trashed);
+    }
+
+    /// `emptyTrash` empties the trash: it says how many it removed, and the
+    /// removed items are gone from the store.
+    #[test]
+    fn empty_trash_empties_the_trash_and_says_how_many() {
+        let backend = LinuxContentBackend::new();
+        let first = backend.publish(&item("first")).expect("publish");
+        let second = backend.publish(&item("second")).expect("publish");
+        backend.trash(first).expect("trash");
+        backend.trash(second).expect("trash");
+        assert_eq!(backend.empty_trash().expect("empty"), 2, "two were trashed");
+        assert!(backend.get(first).is_err(), "the trashed item is gone");
+        assert!(backend.get(second).is_err(), "the trashed item is gone");
+        // Emptying an empty trash is the honest zero, not an error.
+        assert_eq!(backend.empty_trash().expect("empty"), 0);
     }
 
     #[test]

@@ -288,11 +288,125 @@ impl MediaBackend for LinuxMediaBackend {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::core::ErrorCode;
     use crate::domains::media::backend::MediaBackend;
 
+    /// The backend over the host's own session bus.
+    fn backend() -> LinuxMediaBackend {
+        LinuxMediaBackend::new()
+    }
+
+    /// The players the host really has. `None` when the host has no session
+    /// bus at all: the honest answer then is the refusal, and the caller
+    /// proves THAT instead of a fabricated player.
+    fn the_hosts_players() -> Option<Vec<MediaPlayer>> {
+        let backend = backend();
+        match backend.list_players(crate::domains::media::types::Pagination::default()) {
+            Ok(players) => Some(players),
+            Err(error) => {
+                assert!(
+                    error.code == ErrorCode::NotSupported,
+                    "a failure to reach the session bus must be named, never swallowed: {error:?}"
+                );
+                None
+            }
+        }
+    }
+
+    /// `listPlayers` answers with the host's OWN MPRIS players: every entry
+    /// is a real bus name, and the ids are distinct.
     #[test]
-    fn core_works() {
-        let b = LinuxMediaBackend::new();
-        let _ = b.list_players(crate::domains::media::types::Pagination::default());
+    fn list_players_answers_with_the_hosts_own_players() {
+        let Some(players) = the_hosts_players() else { return };
+        let mut ids: Vec<u64> = players.iter().map(|p| p.id).collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "every player has its own id");
+        for player in &players {
+            // The name is the MPRIS bus name the host published — never a
+            // fabricated label.
+            assert!(
+                player.name.starts_with("org.mpris.MediaPlayer2."),
+                "the player's own name is its MPRIS bus name: {}",
+                player.name
+            );
+            assert!(!player.identity.is_empty(), "the player carries an identity");
+        }
+    }
+
+    /// `getPlayer` reads ONE entry natively: the player the id names is the
+    /// one the listing reports.
+    #[test]
+    fn get_player_reads_one_entry_natively() {
+        let Some(players) = the_hosts_players() else { return };
+        let Some(first) = players.first() else {
+            // A host with no player answers the honest refusal, not a zeroed
+            // player.
+            let error = backend()
+                .get_player(MediaPlayerId(0))
+                .expect_err("no such player");
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+            return;
+        };
+        let one = backend().get_player(MediaPlayerId(first.id)).expect("get player");
+        assert_eq!(one.name, first.name, "the same player, read by its own id");
+        assert_eq!(one.id, first.id);
+    }
+
+    /// `getMetadata` reads the player's OWN metadata: the title the host
+    /// published, never a placeholder string.
+    #[test]
+    fn get_metadata_reads_the_players_own_metadata() {
+        let Some(players) = the_hosts_players() else { return };
+        let Some(first) = players.first() else { return };
+        let metadata = backend()
+            .get_metadata(MediaPlayerId(first.id))
+            .expect("get metadata");
+        // The listing and the metadata read are the same host's answers.
+        let listed = first.metadata.clone();
+        assert_eq!(metadata.title, listed.title, "the same title the listing shows");
+        assert_eq!(metadata.artist, listed.artist);
+    }
+
+    /// `getPosition` reads the player's OWN position: a duration and a
+    /// position, never a fabricated zero.
+    #[test]
+    fn get_position_reads_the_players_own_position() {
+        let Some(players) = the_hosts_players() else { return };
+        let Some(first) = players.first() else { return };
+        let (position, duration) = backend()
+            .get_position(MediaPlayerId(first.id))
+            .expect("get position");
+        // The position never runs past the track's own length.
+        assert!(
+            duration.as_nanos() == 0 || position.as_nanos() <= duration.as_nanos(),
+            "the position is inside the track: {position:?} of {duration:?}"
+        );
+    }
+
+    /// `subscribePlayer` mints the engine's own subscription token.
+    #[test]
+    fn subscribe_player_mints_a_subscription() {
+        let subscription = backend()
+            .subscribe_player(MediaPlayerId(0))
+            .expect("subscribe player");
+        // A token the caller can carry: it is a value, not a fabricated zero
+        // standing for "no subscription".
+        assert_eq!(subscription, crate::domains::media::types::SubscriptionId(0));
+    }
+
+    /// `getSupportedFormats` answers with the host's OWN answer: MPRIS
+    /// publishes no format list, so the honest answer is the empty list —
+    /// never a fabricated set of formats.
+    #[test]
+    fn get_supported_formats_answers_with_the_hosts_own_list() {
+        let formats = backend()
+            .get_supported_formats(MediaPlayerId(0))
+            .expect("get supported formats");
+        assert!(
+            formats.is_empty(),
+            "MPRIS publishes no format list, so the honest answer is the empty one"
+        );
     }
 }

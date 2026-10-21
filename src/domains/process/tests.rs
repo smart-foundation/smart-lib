@@ -152,41 +152,82 @@ fn availability_rows_are_consistent() {
     assert!(method_availability_for("getProcess").is_some());
 }
 
-/// Every claimed `l3_test` exists in the Linux backend's suite.
+/// Every `l3_test` the matrix claims is a real test name in this cell, and
+/// every test here is claimed: a row whose test vanished is a FAIL, and a
+/// test nobody claims is dead evidence.
+///
+/// The suite is read from the cell's OWN source at compile time — never from
+/// a hand-kept list, which is a list that can drift away from the truth.
 #[test]
 fn every_claimed_test_exists() {
-    let tests: &[&str] = &[
-        "l3_linux_process::a_listing_reads_the_kernels_own_proc",
-        "l3_linux_process::one_process_is_read_not_guessed",
-        "l3_linux_process::a_spawn_is_code_complete_and_gated",
-        "l3_linux_process::a_wait_reports_the_hosts_own_exit_status",
-        "l3_linux_process::the_environment_is_the_hosts_own_proc_read",
-        "l3_linux_process::a_subscription_pulls_bounded_and_cancels",
-        "l3_linux_process::exit_notifications_are_real_reaps",
-        "l3_linux_process::status_is_the_kernels_own_numbers",
-        "l3_linux_process::threads_come_from_the_kernels_own_task_directory",
-        "l3_linux_process::memory_maps_are_read_for_this_uids_own_processes",
-        "l3_linux_process::detach_releases_the_backends_own_attachment",
-        "l3_linux_process::a_memory_read_reports_which_guarantee_it_gave",
-        "l3_linux_process::stats_count_the_kernels_own_enumeration",
-        "l3_linux_process::accounting_reads_the_kernels_own_counters",
-        "l3_linux_process::a_window_is_a_series_of_real_samples",
-        "l3_linux_process::groups_are_the_kernels_own_pgid_enumeration",
-        "l3_linux_process::a_group_lists_the_hosts_own_members",
-        "l3_linux_process::limits_are_read_from_the_hosts_own_proc",
-        "l3_linux_process::the_execution_context_is_the_hosts_own_read",
-        "l3_linux_process::a_tree_is_the_hosts_own_parentage",
-        "l3_linux_process::a_failure_report_lands_in_the_backends_own_record",
-        "l3_linux_process::a_respawn_status_is_the_backends_own_record",
-        "l3_linux_process::breakpoints_are_recorded_not_poked",
-        "l3_linux_process::watchpoints_are_recorded_not_armed",
-    ];
     for (method, test) in claimed_l3_tests() {
-        assert!(tests.contains(&test), "{method} claims {test}, which is not in the suite");
+        assert!(
+            the_cells_own_test_names().contains(&test.rsplit("::").next().unwrap_or(test)),
+            "{method} claims {test}, which is not a test in the process cell"
+        );
     }
-    for test in tests {
-        assert!(claimed_l3_tests().any(|(_, t)| t == *test), "{test} is real but unclaimed");
+    for (name, is_unit_test) in the_cells_own_tests() {
+        if is_unit_test {
+            // The test says it proves the engine's own helper, not a contract
+            // method, so the matrix does not publish it.
+            continue;
+        }
+        let claim = alloc::format!("l3_linux_process::{name}");
+        assert!(
+            claimed_l3_tests().any(|(_, t)| t == claim),
+            "{claim} is real but unclaimed by the matrix, and it does not say \
+             it is a unit test either"
+        );
     }
+}
+
+/// Every test function the process cell defines, read from its own source,
+/// with the flag that says whether the matrix publishes it: a test the
+/// matrix does not claim must SAY it is a unit test, in its own doc comment.
+fn the_cells_own_tests() -> Vec<(&'static str, bool)> {
+    let source = include_str!("../../platforms/linux/process.rs");
+    let lines: Vec<&str> = source.lines().collect();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim() != "#[test]" {
+            continue;
+        }
+        let Some(next) = lines.get(index + 1) else { break };
+        let trimmed = next.trim();
+        let Some(rest) = trimmed.strip_prefix("fn ") else { continue };
+        let name: alloc::string::String =
+            rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if name.is_empty() {
+            continue;
+        }
+        // The doc comment above the test says whether it is a unit test.
+        let mut is_unit_test = false;
+        for earlier in lines[..index].iter().rev() {
+            let trimmed = earlier.trim();
+            if trimmed.starts_with("///") {
+                if trimmed.contains("UNIT:") {
+                    is_unit_test = true;
+                }
+                continue;
+            }
+            break;
+        }
+        names.push((leak(name), is_unit_test));
+    }
+    names
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn the_cells_own_test_names() -> Vec<&'static str> {
+    the_cells_own_tests()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn leak(name: alloc::string::String) -> &'static str {
+    alloc::boxed::Box::leak(name.into_boxed_str())
 }
 
 /// The compiled schema id matches `process.capnp`'s `@0x…` line.
@@ -401,4 +442,62 @@ fn threads_and_breakpoints_keep_their_own_shapes() {
     };
     assert!(watch.read && !watch.write);
     assert_eq!(watch.size, 8);
+}
+
+// ── The proof gate ──────────────────────────────────────────────────────
+//
+// The matrix PUBLISHES a proof name per method, and a published name is a
+// claim about this tree: "this test exists, and it proves this method".
+// Two ways to lie about that are now impossible to ship:
+//
+//   1. a name that resolves to nothing — the test was renamed or deleted;
+//   2. ONE name standing for MANY methods — the placeholder pattern, where a
+//      test that proves nothing is published as the proof of a whole surface.
+//
+// The gate is mechanical: the platform cell's own source is read at COMPILE
+// time, so the check is against the real `fn` definitions, not against a
+// hand-kept list that can drift.
+
+/// The process cell's own source, read at compile time.
+const PLATFORM_SOURCE_0: &str = include_str!("../../platforms/linux/process.rs");
+
+/// Every source the cell's proofs may live in.
+const PLATFORM_SOURCES: &[&str] = &[PLATFORM_SOURCE_0];
+
+
+/// Does the platform cell really define this test function?
+fn the_platform_defines(test: &str) -> bool {
+    let name = test.rsplit("::").next().unwrap_or(test);
+    PLATFORM_SOURCES.iter().any(|source| source.contains(&alloc::format!("fn {name}(")))
+}
+
+/// Every published proof name resolves to a real test function in the
+/// platform cell. A name that resolves to nothing is a FAILURE.
+#[test]
+fn every_claimed_proof_resolves_to_a_real_test() {
+    for (method, test) in super::availability::claimed_l3_tests() {
+        assert!(
+            the_platform_defines(test),
+            "{method} claims {test}, which is not a test function in ../../platforms/linux/process.rs"
+        );
+    }
+}
+
+/// One proof names ONE method. A name published for many methods is the
+/// placeholder pattern: the matrix would be publishing one test as if it
+/// proved a whole surface.
+#[test]
+fn one_proof_never_stands_for_many_methods() {
+    let mut counts: alloc::collections::BTreeMap<&str, usize> =
+        alloc::collections::BTreeMap::new();
+    for (_method, test) in super::availability::claimed_l3_tests() {
+        *counts.entry(test).or_insert(0) += 1;
+    }
+    for (test, count) in counts {
+        assert_eq!(
+            count, 1,
+            "{test} is published as the proof for {count} methods: a proof \
+             names ONE method"
+        );
+    }
 }

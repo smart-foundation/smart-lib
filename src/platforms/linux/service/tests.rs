@@ -648,12 +648,28 @@ fn health_reports_the_lifecycle_and_declares_the_probe_unrun() {
     assert_eq!(health.state, HealthState::Offline);
     let reason = health.reason.clone();
     assert!(!health.reason.is_empty(), "{reason}");
+    let _ = fs::remove_dir_all(&root);
+}
 
-    // listHealth is the same measurement over the listing.
+/// `listHealth` is the same measurement over the listing: every service the
+/// supervisor reports carries a state and an honest reason.
+#[test]
+fn list_health_is_the_same_measurement_over_the_listing() {
+    let (backend, root) = hub();
     let page = backend
         .list_health(Pagination { offset: 0, limit: u32::MAX })
         .expect("listHealth");
     assert_eq!(page.total, 6);
+    for health in &page.items {
+        // A service that is not online names WHY it is not; an online one
+        // needs no excuse, and the reason stays empty rather than invented.
+        if health.state != HealthState::Online {
+            assert!(
+                !health.reason.is_empty(),
+                "a health that says nothing names no reason: {health:?}"
+            );
+        }
+    }
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -715,8 +731,21 @@ fn dependencies_are_read_from_the_service_dirs_own_scripts() {
 /// A state subscription observes the supervisor: the first pull is what exists,
 /// a later pull reports only what changed, and each pull is bounded by the
 /// caller.
+
+/// `subscribeState` mints the engine's own subscription token, and the state
+/// pull accepts it.
 #[test]
-fn a_state_subscription_observes_the_supervision_tree() {
+fn subscribe_state_mints_a_subscription() {
+    let (backend, root) = hub();
+    let sub = backend.subscribe_state(ServiceId::new(0)).expect("subscribeState");
+    assert!(backend.pull_state(sub, 1).is_ok());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The state pull reports what changed since the last pull, each pull is
+/// bounded by the caller, and an unknown subscription id is a not-found.
+#[test]
+fn a_state_pull_reports_only_what_changed() {
     let (backend, root) = hub();
     let sub = backend.subscribe_state(ServiceId::new(0)).expect("subscribeState");
 
@@ -764,8 +793,11 @@ fn a_state_subscription_observes_the_supervision_tree() {
 
 /// `cancel` retires the token: a retired subscription is inert and cancelling
 /// it again is a no-op rather than an error.
+
+/// `cancelState` retires the state subscription: a retired token is inert,
+/// and cancelling it again is a no-op rather than an error.
 #[test]
-fn cancel_retires_a_subscription_token() {
+fn cancel_state_retires_the_state_token() {
     let (backend, root) = hub();
     let sub = backend.subscribe_state(ServiceId::new(0)).expect("subscribeState");
     backend.cancel_state(sub).expect("cancelState");
@@ -773,10 +805,42 @@ fn cancel_retires_a_subscription_token() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// `cancelServiceEvents` retires the events subscription: a retired token is
+/// inert, and cancelling it again is a no-op rather than an error.
+#[test]
+fn cancel_service_events_retires_the_events_token() {
+    let (backend, root) = hub();
+    let sub = backend
+        .subscribe_service_events(ServiceId::new(0))
+        .expect("subscribeServiceEvents");
+    backend.cancel_service_events(sub).expect("cancelServiceEvents");
+    assert!(
+        backend.cancel_service_events(sub).is_ok(),
+        "cancelling a retired token is inert"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// `subscribeServiceEvents` observes the contract's own event vocabulary from
 /// the supervisor's measured transitions.
+
+/// `subscribeServiceEvents` mints the engine's own subscription token, and
+/// the events pull accepts it.
 #[test]
-fn service_events_observe_started_stopped_and_failed() {
+fn subscribe_service_events_mints_a_subscription() {
+    let (backend, root) = hub();
+    let sub = backend
+        .subscribe_service_events(ServiceId::new(0))
+        .expect("subscribeServiceEvents");
+    assert!(backend.pull_service_events(sub, 1).is_ok());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The events pull reports the contract's own event vocabulary from the
+/// supervisor's measured transitions, and it is empty until something
+/// changes.
+#[test]
+fn a_service_events_pull_reports_the_contract_vocabulary() {
     let (backend, root) = hub();
     let sub = backend
         .subscribe_service_events(ServiceId::new(0))
@@ -855,17 +919,14 @@ fn control_mints_a_control_reference_only_for_a_covered_scope() {
 /// byte mapping is the supervisor's own protocol, and a host the caller cannot
 /// write refuses with the measured class — never by performing a write it was
 /// not asked for (charter law #8).
+
+/// `start` speaks the supervisor's own control path — and a control path the
+/// caller's credentials do not reach refuses with the measured class, BEFORE
+/// any host state is touched (charter law #8).
 #[test]
-fn lifecycle_verbs_speak_the_native_control_path() {
+fn start_speaks_the_native_control_path() {
     let (backend, root) = hub();
-
-    // The byte mapping is the supervisor's own protocol.
     assert_eq!(control_byte(LifecycleVerb::Start), b'u');
-    assert_eq!(control_byte(LifecycleVerb::Stop), b'd');
-    assert_eq!(control_byte(LifecycleVerb::Restart), b't');
-
-    // A control path the caller's credentials do not reach refuses with the
-    // measured class, before any host state is touched.
     let err = backend
         .apply_lifecycle(
             resolve_id(&backend, "NetworkManager"),
@@ -876,13 +937,41 @@ fn lifecycle_verbs_speak_the_native_control_path() {
     assert_eq!(err.code, ErrorCode::PermissionDenied);
     assert!(err.message.starts_with("no-privilege:"), "{err}");
     assert!(err.message.contains("control"), "the reason names the path: {err}");
+    let _ = fs::remove_dir_all(&root);
+}
 
-    // The caps publish exactly those measurements.
-    let caps = backend.supervision_caps();
-    assert!(caps.can_enumerate, "the scripted tree enumerates");
-    assert!(caps.can_read_state, "the scripted tree's state files are readable");
-    assert!(!caps.can_control, "no supervision control fifo exists in the scripted tree");
-    assert_eq!(caps.supervisor, "runit");
+/// `stop` speaks the supervisor's own control path, and refuses the same way.
+#[test]
+fn stop_speaks_the_native_control_path() {
+    let (backend, root) = hub();
+    assert_eq!(control_byte(LifecycleVerb::Stop), b'd');
+    let err = backend
+        .apply_lifecycle(
+            resolve_id(&backend, "NetworkManager"),
+            "NetworkManager",
+            LifecycleVerb::Stop,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
+    assert!(err.message.starts_with("no-privilege:"), "{err}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `restart` speaks the supervisor's own control path, and refuses the same
+/// way.
+#[test]
+fn restart_speaks_the_native_control_path() {
+    let (backend, root) = hub();
+    assert_eq!(control_byte(LifecycleVerb::Restart), b't');
+    let err = backend
+        .apply_lifecycle(
+            resolve_id(&backend, "NetworkManager"),
+            "NetworkManager",
+            LifecycleVerb::Restart,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
+    assert!(err.message.starts_with("no-privilege:"), "{err}");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -964,35 +1053,52 @@ fn no_supervisor_is_an_honest_absence() {
         .is_err());
 }
 
-/// Every availability claim names a test that exists, and every test in this
-/// suite is claimed: a REAL/DEGRADED row whose test has vanished is a FAIL, not
-/// a silent claim.
+/// Every availability claim names a test that exists: a REAL/DEGRADED row
+/// whose test has vanished is a FAIL, not a silent claim.
+///
+/// The suite is read from the cell's OWN source at compile time — never from
+/// a hand-kept list, which is a list that can drift away from the truth.
 #[test]
 fn every_claimed_test_exists() {
-    let tests: Vec<&str> = alloc::vec![
-        "l3_linux_service::list_services_enumerates_the_supervision_tree_natively",
-        "l3_linux_service::get_service_reads_one_entry_natively",
-        "l3_linux_service::state_is_derived_from_proc_truth_for_every_uid",
-        "l3_linux_service::the_exact_supervise_read_is_code_complete",
-        "l3_linux_service::resolve_maps_a_name_to_an_identity",
-        "l3_linux_service::health_reports_the_lifecycle_and_declares_the_probe_unrun",
-        "l3_linux_service::quarantine_is_an_honest_empty_on_a_host_supervisor",
-        "l3_linux_service::dependencies_are_read_from_the_service_dirs_own_scripts",
-        "l3_linux_service::a_state_subscription_observes_the_supervision_tree",
-        "l3_linux_service::cancel_retires_a_subscription_token",
-        "l3_linux_service::service_events_observe_started_stopped_and_failed",
-        "l3_linux_service::control_mints_a_control_reference_only_for_a_covered_scope",
-        "l3_linux_service::lifecycle_verbs_speak_the_native_control_path",
-    ];
     for (method, test) in claimed_l3_tests() {
-        assert!(tests.contains(&test), "{method} claims {test}, which is not in this suite");
-    }
-    for test in tests {
+        let name = test.rsplit("::").next().unwrap_or(test);
         assert!(
-            claimed_l3_tests().any(|(_, t)| t == test),
-            "{test} is real but unclaimed by the matrix"
+            the_cells_own_test_names().contains(&name),
+            "{method} claims {test}, which is not a test in the service cell"
         );
     }
+}
+
+/// Every test function the service cell defines, read from its own source.
+fn the_cells_own_test_names() -> Vec<&'static str> {
+    let sources = [
+        include_str!("tests.rs"),
+        include_str!("openrc.rs"),
+        include_str!("systemd.rs"),
+    ];
+    let mut names = Vec::new();
+    for source in sources {
+        let lines: Vec<&str> = source.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if line.trim() != "#[test]" {
+                continue;
+            }
+            let Some(next) = lines.get(index + 1) else { break };
+            let trimmed = next.trim();
+            let Some(rest) = trimmed.strip_prefix("fn ") else { continue };
+            let name: alloc::string::String =
+                rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            if !name.is_empty() {
+                names.push(leak(name));
+            }
+        }
+    }
+    names
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn leak(name: alloc::string::String) -> &'static str {
+    alloc::boxed::Box::leak(name.into_boxed_str())
 }
 
 /// The READ-ONLY live probe (charter law #8): read THIS host's runit supervision

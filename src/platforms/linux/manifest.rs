@@ -224,23 +224,6 @@ pub mod tests {
     }
 
     #[test]
-    fn core_works() {
-        let backend = LinuxManifestBackend::new();
-        backend
-            .put(manifest("smart.shell", "Shell", Vec::new()))
-            .expect("put");
-        let resolved = backend.resolve("smart.shell").expect("resolve");
-        assert_eq!(resolved.display_name, "Shell");
-        let listed = backend.list(page()).expect("list");
-        assert_eq!(listed.total, 1);
-        let report = backend.validate("smart.shell").expect("validate");
-        assert!(report.valid);
-        let by_name = backend.resolve_by_name("Smart", "Shell").expect("by name");
-        assert_eq!(by_name.name, "smart.shell");
-        assert!(backend.manifest_caps().contains(&"manifest.inproc"));
-    }
-
-    #[test]
     fn a_registered_manifest_resolves() {
         let backend = LinuxManifestBackend::new();
         backend
@@ -271,6 +254,9 @@ pub mod tests {
         assert_eq!(listed.items[1].name, "b.two");
     }
 
+    /// `validate` reports the dependency the manifest cannot find: the
+    /// report is not green while the dependency is missing, and it turns
+    /// green when the store carries it.
     #[test]
     fn a_validation_reports_the_dependency_it_cannot_find() {
         let backend = LinuxManifestBackend::new();
@@ -286,7 +272,7 @@ pub mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("schema.base"));
 
-        // A dependency no manifest offers is an error, not a green light.
+        // A dependency the store carries is no longer an error.
         backend
             .put(manifest("schema.base", "Base", Vec::new()))
             .expect("put");
@@ -303,6 +289,30 @@ pub mod tests {
             .expect("put");
         let report = backend.validate("app.two").expect("validate");
         assert!(report.valid);
+    }
+
+    /// `validateDependencies` answers the same question the dependency
+    /// axis asks: the report names the dependency the store cannot find.
+    #[test]
+    fn validate_dependencies_reports_the_dependency_it_cannot_find() {
+        let backend = LinuxManifestBackend::new();
+        backend
+            .put(manifest("app.one", "One", vec![ManifestDependency {
+                schema_id: 42,
+                name: "schema.base".to_string(),
+                optional: false,
+            }]))
+            .expect("put");
+        let report = backend.validate_dependencies("app.one").expect("validate dependencies");
+        assert!(!report.valid, "the dependency is not in the store");
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("schema.base"));
+        // With the dependency in the store, the report turns green.
+        backend
+            .put(manifest("schema.base", "Base", Vec::new()))
+            .expect("put");
+        let report = backend.validate_dependencies("app.one").expect("validate dependencies");
+        assert!(report.valid, "{:?}", report.errors);
     }
 
     #[test]

@@ -1759,15 +1759,54 @@ mod tests {
         assert_eq!(page.items[0].size_bytes, b"via the seam".len() as u64);
     }
 
+    /// `clearContent` relinquishes the selection: the seat no longer holds
+    /// the copy, and the ledger keeps it (the history is not the selection).
     #[test]
-    fn clear_content_relinquishes_and_clear_history_empties_the_ledger_only() {
+    fn clear_content_relinquishes_the_selection() {
+        let backend = seat_backend(Scripted::seat());
+        backend
+            .set_content(ClipboardContent { mime_type: "text/plain".into(), data: b"x".to_vec() })
+            .unwrap();
+        assert!(matches!(
+            backend.get_content("text/plain").unwrap(),
+            ContentOutcome::Content(_)
+        ));
+        backend.clear_content().unwrap();
+        // The selection is empty now.
+        assert_eq!(
+            backend.get_content("text/plain").unwrap(),
+            ContentOutcome::Empty,
+            "the selection was relinquished"
+        );
+        // And the ledger still holds the copy: clearing the selection is not
+        // clearing the history.
+        assert_eq!(
+            backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().total,
+            1,
+            "the history keeps the copy"
+        );
+    }
+
+    /// `clearHistory` empties the ledger ONLY: the ledger is empty, and the
+    /// seat's own selection is untouched.
+    #[test]
+    fn clear_history_empties_the_ledger_only() {
         let backend = seat_backend(Scripted::seat());
         backend
             .set_content(ClipboardContent { mime_type: "text/plain".into(), data: b"x".to_vec() })
             .unwrap();
         assert_eq!(backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().total, 1);
         backend.clear_history().unwrap();
-        assert_eq!(backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().total, 0);
+        assert_eq!(
+            backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().total,
+            0,
+            "the ledger is empty"
+        );
+        // The selection the seat holds is a different thing, and it stays.
+        assert!(matches!(
+            backend.get_content("text/plain").unwrap(),
+            ContentOutcome::Content(_)
+        ));
     }
 
     #[test]
@@ -1839,6 +1878,16 @@ mod tests {
         assert!(backend.pull_changes(sub, 10).unwrap().is_empty());
     }
 
+    /// `subscribeChanges` mints the engine's own subscription token, and the
+    /// pull accepts it.
+    #[test]
+    fn subscribe_changes_mints_a_subscription() {
+        let backend = seat_backend(Scripted::seat());
+        let sub = backend.subscribe_changes().unwrap();
+        // The token is a value the pull takes.
+        assert!(backend.pull_changes(sub, 1).is_ok());
+    }
+
     #[test]
     fn cancel_retires_the_subscription_token() {
         let backend = seat_backend(Scripted::seat());
@@ -1859,14 +1908,47 @@ mod tests {
         assert_eq!(mimes, vec!["text/plain".to_string(), "image/png".to_string()]);
     }
 
+    /// `pinItem` flips the ledger's own flag: the entry says it is pinned,
+    /// and an id the ledger does not hold is an honest absence.
     #[test]
-    fn pin_and_unpin_flip_the_ledger_flag_and_delete_removes() {
+    fn pin_item_flips_the_ledger_flag() {
+        let backend = seat_backend(Scripted::seat());
+        backend.set_content(ClipboardContent { mime_type: "text/plain".into(), data: b"z".to_vec() }).unwrap();
+        let id = backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().items[0].id;
+        assert!(!backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().items[0].pinned);
+        backend.pin_item(id).unwrap();
+        assert!(
+            backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().items[0].pinned,
+            "the entry says it is pinned"
+        );
+        assert_eq!(
+            backend.pin_item(crate::core::ids::ClipboardId::new(999)).unwrap_err().code,
+            ErrorCode::NotFound,
+            "an id the ledger does not hold is an honest absence"
+        );
+    }
+
+    /// `unpinItem` clears the ledger's own flag.
+    #[test]
+    fn unpin_item_clears_the_ledger_flag() {
         let backend = seat_backend(Scripted::seat());
         backend.set_content(ClipboardContent { mime_type: "text/plain".into(), data: b"z".to_vec() }).unwrap();
         let id = backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().items[0].id;
         backend.pin_item(id).unwrap();
-        assert!(backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().items[0].pinned);
-        assert_eq!(backend.pin_item(crate::core::ids::ClipboardId::new(999)).unwrap_err().code, ErrorCode::NotFound);
+        backend.unpin_item(id).unwrap();
+        assert!(
+            !backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().items[0].pinned,
+            "the pin is gone"
+        );
+    }
+
+    /// `deleteItem` removes the entry from the ledger: the id names nothing
+    /// afterwards, and the second delete is an honest absence.
+    #[test]
+    fn delete_item_removes_from_the_ledger() {
+        let backend = seat_backend(Scripted::seat());
+        backend.set_content(ClipboardContent { mime_type: "text/plain".into(), data: b"z".to_vec() }).unwrap();
+        let id = backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().items[0].id;
         backend.delete_item(id).unwrap();
         assert_eq!(backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap().total, 0);
         assert_eq!(backend.delete_item(id).unwrap_err().code, ErrorCode::NotFound);
@@ -1918,11 +2000,21 @@ mod tests {
         assert_eq!(backend.convert_content(id, "application/json").unwrap(), ConversionOutcome::Unsupported);
     }
 
+    /// `getSizeLimits` answers with the backend's OWN policy: the limits it
+    /// declares, never a zero standing for "unset".
     #[test]
-    fn size_limits_are_the_backends_own_policy_and_settable() {
+    fn size_limits_are_the_backends_own_policy() {
         let backend = seat_backend(Scripted::seat());
         let limits = backend.get_size_limits().unwrap();
         assert!(limits.max_history_count > 0, "the default policy is declared, not zero");
+        assert!(limits.max_item_size > 0, "the default policy is declared, not zero");
+    }
+
+    /// `setSizeLimits` changes the backend's own policy, and the next read
+    /// says so.
+    #[test]
+    fn set_size_limits_changes_the_backend_policy() {
+        let backend = seat_backend(Scripted::seat());
         backend
             .set_size_limits(ClipboardSizeLimits { max_item_size: 1, max_history_size: 0, max_history_count: 0 })
             .unwrap();

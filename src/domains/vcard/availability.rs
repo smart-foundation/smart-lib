@@ -111,12 +111,12 @@ pub const VCARD_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real(
         "parseVCard",
         2,
-        "l3_linux_vcard::a_vcard_round_trips_through_the_parser_and_the_formatter",
+        "l3_linux_vcard::parse_v_card_reads_the_fields_the_bytes_carry",
     ),
     MethodAvailability::real(
         "formatVCard",
         3,
-        "l3_linux_vcard::a_vcard_round_trips_through_the_parser_and_the_formatter",
+        "l3_linux_vcard::format_v_card_writes_the_fields_the_card_holds",
     ),
     MethodAvailability::real(
         "getSupportedVersions",
@@ -126,12 +126,12 @@ pub const VCARD_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real(
         "getSyncToken",
         5,
-        "l3_linux_vcard::a_sync_token_reports_the_changes_since_the_token",
+        "l3_linux_vcard::get_sync_token_reports_the_engines_own_change_counter",
     ),
     MethodAvailability::real(
         "syncChanges",
         6,
-        "l3_linux_vcard::a_sync_token_reports_the_changes_since_the_token",
+        "l3_linux_vcard::sync_changes_hands_back_the_changes_since_the_token",
     ),
     MethodAvailability::unavailable(
         "resolveConflict",

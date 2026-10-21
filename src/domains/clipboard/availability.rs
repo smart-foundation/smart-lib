@@ -167,7 +167,7 @@ pub const CLIPBOARD_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "setContent",
         1,
-        "l3_linux_clipboard::set_content_claims_the_selection_natively",
+        "l3_linux_clipboard::set_content_claims_the_selection_natively_and_records_history",
         "host-mutating: the process becomes the selection owner over the native transport (X11 \
          CLIPBOARD / wlr-data-control); the mapping is mock-proven and the live bring-back is \
          founder-run; the read after a write is served from the engine's own offer, not a \
@@ -207,7 +207,7 @@ pub const CLIPBOARD_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::real(
         "subscribeChanges",
         5,
-        "l3_linux_clipboard::subscription_pulls_are_bounded_and_merge_native_events",
+        "l3_linux_clipboard::subscribe_changes_mints_a_subscription",
     ),
     MethodAvailability::degraded(
         "pullChanges",
@@ -231,14 +231,14 @@ pub const CLIPBOARD_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "pinItem",
         8,
-        "l3_linux_clipboard::pin_and_unpin_flip_the_ledger_flag",
+        "l3_linux_clipboard::pin_item_flips_the_ledger_flag",
         "host-mutating: pins an item in the engine-side ledger against auto-expiry; the mapping is \
          mock-proven and the live bring-back is founder-run; the ledger is this process's",
     ),
     MethodAvailability::degraded(
         "unpinItem",
         9,
-        "l3_linux_clipboard::pin_and_unpin_flip_the_ledger_flag",
+        "l3_linux_clipboard::unpin_item_clears_the_ledger_flag",
         "host-mutating: unpins an item in the engine-side ledger; the mapping is mock-proven and \
          the live bring-back is founder-run; the ledger is this process's",
     ),

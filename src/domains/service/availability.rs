@@ -207,7 +207,7 @@ pub const SERVICE_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "listHealth",
         5,
-        "l3_linux_service::health_reports_the_lifecycle_and_declares_the_probe_unrun",
+        "l3_linux_service::list_health_is_the_same_measurement_over_the_listing",
         "the same degradation per service, over the bounded listing",
     ),
     MethodAvailability::degraded(
@@ -231,7 +231,7 @@ pub const SERVICE_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "subscribeState",
         3,
-        "l3_linux_service::a_state_subscription_observes_the_supervision_tree",
+        "l3_linux_service::subscribe_state_mints_a_subscription",
         "the engine's own observation: subscribing mints a token, each pull re-reads the \
          supervisor's state natively and diffs it against the previous pull. The events are the \
          engine's measurement, not the supervisor's event stream, and each pull is bounded by the \
@@ -240,19 +240,19 @@ pub const SERVICE_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "pullState",
         0x0300,
-        "l3_linux_service::a_state_subscription_observes_the_supervision_tree",
+        "l3_linux_service::a_state_pull_reports_only_what_changed",
         "pulls up to the caller's maxStates and reports the transitions the re-enumeration found; \
          a pull that finds nothing is an empty batch, not an invented event",
     ),
     MethodAvailability::real(
         "cancelState",
         0x0301,
-        "l3_linux_service::cancel_retires_a_subscription_token",
+        "l3_linux_service::cancel_state_retires_the_state_token",
     ),
     MethodAvailability::degraded(
         "subscribeServiceEvents",
         12,
-        "l3_linux_service::service_events_observe_started_stopped_and_failed",
+        "l3_linux_service::subscribe_service_events_mints_a_subscription",
         "the same engine-side observation, mapped onto the contract's event vocabulary \
          (started/stopped/failed) from the supervisor's measured transitions; a supervisor's own \
          log stream is logging.capnp's surface, not this one",
@@ -260,13 +260,13 @@ pub const SERVICE_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "pullServiceEvents",
         0x0C00,
-        "l3_linux_service::service_events_observe_started_stopped_and_failed",
+        "l3_linux_service::a_service_events_pull_reports_the_contract_vocabulary",
         "bounded by the caller's maxEvents, ordered by the transition the backend observed",
     ),
     MethodAvailability::real(
         "cancelServiceEvents",
         0x0C01,
-        "l3_linux_service::cancel_retires_a_subscription_token",
+        "l3_linux_service::cancel_service_events_retires_the_events_token",
     ),
     // ── The one gated surface ─────────────────────────────────────────
     MethodAvailability::real(
@@ -278,7 +278,7 @@ pub const SERVICE_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "start",
         0xFFFF,
-        "l3_linux_service::lifecycle_verbs_speak_the_native_control_path",
+        "l3_linux_service::start_speaks_the_native_control_path",
         "host-mutating: init.capnp's InitService owns this authority (service.capnp deleted its own \
          copies); until that domain lands this backend exposes the supervisor's native control \
          path (runit's supervise control FIFO — a byte, no `sv` fork; systemd's system bus) mapped \
@@ -288,13 +288,13 @@ pub const SERVICE_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "stop",
         0xFFFE,
-        "l3_linux_service::lifecycle_verbs_speak_the_native_control_path",
+        "l3_linux_service::stop_speaks_the_native_control_path",
         "host-mutating: the same native control path as `start`, with the supervisor's down byte",
     ),
     MethodAvailability::degraded(
         "restart",
         0xFFFD,
-        "l3_linux_service::lifecycle_verbs_speak_the_native_control_path",
+        "l3_linux_service::restart_speaks_the_native_control_path",
         "host-mutating: the same native control path, with the supervisor's terminate-and-restart \
          byte",
     ),

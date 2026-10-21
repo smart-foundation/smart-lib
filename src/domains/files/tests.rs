@@ -150,84 +150,82 @@ fn availability_rows_are_consistent() {
 }
 
 /// Every claimed `l3_test` exists in the Linux backend's suite, and the suite
-/// claims every test it has (a REAL claim with a vanished test is a FAIL).
+/// Every `l3_test` the matrix claims is a real test name in this cell, and
+/// every test here is claimed: a row whose test vanished is a FAIL, and a
+/// test nobody claims is dead evidence.
+///
+/// The suite is read from the cell's OWN source at compile time — never from
+/// a hand-kept list, which is a list that can drift away from the truth.
 #[test]
 fn every_claimed_test_exists() {
-    let tests: &[&str] = &[
-        "l3_linux_files::open_reads_the_hosts_own_descriptor",
-        "l3_linux_files::close_retires_the_descriptor",
-        "l3_linux_files::read_serves_the_window_from_the_kernels_own_mapping",
-        "l3_linux_files::write_lands_the_bytes_at_the_offset",
-        "l3_linux_files::flush_is_fsync",
-        "l3_linux_files::a_listing_is_filtered_sorted_and_paginated",
-        "l3_linux_files::a_directory_is_created_with_its_parents",
-        "l3_linux_files::statx_reports_the_kernels_own_metadata",
-        "l3_linux_files::existence_is_a_stat_not_a_guess",
-        "l3_linux_files::a_rename_moves_the_hosts_own_entry",
-        "l3_linux_files::remove_takes_a_file_or_a_tree",
-        "l3_linux_files::a_copy_is_the_kernels_own_copy_file_range",
-        "l3_linux_files::a_symlink_is_the_hosts_own_link",
-        "l3_linux_files::special_paths_are_the_hosts_own_xdg_directories",
-        "l3_linux_files::a_watch_reports_the_kernels_own_events",
-        "l3_linux_files::a_name_search_matches_the_walks_own_entries",
-        "l3_linux_files::a_file_is_created_with_content_and_parents",
-        "l3_linux_files::touch_is_utimensat_now",
-        "l3_linux_files::a_hard_link_is_the_hosts_own_inode",
-        "l3_linux_files::a_symlink_resolves_to_the_hosts_own_target",
-        "l3_linux_files::the_cwd_is_the_processes_own",
-        "l3_linux_files::a_tree_walk_is_bounded_and_paginated",
-        "l3_linux_files::disk_usage_is_statvfs_and_proc_mounts",
-        "l3_linux_files::extended_metadata_is_statx_and_the_hosts_own_tables",
-        "l3_linux_files::a_comparison_reports_identity_or_the_diff",
-        "l3_linux_files::a_lock_is_the_kernels_own_fcntl_lock",
-        "l3_linux_files::locks_are_listed_from_this_processes_own_table",
-        "l3_linux_files::versions_are_real_objects_in_the_backends_own_store",
-        "l3_linux_files::a_stored_version_round_trips",
-        "l3_linux_files::a_version_comparison_reports_the_real_difference",
-        "l3_linux_files::a_content_addressed_store_looks_up_by_digest",
-        "l3_linux_files::storing_content_addressed_writes_a_real_object",
-        "l3_linux_files::dedupe_measures_the_hosts_own_inode_sharing",
-        "l3_linux_files::an_ephemeral_file_is_a_memfd",
-        "l3_linux_files::a_compression_policy_round_trips_through_the_hosts_own_xattrs",
-        "l3_linux_files::dedupe_stats_are_the_hosts_own_measurement",
-        "l3_linux_files::a_batch_copy_reports_every_item",
-        "l3_linux_files::a_batch_move_reports_every_item",
-        "l3_linux_files::a_batch_delete_reports_every_item",
-        "l3_linux_files::a_directory_size_is_the_walks_own_total",
-        "l3_linux_files::directory_stats_count_the_walks_own_types",
-        "l3_linux_files::comparing_directories_reports_the_real_difference",
-        "l3_linux_files::activity_is_this_backends_own_recorded_trail",
-        "l3_linux_files::a_hash_is_the_backends_own_sha256_over_the_real_bytes",
-        "l3_linux_files::a_checksum_compares_the_computed_and_the_stored_bytes",
-        "l3_linux_files::a_lifecycle_policy_round_trips_through_the_hosts_own_xattrs",
-        "l3_linux_files::applying_a_lifecycle_policy_acts_on_the_real_files_it_names",
-        "l3_linux_files::an_audit_subscription_pulls_bounded_and_cancels",
-        "l3_linux_files::a_content_search_finds_the_real_lines",
-        "l3_linux_files::a_branch_names_a_stored_version",
-        "l3_linux_files::a_merge_writes_the_stores_own_bytes",
-        "l3_linux_files::branches_list_from_the_stores_own_records",
-        "l3_linux_files::the_trash_is_the_hosts_own_trash_directory",
-        "l3_linux_files::a_trash_restore_moves_the_hosts_own_file_back",
-        "l3_linux_files::emptying_the_trash_removes_the_hosts_own_entries",
-        "l3_linux_files::recent_files_are_read_from_the_hosts_own_record",
-        "l3_linux_files::a_default_app_comes_from_the_hosts_own_mimeapps",
-        "l3_linux_files::health_is_the_measured_half_only",
-        "l3_linux_files::a_quota_reports_the_measured_half",
-        "l3_linux_files::a_snapshot_is_a_content_addressed_reference",
-        "l3_linux_files::an_acquired_capability_binds_a_service_to_its_path",
-        "l3_linux_files::a_bound_service_operates_on_its_path",
-        "l3_linux_files::a_bound_service_retires_its_descriptor",
-        "l3_linux_files::a_watch_pull_is_bounded_and_cancellable",
-    ];
     for (method, test) in claimed_l3_tests() {
-        assert!(tests.contains(&test), "{method} claims {test}, which is not in the suite");
-    }
-    for test in tests {
         assert!(
-            claimed_l3_tests().any(|(_, t)| t == *test),
-            "{test} is real but unclaimed by the matrix"
+            the_cells_own_test_names().contains(&test.rsplit("::").next().unwrap_or(test)),
+            "{method} claims {test}, which is not a test in the files cell"
         );
     }
+    for (name, is_unit_test) in the_cells_own_tests() {
+        if is_unit_test {
+            // The test says it proves the engine's own helper, not a contract
+            // method, so the matrix does not publish it.
+            continue;
+        }
+        let claim = alloc::format!("l3_linux_files::{name}");
+        assert!(
+            claimed_l3_tests().any(|(_, t)| t == claim),
+            "{claim} is real but unclaimed by the matrix, and it does not say \
+             it is a unit test either"
+        );
+    }
+}
+
+/// Every test function the files cell defines, read from its own source,
+/// with the flag that says whether the matrix publishes it: a test the
+/// matrix does not claim must SAY it is a unit test, in its own doc comment.
+fn the_cells_own_tests() -> Vec<(&'static str, bool)> {
+    let source = include_str!("../../platforms/linux/files.rs");
+    let lines: Vec<&str> = source.lines().collect();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim() != "#[test]" {
+            continue;
+        }
+        let Some(next) = lines.get(index + 1) else { break };
+        let trimmed = next.trim();
+        let Some(rest) = trimmed.strip_prefix("fn ") else { continue };
+        let name: alloc::string::String =
+            rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if name.is_empty() {
+            continue;
+        }
+        // The doc comment above the test says whether it is a unit test.
+        let mut is_unit_test = false;
+        for earlier in lines[..index].iter().rev() {
+            let trimmed = earlier.trim();
+            if trimmed.starts_with("///") {
+                if trimmed.contains("UNIT:") {
+                    is_unit_test = true;
+                }
+                continue;
+            }
+            break;
+        }
+        names.push((leak(name), is_unit_test));
+    }
+    names
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn the_cells_own_test_names() -> Vec<&'static str> {
+    the_cells_own_tests()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The names are read at compile time, so they live for the whole run.
+fn leak(name: alloc::string::String) -> &'static str {
+    alloc::boxed::Box::leak(name.into_boxed_str())
 }
 
 /// The compiled schema id matches `files.capnp`'s `@0x…` line.
@@ -575,4 +573,62 @@ fn the_enum_mappings_are_bijective() {
     .expect("deserialize");
     let root = reader.get_root::<files_capnp::file_info::Reader<'_>>().expect("root");
     assert_eq!(FileInfo::from_reader(&root).mime_type, "text/plain");
+}
+
+// ── The proof gate ──────────────────────────────────────────────────────
+//
+// The matrix PUBLISHES a proof name per method, and a published name is a
+// claim about this tree: "this test exists, and it proves this method".
+// Two ways to lie about that are now impossible to ship:
+//
+//   1. a name that resolves to nothing — the test was renamed or deleted;
+//   2. ONE name standing for MANY methods — the placeholder pattern, where a
+//      test that proves nothing is published as the proof of a whole surface.
+//
+// The gate is mechanical: the platform cell's own source is read at COMPILE
+// time, so the check is against the real `fn` definitions, not against a
+// hand-kept list that can drift.
+
+/// The files cell's own source, read at compile time.
+const PLATFORM_SOURCE_0: &str = include_str!("../../platforms/linux/files.rs");
+
+/// Every source the cell's proofs may live in.
+const PLATFORM_SOURCES: &[&str] = &[PLATFORM_SOURCE_0];
+
+
+/// Does the platform cell really define this test function?
+fn the_platform_defines(test: &str) -> bool {
+    let name = test.rsplit("::").next().unwrap_or(test);
+    PLATFORM_SOURCES.iter().any(|source| source.contains(&alloc::format!("fn {name}(")))
+}
+
+/// Every published proof name resolves to a real test function in the
+/// platform cell. A name that resolves to nothing is a FAILURE.
+#[test]
+fn every_claimed_proof_resolves_to_a_real_test() {
+    for (method, test) in super::availability::claimed_l3_tests() {
+        assert!(
+            the_platform_defines(test),
+            "{method} claims {test}, which is not a test function in ../../platforms/linux/files.rs"
+        );
+    }
+}
+
+/// One proof names ONE method. A name published for many methods is the
+/// placeholder pattern: the matrix would be publishing one test as if it
+/// proved a whole surface.
+#[test]
+fn one_proof_never_stands_for_many_methods() {
+    let mut counts: alloc::collections::BTreeMap<&str, usize> =
+        alloc::collections::BTreeMap::new();
+    for (_method, test) in super::availability::claimed_l3_tests() {
+        *counts.entry(test).or_insert(0) += 1;
+    }
+    for (test, count) in counts {
+        assert_eq!(
+            count, 1,
+            "{test} is published as the proof for {count} methods: a proof \
+             names ONE method"
+        );
+    }
 }

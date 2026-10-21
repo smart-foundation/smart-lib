@@ -851,6 +851,21 @@ mod tests {
         assert!(again.as_nanos() >= monotonic.as_nanos());
     }
 
+    /// `monotonicNow` is the kernel's own monotonic reading: it never goes
+    /// backwards, and it is far smaller than the wall clock.
+    #[test]
+    fn monotonic_now_is_the_kernels_own_monotonic_reading() {
+        let backend = LinuxClockBackend::new();
+        let monotonic = backend.monotonic_now().expect("monotonic");
+        let realtime = backend.realtime_now().expect("realtime");
+        assert!(
+            monotonic.as_nanos() < realtime.as_nanos(),
+            "the monotonic reading is since boot, not since the epoch"
+        );
+        let again = backend.monotonic_now().expect("monotonic again");
+        assert!(again.as_nanos() >= monotonic.as_nanos(), "it never goes backwards");
+    }
+
     /// `info` reports the kernel's own clocks, with the boot epoch from
     /// `/proc/stat` rather than an arithmetic guess.
     #[test]
@@ -951,6 +966,15 @@ mod tests {
             ErrorCode::NotFound
         );
         backend.cancel_timers(subscription).expect("cancel");
+    }
+
+    /// `subscribeTimers` mints the engine's own subscription token.
+    #[test]
+    fn subscribe_timers_mints_a_subscription() {
+        let backend = LinuxClockBackend::new();
+        let subscription = backend.subscribe_timers(&Default::default()).expect("subscribe");
+        // The token is a value the pull takes.
+        assert!(backend.pull_timers(subscription).is_ok());
     }
 
     #[test]
@@ -1057,6 +1081,32 @@ mod tests {
         );
     }
 
+    /// `createVirtualClock` mints a clock the engine owns: it starts at the
+    /// time it was given and does not move with the wall clock.
+    #[test]
+    fn create_virtual_clock_mints_a_clock_the_engine_owns() {
+        let backend = LinuxClockBackend::new();
+        let clock = backend
+            .create_virtual_clock(&VirtualClockConfig {
+                initial_time: Timestamp::from_nanos(1_000),
+                domain: ClockDomainKind::Realtime,
+                rate: 2.0,
+                name: "test".to_string(),
+            })
+            .expect("create");
+        assert_eq!(clock.name, "test");
+        // A paused clock does not move with the wall clock.
+        std::thread::sleep(StdDuration::from_millis(20));
+        let advanced = backend
+            .advance_virtual_clock(&clock, Duration::from_nanos(500))
+            .expect("advance");
+        assert_eq!(
+            advanced.as_nanos(),
+            1_000 + 1_000,
+            "the clock only moved by what it was told"
+        );
+    }
+
     #[test]
     fn clock_quality_names_what_is_measurable() {
         let backend = LinuxClockBackend::new();
@@ -1066,8 +1116,33 @@ mod tests {
         assert_eq!(quality.reliability, 0.0);
     }
 
+    /// `persistTimer` records the timer in the engine's own store — and the
+    /// engine keeps no host file for it.
     #[test]
-    fn persistence_has_no_host_store() {
+    fn persist_timer_records_the_timer_in_the_engines_own_store() {
+        let backend = LinuxClockBackend::new();
+        let timer = backend
+            .create_timer(&TimerSpec::one_shot_relative(Duration::from_nanos(10_000_000)))
+            .expect("create");
+        backend
+            .persist_timer(
+                &timer,
+                &crate::domains::clock::types::TimerPersistence {
+                    name: "keep".to_string(),
+                    re_fire_on_restart: false,
+                    max_re_fires: 0,
+                },
+            )
+            .expect("persist");
+        let page = backend.list_persisted_timers(Pagination { offset: 0, limit: 0 }).expect("list");
+        assert_eq!(page.total, 1, "the record is in the engine's own store");
+        assert_eq!(page.items[0].label, "keep");
+    }
+
+    /// `listPersistedTimers` answers with the engine's OWN records, under
+    /// the contract's pagination rule.
+    #[test]
+    fn list_persisted_timers_answers_with_the_engines_own_records() {
         let backend = LinuxClockBackend::new();
         let timer = backend
             .create_timer(&TimerSpec::one_shot_relative(Duration::from_nanos(10_000_000)))
@@ -1086,7 +1161,6 @@ mod tests {
         assert_eq!(page.total, 1);
         // `limit == 0` means "one" — the contract's rule, measured.
         assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].label, "keep");
         // A page past the end is empty, not an error.
         let past = backend.list_persisted_timers(Pagination { offset: 9, limit: 5 }).expect("past");
         assert!(past.items.is_empty());
@@ -1128,8 +1202,10 @@ mod tests {
         assert_eq!(alarms.get_next_alarm().unwrap_err().code, ErrorCode::NotFound);
     }
 
+    /// `createAlarm` stores the alarm in the engine's own store and mints
+    /// its id: the id the store mints is never the neutral zero.
     #[test]
-    fn alarms_round_trip_through_the_store() {
+    fn create_alarm_stores_the_alarm_in_the_engines_own_store() {
         let backend = LinuxClockBackend::new();
         let alarms = backend.alarms().expect("alarms");
         let id = alarms
@@ -1148,7 +1224,26 @@ mod tests {
         // An id the store mints is non-zero: the neutral id is the caller's
         // "please assign", never a fabricated identity.
         assert!(id.get() > 0);
-        let mut updated = stored.clone();
+    }
+
+    /// `updateAlarm` writes the changed fields back, and an alarm that does
+    /// not exist is `notFound`, never a silent insert.
+    #[test]
+    fn update_alarm_writes_the_changed_fields_back() {
+        let backend = LinuxClockBackend::new();
+        let alarms = backend.alarms().expect("alarms");
+        let id = alarms
+            .create_alarm(&Alarm {
+                id: AlarmId::new(0),
+                label: "morning".to_string(),
+                fire_time: Timestamp::from_nanos(2_000),
+                recurrence: Some(AlarmRecurrence::Daily),
+                snooze_duration: Duration::from_nanos(600_000_000_000),
+                enabled: true,
+                holiday_behavior: Default::default(),
+            })
+            .expect("create");
+        let mut updated = alarms.get_alarm(id).expect("get");
         updated.label = "evening".to_string();
         alarms.update_alarm(&updated).expect("update");
         assert_eq!(alarms.get_alarm(id).expect("get").label, "evening");
@@ -1161,6 +1256,25 @@ mod tests {
                 .code,
             ErrorCode::NotFound
         );
+    }
+
+    /// `deleteAlarm` takes the alarm out of the store, and the id names
+    /// nothing afterwards.
+    #[test]
+    fn delete_alarm_takes_the_alarm_out_of_the_store() {
+        let backend = LinuxClockBackend::new();
+        let alarms = backend.alarms().expect("alarms");
+        let id = alarms
+            .create_alarm(&Alarm {
+                id: AlarmId::new(0),
+                label: "morning".to_string(),
+                fire_time: Timestamp::from_nanos(2_000),
+                recurrence: Some(AlarmRecurrence::Daily),
+                snooze_duration: Duration::from_nanos(600_000_000_000),
+                enabled: true,
+                holiday_behavior: Default::default(),
+            })
+            .expect("create");
         alarms.delete_alarm(id).expect("delete");
         assert_eq!(alarms.get_alarm(id).unwrap_err().code, ErrorCode::NotFound);
     }
@@ -1267,7 +1381,9 @@ mod tests {
         assert_eq!(alarms.get_next_alarm().unwrap_err().code, ErrorCode::NotFound);
     }
 
-    /// The kernel timespec split and rejoin is exact.
+    /// UNIT: the kernel timespec split and rejoin is exact. This proves the
+    /// engine's own conversion, not a contract method, so the matrix does
+    /// not publish it.
     #[test]
     fn nanos_and_timespec_round_trip() {
         for nanos in [0u64, 1, 999_999_999, 1_000_000_000, 1_700_000_000_123_456_789] {
@@ -1276,7 +1392,9 @@ mod tests {
         }
     }
 
-    /// A pre-epoch reading saturates rather than wrapping into the future.
+    /// UNIT: a pre-epoch reading saturates rather than wrapping into the
+    /// future. This proves the engine's own conversion, not a contract
+    /// method, so the matrix does not publish it.
     #[test]
     fn a_negative_timespec_saturates_instead_of_wrapping() {
         assert_eq!(secs_nanos_to_nanos(-5, -1), 0);

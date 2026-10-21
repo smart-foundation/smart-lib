@@ -738,7 +738,20 @@ mod tests {
     /// A subscription pulls bounded, cancels cleanly, and an unknown token is
     /// `notFound` — never a fabricated empty success.
     #[test]
-    fn a_subscription_pulls_bounded_and_cancels() {
+    /// `subscribe` mints the engine's own subscription token, and the pull
+    /// accepts it.
+    #[test]
+    fn subscribe_mints_a_subscription() {
+        let backend = LinuxLoggingBackend::new();
+        let sub = backend.subscribe(&LogFilter::default()).expect("subscribe");
+        // The token is a value the pull takes.
+        assert!(backend.pull(sub, 1).is_ok());
+    }
+
+    /// The subscription pull is bounded by the caller's number, and it never
+    /// repeats an entry.
+    #[test]
+    fn a_subscription_pull_is_bounded() {
         let backend = LinuxLoggingBackend::new();
         let sub = backend.subscribe(&LogFilter::default()).expect("subscribe");
         for i in 0..5 {
@@ -755,9 +768,8 @@ mod tests {
         assert!(backend.pull(sub, 10).expect("pull").is_empty());
         assert_eq!(backend.pull(SubscriptionId(4242), 1).unwrap_err().code, ErrorCode::NotFound);
         backend.cancel(sub).expect("cancel");
-        assert_eq!(backend.pull(sub, 1).unwrap_err().code, ErrorCode::NotFound);
-        assert_eq!(backend.cancel(sub).unwrap_err().code, ErrorCode::NotFound);
     }
+
 
     #[test]
     fn cancel_retires_the_subscription_token() {
@@ -770,9 +782,20 @@ mod tests {
     /// Levels configure THIS backend's filter — and nothing on the host, which
     /// the reason states.
     #[test]
-    fn levels_configure_this_backend_only() {
+    /// `getLevel` answers with the backend's own level for the logger, and
+    /// the default is declared, not zero.
+    #[test]
+    fn get_level_answers_with_the_backends_own_level() {
         let backend = LinuxLoggingBackend::new();
         assert_eq!(backend.get_level("app").expect("get"), Level::Info, "the default");
+    }
+
+    /// `setLevel` configures this backend only, and the filter really
+    /// applies: an entry below the level is dropped, and the outcome says so
+    /// rather than swallowing it.
+    #[test]
+    fn set_level_configures_this_backend_only() {
+        let backend = LinuxLoggingBackend::new();
         backend.set_level("app", Level::Warn).expect("set");
         assert_eq!(backend.get_level("app").expect("get"), Level::Warn);
         // The filter really applies: an info entry is dropped, and the outcome
@@ -885,9 +908,10 @@ mod tests {
         }
     }
 
-    /// The host's sinks are measured on this host, not assumed: the runit
-    /// services' log supervisors are closed and the world-readable `/var/log`
-    /// files are readable.
+    /// UNIT: the host's sinks are measured on this host, not assumed: the
+    /// runit services' log supervisors are closed and the world-readable
+    /// `/var/log` files are readable. It proves the engine's own
+    /// measurement, not a contract method, so the matrix does not publish it.
     #[test]
     fn the_hosts_sinks_are_measured_not_assumed() {
         let sinks = measure_host_sinks();
@@ -918,9 +942,11 @@ mod tests {
         );
     }
 
-    /// A host sink's lines keep their own words: the marker decides the level, an
-    /// unmarked line is `custom` (never a guessed info), and an unanchored
-    /// timestamp is 0 with the reason attached.
+    /// UNIT: a host sink's lines keep their own words: the marker decides
+    /// the level, an unmarked line is `custom` (never a guessed info), and an
+    /// unanchored timestamp is 0 with the reason attached. It proves the
+    /// engine's own parser, not a contract method, so the matrix does not
+    /// publish it.
     #[test]
     fn host_lines_keep_their_own_words() {
         let entry = host_line_to_entry("/var/log/Xorg.0.log", "[ 43304.655] (II) AMDgpu: yes", 7);

@@ -15,13 +15,13 @@ impl MethodAvailability {
 }
 
 pub const QUEUE_AVAILABILITY: &[MethodAvailability] = &[
-    MethodAvailability::real("enqueue", 0, "l3_linux_queue::core_works"),
-    MethodAvailability::real("dequeue", 1, "l3_linux_queue::core_works"),
-    MethodAvailability::real("peek", 2, "l3_linux_queue::core_works"),
-    MethodAvailability::real("getQueue", 3, "l3_linux_queue::core_works"),
-    MethodAvailability::real("clearQueue", 4, "l3_linux_queue::core_works"),
-    MethodAvailability::real("deleteQueue", 5, "l3_linux_queue::core_works"),
-    MethodAvailability::real("listQueues", 6, "l3_linux_queue::core_works"),
+    MethodAvailability::real("enqueue", 0, "l3_linux_queue::enqueue_stores_the_bytes_and_hands_back_an_id"),
+    MethodAvailability::real("dequeue", 1, "l3_linux_queue::dequeue_hands_the_oldest_entry_back_and_removes_it"),
+    MethodAvailability::real("peek", 2, "l3_linux_queue::peek_reads_the_oldest_entry_without_removing_it"),
+    MethodAvailability::real("getQueue", 3, "l3_linux_queue::get_queue_answers_with_the_queues_own_name"),
+    MethodAvailability::real("clearQueue", 4, "l3_linux_queue::clear_queue_empties_the_queue_and_only_the_queue"),
+    MethodAvailability::real("deleteQueue", 5, "l3_linux_queue::delete_queue_takes_the_queue_away"),
+    MethodAvailability::real("listQueues", 6, "l3_linux_queue::list_queues_answers_with_the_engines_own_queue_names"),
     MethodAvailability::unavailable("subscribeQueue", 7, ReasonClass::NoBackend, "no native queue surface for this method on this host"),
     MethodAvailability::unavailable("subscribeWithFilter", 8, ReasonClass::NoBackend, "no native queue surface for this method on this host"),
     MethodAvailability::unavailable("getStatistics", 9, ReasonClass::NoBackend, "no native queue surface for this method on this host"),

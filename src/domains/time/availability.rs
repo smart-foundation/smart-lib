@@ -145,11 +145,11 @@ pub const TIME_AVAILABILITY: &[MethodAvailability] = &[
          conversion between the wrong two calendars is silently wrong, which is worse than a refusal",
     ),
     MethodAvailability::real("addCalendarUnits", 3, "l3_linux_time::calendar_arithmetic_clamps_at_month_end"),
-    MethodAvailability::real("subtractCalendarUnits", 4, "l3_linux_time::calendar_arithmetic_clamps_at_month_end"),
+    MethodAvailability::real("subtractCalendarUnits", 4, "l3_linux_time::subtract_calendar_units_clamps_at_month_end"),
     MethodAvailability::real("diffCalendarDates", 5, "l3_linux_time::diff_counts_days_and_breaks_the_year_down"),
     // ── The TAI helpers (the contract's converter, mirrored) ─────────────────
-    MethodAvailability::real("convertToTai", 0xFFFE, "l3_linux_time::tai_uses_the_contracts_epoch"),
-    MethodAvailability::real("convertFromTai", 0xFFFD, "l3_linux_time::tai_uses_the_contracts_epoch"),
+    MethodAvailability::real("convertToTai", 0xFFFE, "l3_linux_time::convert_to_tai_uses_the_contracts_epoch"),
+    MethodAvailability::real("convertFromTai", 0xFFFD, "l3_linux_time::convert_from_tai_walks_the_epoch_back"),
 ];
 
 /// The Linux platform token for this matrix.

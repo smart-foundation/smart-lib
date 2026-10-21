@@ -1602,34 +1602,35 @@ CATEGORIES:maths,history\r\n\
 BDAY:1815-12-10\r\n\
 END:VCARD\r\n";
 
+    /// `parseVCard` reads a card out of the bytes: the version the card
+    /// declares, and the fields it carries.
     #[test]
-    fn core_works() {
+    fn parse_v_card_reads_the_fields_the_bytes_carry() {
         let backend = LinuxVcardBackend::new();
-        let cards = backend.parse_v_card(SAMPLE.as_bytes(), VCardVersion::Auto).expect("parse");
-        assert_eq!(cards.len(), 1);
-        let _ = backend.get_supported_versions().expect("versions");
-        let _ = backend.format_v_card(FormatRequest::new(Contact::default())).expect("format");
-        let _ = backend.export_v_card(ExportRequest::new()).expect("export");
-        let _ = backend.import_v_card(ImportRequest {
-            data: SAMPLE.as_bytes().to_vec(),
-            ..ImportRequest::default()
-        }).expect("import");
-        let _ = backend.get_sync_token(&[]).expect("token");
-        let _ = backend.sync_changes("vcard-sync-0").expect("sync");
-        let _ = backend.resolve_conflict("c1", ConflictResolution::KeepLocal);
-        assert!(backend.vcard_caps().contains(&"vcard.inproc"));
+        let cards = backend
+            .parse_v_card(SAMPLE.as_bytes(), VCardVersion::Auto)
+            .expect("parse");
+        assert_eq!(cards.len(), 1, "one card, one parse");
+        let card = &cards[0];
+        assert_eq!(card.version, VCardVersion::V40, "the version the card declares");
+        assert_eq!(card.first_text("FN"), Some("Ada Lovelace"));
+        assert_eq!(card.first_text("UID"), Some("ada-1"));
+        assert_eq!(
+            card.first_text("EMAIL"),
+            Some("ada@example.org"),
+            "the card's own address"
+        );
     }
 
+    /// `formatVCard` writes a card back out: the bytes carry the fields the
+    /// card holds, and they parse back to the same card.
     #[test]
-    fn a_vcard_round_trips_through_the_parser_and_the_formatter() {
+    fn format_v_card_writes_the_fields_the_card_holds() {
         let backend = LinuxVcardBackend::new();
         let cards = backend
             .parse_v_card(SAMPLE.as_bytes(), VCardVersion::Auto)
             .expect("parse");
         let card = &cards[0];
-        assert_eq!(card.version, VCardVersion::V40);
-        assert_eq!(card.first_text("FN"), Some("Ada Lovelace"));
-
         let text = cards_to_text(std::slice::from_ref(card), VCardVersion::V40, 0);
         let text = core::str::from_utf8(&text).expect("utf-8");
         assert!(text.starts_with("BEGIN:VCARD\r\nVERSION:4.0\r\n"));
@@ -1826,11 +1827,13 @@ END:VCARD\r\n";
         assert_eq!(error.code, crate::core::ErrorCode::InvalidArgument);
     }
 
+    /// `getSyncToken` reports the engine's OWN change counter: the token
+    /// moves when the engine's store changes, and not otherwise.
     #[test]
-    fn a_sync_token_reports_the_changes_since_the_token() {
+    fn get_sync_token_reports_the_engines_own_change_counter() {
         let backend = LinuxVcardBackend::new();
         let token = backend.get_sync_token(&[]).expect("token");
-        assert_eq!(token, "vcard-sync-0");
+        assert_eq!(token, "vcard-sync-0", "a fresh engine has changed nothing");
 
         backend
             .import_v_card(ImportRequest {
@@ -1841,15 +1844,31 @@ END:VCARD\r\n";
             .expect("import");
 
         let token = backend.get_sync_token(&[]).expect("token");
-        assert_eq!(token, "vcard-sync-1");
+        assert_eq!(token, "vcard-sync-1", "the counter moved with the import");
+    }
+
+    /// `syncChanges` hands back the changes since the token it was given —
+    /// and refuses a token this backend did not issue, rather than
+    /// interpreting it.
+    #[test]
+    fn sync_changes_hands_back_the_changes_since_the_token() {
+        let backend = LinuxVcardBackend::new();
+        backend
+            .import_v_card(ImportRequest {
+                data: SAMPLE.as_bytes().to_vec(),
+                version: VCardVersion::Auto,
+                ..ImportRequest::default()
+            })
+            .expect("import");
+
         let changes = backend.sync_changes("vcard-sync-0").expect("changes");
-        assert_eq!(changes.changed.len(), 1);
+        assert_eq!(changes.changed.len(), 1, "the import is the one change");
         assert_eq!(changes.new_sync_token, "vcard-sync-1");
         assert!(changes.deleted.is_empty());
         assert!(!changes.has_more);
 
         // Nothing changed since the newest token.
-        let changes = backend.sync_changes(&token).expect("changes");
+        let changes = backend.sync_changes("vcard-sync-1").expect("changes");
         assert!(changes.changed.is_empty());
 
         // A token this backend did not issue is refused, not interpreted.

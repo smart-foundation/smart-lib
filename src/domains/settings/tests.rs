@@ -142,30 +142,167 @@ fn availability_rows_are_consistent() {
     assert!(method_availability_for("get").is_some());
 }
 
-/// Every claimed `l3_test` exists in the Linux backend's suite.
+// ── The proof gate ──────────────────────────────────────────────────────
+//
+// The matrix PUBLISHES a proof name per method, and a published name is a
+// claim about this tree: "this test exists, and it proves this method".
+// Two ways to lie about that are now impossible to ship:
+//
+//   1. a name that resolves to nothing — the test was renamed or deleted;
+//   2. ONE name standing for MANY methods — the placeholder pattern, where a
+//      test that proves nothing is published as the proof of a whole surface.
+//
+// The gate is mechanical: the proofs are read from their own source at
+// COMPILE time, so the check is against the real `fn` definitions, not
+// against a hand-kept list that can drift.
+
+/// The settings platform cell's own source, read at compile time.
+const PLATFORM_SOURCE: &str = include_str!("../../platforms/linux/settings.rs");
+
+/// The domain's own L1 file, which carries the per-method proofs for the
+/// verbs the platform cell still proves only in a shared test.
+const DOMAIN_SOURCE: &str = include_str!("tests.rs");
+
+/// Every source a settings proof may live in.
+const PLATFORM_SOURCES: &[&str] = &[PLATFORM_SOURCE, DOMAIN_SOURCE];
+
+/// Does the source really define this test function?
+fn the_platform_defines(test: &str) -> bool {
+    let name = test.rsplit("::").next().unwrap_or(test);
+    PLATFORM_SOURCES
+        .iter()
+        .any(|source| source.contains(&alloc::format!("fn {name}(")))
+}
+
+/// Every published proof name resolves to a real test function. A name that
+/// resolves to nothing is a FAILURE.
 #[test]
-fn every_claimed_test_exists() {
-    let tests: &[&str] = &[
-        "l3_linux_settings::a_read_is_the_hosts_own_settings_engine",
-        "l3_linux_settings::a_write_is_the_hosts_own_engine_and_gated",
-        "l3_linux_settings::a_schema_read_lists_the_hosts_own_keys",
-        "l3_linux_settings::a_domain_list_is_the_hosts_own_schema_source",
-        "l3_linux_settings::a_watch_reports_the_hosts_own_change_signal",
-        "l3_linux_settings::a_bulk_read_answers_every_key",
-        "l3_linux_settings::a_category_listing_reports_the_hosts_own_keys",
-        "l3_linux_settings::an_app_override_answers_exists",
-        "l3_linux_settings::a_version_is_the_backends_own_monotonic_counter",
-        "l3_linux_settings::an_optimistic_set_reports_the_conflict_it_finds",
-        "l3_linux_settings::a_history_is_the_backends_own_recorded_changes",
-        "l3_linux_settings::a_delta_read_returns_the_changes_after_the_version",
-        "l3_linux_settings::a_watch_pull_is_bounded_and_cancellable",
-    ];
+fn every_claimed_proof_resolves_to_a_real_test() {
     for (method, test) in claimed_l3_tests() {
-        assert!(tests.contains(&test), "{method} claims {test}, which is not in the suite");
+        assert!(
+            the_platform_defines(test),
+            "{method} claims {test}, which is not a test function in the \
+             settings cell"
+        );
     }
-    for test in tests {
-        assert!(claimed_l3_tests().any(|(_, t)| t == *test), "{test} is real but unclaimed");
+}
+
+/// One proof names ONE method. A name published for many methods is the
+/// placeholder pattern: the matrix would be publishing one test as if it
+/// proved a whole surface.
+#[test]
+fn one_proof_never_stands_for_many_methods() {
+    let mut counts: alloc::collections::BTreeMap<&str, usize> =
+        alloc::collections::BTreeMap::new();
+    for (_method, test) in claimed_l3_tests() {
+        *counts.entry(test).or_insert(0) += 1;
     }
+    for (test, count) in counts {
+        assert_eq!(
+            count, 1,
+            "{test} is published as the proof for {count} methods: a proof \
+             names ONE method"
+        );
+    }
+}
+
+// ── The per-method proofs the platform cell does not carry yet ─────────
+//
+// The cell proves the gated write verbs and the two watch verbs in shared
+// tests, so the matrix could only publish one name for several methods —
+// which is the placeholder pattern the gate above forbids. These proofs give
+// each of those verbs its own test, over the host's own settings engine, and
+// they never write: the write verbs are gated, and the proof is that the
+// gate holds and the host's value is exactly as it was found.
+
+/// The host's own schema this domain reads.
+const SCHEMA: &str = "org.gnome.desktop.interface";
+
+/// `delete` is refused with the measured reason, and the host's own value is
+/// exactly as it was found.
+#[test]
+fn delete_refuses_and_never_writes() {
+    use crate::platforms::linux::settings::LinuxSettingsBackend;
+    let backend = LinuxSettingsBackend::new();
+    let before = backend.get(SCHEMA, "gtk-theme").expect("get");
+    let error = backend
+        .delete(SCHEMA, "gtk-theme")
+        .expect_err("the write is gated");
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    assert!(error.message.starts_with("no-privilege:"), "{error:?}");
+    // The host's own value is exactly as it was found.
+    let after = backend.get(SCHEMA, "gtk-theme").expect("get");
+    assert_eq!(before, after, "the host's own setting was not written");
+}
+
+/// `clear` is refused with the measured reason, and the host's own values
+/// are exactly as they were found.
+#[test]
+fn clear_refuses_and_never_writes() {
+    use crate::platforms::linux::settings::LinuxSettingsBackend;
+    let backend = LinuxSettingsBackend::new();
+    let before = backend.get(SCHEMA, "gtk-theme").expect("get");
+    let error = backend.clear(SCHEMA).expect_err("the write is gated");
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    assert!(error.message.starts_with("no-privilege:"), "{error:?}");
+    let after = backend.get(SCHEMA, "gtk-theme").expect("get");
+    assert_eq!(before, after, "the host's own setting was not written");
+}
+
+/// `bulkSet` is refused with the measured reason, and the host's own values
+/// are exactly as they were found.
+#[test]
+fn bulk_set_refuses_and_never_writes() {
+    use crate::platforms::linux::settings::LinuxSettingsBackend;
+    use crate::domains::settings::types::SettingMapEntry;
+    let backend = LinuxSettingsBackend::new();
+    let before = backend.get(SCHEMA, "gtk-theme").expect("get");
+    let error = backend
+        .bulk_set(
+            SCHEMA,
+            &[SettingMapEntry {
+                key: "gtk-theme".to_string(),
+                value: SettingValue::String("x".to_string()),
+            }],
+        )
+        .expect_err("the write is gated");
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
+    assert!(error.message.starts_with("no-privilege:"), "{error:?}");
+    let after = backend.get(SCHEMA, "gtk-theme").expect("get");
+    assert_eq!(before, after, "the host's own setting was not written");
+}
+
+/// `watchDomain` watches the WHOLE schema: the subscription is minted, the
+/// pull is bounded, and the cancel retires it.
+#[test]
+fn watch_domain_watches_the_whole_schema() {
+    use crate::platforms::linux::settings::LinuxSettingsBackend;
+    let backend = LinuxSettingsBackend::new();
+    let subscription = backend
+        .watch_domain(SCHEMA)
+        .expect("watchDomain over the host's own schema");
+    let first = backend
+        .pull_settings(subscription, 8)
+        .expect("the pull is bounded by the caller's number");
+    assert!(first.len() <= 8);
+    backend.cancel_settings(subscription).expect("cancel");
+}
+
+/// `SettingsSubscription.cancel` retires the token: the pull afterwards is
+/// `notFound`, never a silent success.
+#[test]
+fn cancel_settings_retires_the_subscription() {
+    use crate::platforms::linux::settings::LinuxSettingsBackend;
+    let backend = LinuxSettingsBackend::new();
+    let subscription = backend
+        .watch_domain(SCHEMA)
+        .expect("watchDomain over the host's own schema");
+    backend.cancel_settings(subscription).expect("cancel");
+    assert_eq!(
+        backend.pull_settings(subscription, 1).unwrap_err().code,
+        ErrorCode::NotFound,
+        "a cancelled subscription answers notFound"
+    );
 }
 
 /// The compiled schema id matches `settings.capnp`'s `@0x…` line.

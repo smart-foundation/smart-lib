@@ -1671,6 +1671,7 @@ mod tests {
     #[test]
     fn the_environment_is_the_hosts_own_proc_read() {
         let backend = LinuxProcessBackend::new();
+        // The read half is the host's own /proc/<pid>/environ.
         // MEASURED: the kernel publishes the environment a process was STARTED
         // with, so the honest probe is a child this test owns with a variable it
         // set itself — read out of the host's own /proc/<pid>/environ while the
@@ -1708,8 +1709,41 @@ mod tests {
         assert!(root_env.is_err(), "pid 1's environment is not readable by this uid");
     }
 
+    /// `setEnvironment` refuses: another process's environment is not
+    /// writable by this uid, and the refusal carries the measured reason.
+    /// The host is not changed — the write never happens.
     #[test]
-    fn a_subscription_pulls_bounded_and_cancels() {
+    fn set_environment_refuses_and_never_writes() {
+        let backend = LinuxProcessBackend::new();
+        let error = backend
+            .set_environment(self_pid(), &[("SMART_LIB_PROBE".to_string(), "written".to_string())])
+            .expect_err("another process's environment is not writable");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert!(error.message.starts_with("no-privilege:"), "{error:?}");
+        // And the environment of this very process is untouched: the refusal
+        // really did not write.
+        let env = backend.get_environment(self_pid()).expect("environ");
+        assert!(
+            !env.iter().any(|(k, v)| k == "SMART_LIB_PROBE" && v == "written"),
+            "the host's own environ was not written"
+        );
+    }
+
+
+    /// `subscribeProcess` mints the engine's own subscription token, and the
+    /// pull accepts it.
+    #[test]
+    fn subscribe_process_mints_a_subscription() {
+        let backend = LinuxProcessBackend::new();
+        let subscription = backend.subscribe_process(self_pid()).expect("subscribe");
+        assert!(backend.pull_process(subscription, 1).is_ok());
+        backend.cancel_process(subscription).expect("cancel");
+    }
+
+    /// The process pull is bounded by the caller's number, and it is a fresh
+    /// snapshot of a live process, never a replay.
+    #[test]
+    fn a_process_pull_is_bounded() {
         let backend = LinuxProcessBackend::new();
         let subscription = backend.subscribe_process(self_pid()).expect("subscribe");
         let first = backend.pull_process(subscription, 1).expect("pull");
@@ -1718,6 +1752,15 @@ mod tests {
         // A repeat pull is a fresh snapshot of a live process, never a replay.
         let second = backend.pull_process(subscription, 4).expect("pull");
         assert_eq!(second.len(), 1);
+        backend.cancel_process(subscription).expect("cancel");
+    }
+
+    /// The process cancel retires the subscription: the pull and the cancel
+    /// are both `notFound` afterwards.
+    #[test]
+    fn a_process_cancel_retires_the_subscription() {
+        let backend = LinuxProcessBackend::new();
+        let subscription = backend.subscribe_process(self_pid()).expect("subscribe");
         backend.cancel_process(subscription).expect("cancel");
         assert_eq!(
             backend.pull_process(subscription, 1).unwrap_err().code,
@@ -1730,8 +1773,24 @@ mod tests {
         );
     }
 
+
+    /// `subscribeDeath` mints the engine's own subscription token for the
+    /// child's exit, and the exit pull accepts it.
     #[test]
-    fn exit_notifications_are_real_reaps() {
+    fn subscribe_death_mints_a_subscription() {
+        let Some(mut child) = owned_child() else { return };
+        let pid = ProcessId::new(u64::from(child.id()));
+        let backend = LinuxProcessBackend::new();
+        let subscription = backend.subscribe_death(pid).expect("subscribe");
+        // The token is a value the pull takes.
+        assert!(backend.pull_exit(subscription, 4).is_ok());
+        backend.cancel_exit(subscription).expect("cancel");
+    }
+
+    /// The exit pull is bounded by the caller's number, and it reports the
+    /// host's own reap.
+    #[test]
+    fn an_exit_pull_is_bounded() {
         if let Some(mut child) = owned_child() {
             let pid = ProcessId::new(u64::from(child.id()));
             let backend = LinuxProcessBackend::new();
@@ -1745,11 +1804,22 @@ mod tests {
                 "the pull is bounded by the caller's number"
             );
             backend.cancel_exit(subscription).expect("cancel");
-            assert_eq!(
-                backend.pull_exit(subscription, 1).unwrap_err().code,
-                ErrorCode::NotFound
-            );
         }
+    }
+
+    /// The exit cancel retires the subscription: the pull afterwards is
+    /// `notFound`.
+    #[test]
+    fn an_exit_cancel_retires_the_subscription() {
+        let Some(mut child) = owned_child() else { return };
+        let pid = ProcessId::new(u64::from(child.id()));
+        let backend = LinuxProcessBackend::new();
+        let subscription = backend.subscribe_death(pid).expect("subscribe");
+        backend.cancel_exit(subscription).expect("cancel");
+        assert_eq!(
+            backend.pull_exit(subscription, 1).unwrap_err().code,
+            ErrorCode::NotFound
+        );
     }
 
     #[test]
@@ -1876,9 +1946,18 @@ mod tests {
             true
         );
         assert!(stats.total_processes > 1, "this host runs more than one process");
-        // The aggregate memory is the host's own /proc/meminfo answer.
+        // The aggregate memory is the host's own /proc/meminfo answer — read
+        // TWICE, and the host's used memory MOVES between the two reads (this
+        // very test allocates). So the two readings are compared as what they
+        // are: the same live number, sampled twice.
         let meminfo_used = mem_used_bytes();
-        assert_eq!(stats.total_memory_usage, meminfo_used);
+        let drift = stats.total_memory_usage.abs_diff(meminfo_used);
+        assert!(
+            drift * 100 <= meminfo_used.max(1),
+            "the two readings of the host's own used memory agree: {} vs {} (drift {drift})",
+            stats.total_memory_usage,
+            meminfo_used
+        );
         assert!(stats.total_cpu_usage >= 0.0);
         // Per-user counting narrows the same enumeration.
         let own = backend.get_stats(UserId::new(u64::from(backend.own_uid()))).expect("getStats");
@@ -2034,8 +2113,12 @@ mod tests {
         assert!(status.metadata.iter().any(|(k, _)| k == "record"));
     }
 
+
+    /// `setBreakpoint` RECORDS the breakpoint in the engine's own table — it
+    /// does not poke the process: the caller's own condition is carried
+    /// verbatim.
     #[test]
-    fn breakpoints_are_recorded_not_poked() {
+    fn set_breakpoint_records_the_breakpoint_in_the_engines_own_table() {
         let backend = LinuxProcessBackend::new();
         let pid = self_pid();
         let first = backend
@@ -2057,8 +2140,27 @@ mod tests {
         assert_eq!(recorded.len(), 2);
         assert_eq!(recorded[0].condition, "rax == 1", "the caller's own condition");
         assert_eq!(recorded[0].address, 0x1000);
+    }
+
+    /// `removeBreakpoint` takes the record out of the engine's own table,
+    /// and an unknown id is `notFound`.
+    #[test]
+    fn remove_breakpoint_takes_the_record_out() {
+        let backend = LinuxProcessBackend::new();
+        let pid = self_pid();
+        let first = backend
+            .set_breakpoint(
+                pid,
+                &Breakpoint {
+                    address: 0x1000,
+                    enabled: true,
+                    condition: "rax == 1".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("setBreakpoint");
         backend.remove_breakpoint(pid, first).expect("removeBreakpoint");
-        assert_eq!(backend.list_breakpoints(pid).expect("list").len(), 1);
+        assert_eq!(backend.list_breakpoints(pid).expect("list").len(), 0);
         assert_eq!(
             backend.remove_breakpoint(pid, first).unwrap_err().code,
             ErrorCode::NotFound,
@@ -2066,8 +2168,37 @@ mod tests {
         );
     }
 
+    /// `listBreakpoints` answers with the engine's OWN records for the
+    /// process.
     #[test]
-    fn watchpoints_are_recorded_not_armed() {
+    fn list_breakpoints_answers_with_the_engines_own_records() {
+        let backend = LinuxProcessBackend::new();
+        let pid = self_pid();
+        assert!(backend.list_breakpoints(pid).expect("list").is_empty());
+        let first = backend
+            .set_breakpoint(
+                pid,
+                &Breakpoint {
+                    address: 0x1000,
+                    enabled: true,
+                    condition: "rax == 1".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("setBreakpoint");
+        backend
+            .set_breakpoint(pid, &Breakpoint { address: 0x2000, ..Default::default() })
+            .expect("setBreakpoint");
+        let recorded = backend.list_breakpoints(pid).expect("listBreakpoints");
+        assert_eq!(recorded.len(), 2);
+        backend.remove_breakpoint(pid, first).expect("removeBreakpoint");
+    }
+
+
+    /// `setWatchpoint` RECORDS the watchpoint in the engine's own table — it
+    /// does not arm hardware.
+    #[test]
+    fn set_watchpoint_records_the_watchpoint_in_the_engines_own_table() {
         let backend = LinuxProcessBackend::new();
         let pid = self_pid();
         let id = backend
@@ -2088,12 +2219,60 @@ mod tests {
         assert_eq!(recorded[0].id, id);
         assert!(recorded[0].read && recorded[0].write);
         assert_eq!(recorded[0].size, 8);
+    }
+
+    /// `removeWatchpoint` takes the record out of the engine's own table.
+    #[test]
+    fn remove_watchpoint_takes_the_record_out() {
+        let backend = LinuxProcessBackend::new();
+        let pid = self_pid();
+        let id = backend
+            .set_watchpoint(
+                pid,
+                &Watchpoint {
+                    id: BreakpointId::new(0),
+                    address: 0x3000,
+                    size: 8,
+                    read: true,
+                    write: true,
+                    enabled: true,
+                },
+            )
+            .expect("setWatchpoint");
         backend.remove_watchpoint(pid, id).expect("removeWatchpoint");
         assert!(backend.list_watchpoints(pid).expect("list").is_empty());
     }
 
-    /// MEASURED: the host's own verdict about whether this uid may signal this
-    /// process. A read — `kill(pid, 0)` — never a write.
+    /// `listWatchpoints` answers with the engine's OWN records for the
+    /// process.
+    #[test]
+    fn list_watchpoints_answers_with_the_engines_own_records() {
+        let backend = LinuxProcessBackend::new();
+        let pid = self_pid();
+        assert!(backend.list_watchpoints(pid).expect("list").is_empty());
+        let id = backend
+            .set_watchpoint(
+                pid,
+                &Watchpoint {
+                    id: BreakpointId::new(0),
+                    address: 0x3000,
+                    size: 8,
+                    read: true,
+                    write: true,
+                    enabled: true,
+                },
+            )
+            .expect("setWatchpoint");
+        let recorded = backend.list_watchpoints(pid).expect("listWatchpoints");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].id, id);
+        backend.remove_watchpoint(pid, id).expect("removeWatchpoint");
+    }
+
+    /// UNIT: MEASURED — the host's own verdict about whether this uid may
+    /// signal this process. A read — `kill(pid, 0)` — never a write. The
+    /// signal verbs live in another contract, so the matrix does not publish
+    /// this as a proof of a process method.
     #[test]
     fn a_signal_probe_measures_the_hosts_own_verdict() {
         let backend = LinuxProcessBackend::new();
@@ -2113,10 +2292,11 @@ mod tests {
         );
     }
 
-    /// The ptrace measurement is the host's own two numbers, reported.
+    /// UNIT: the ptrace measurement is the host's own two numbers, reported.
     /// The status read reports the kernel's own resident pages, verified
     /// against the host's own `statm` for a target whose RSS cannot move while
-    /// the test holds it: a child blocked on stdin.
+    /// the test holds it: a child blocked on stdin. It proves the engine's own
+    /// measurement, not a contract method, so the matrix does not publish it.
     #[test]
     fn the_memory_number_is_the_kernels_own_resident_pages() {
         use std::process::{Command, Stdio};
@@ -2145,6 +2325,9 @@ mod tests {
         let _ = child;
     }
 
+    /// UNIT: the ptrace scope is measured on this host, not assumed. The
+    /// `attach` row is UNAVAILABLE, so the matrix publishes no proof for it
+    /// and this test says it is a unit test of the engine's own measurement.
     #[test]
     fn the_ptrace_scope_is_measured_not_assumed() {
         let backend = LinuxProcessBackend::new();
@@ -2157,8 +2340,10 @@ mod tests {
         assert!(reason.contains("CAP_SYS_PTRACE"));
     }
 
-    /// Signal delivery is the native `kill(2)`, and it is gated by the measured
-    /// verdict above: the one target this suite signals is a child it owns.
+    /// UNIT: signal delivery is the native `kill(2)`, and it is gated by the
+    /// measured verdict above: the one target this suite signals is a child it
+    /// owns. The signal verbs live in another contract, so the matrix does
+    /// not publish this as a proof of a process method.
     #[test]
     fn signal_delivery_is_gated_by_the_measured_verdict() {
         let backend = LinuxProcessBackend::new();
@@ -2173,8 +2358,9 @@ mod tests {
         assert_eq!(unnamed.unwrap_err().code, ErrorCode::InvalidArgument);
     }
 
-    /// The default surface refuses with a reason on a backend that serves
-    /// nothing — the law #6 baseline.
+    /// UNIT: the default surface refuses with a reason on a backend that
+    /// serves nothing — the law #6 baseline. It proves the engine's own
+    /// default, not a contract method, so the matrix does not publish it.
     #[test]
     fn the_default_surface_refuses_with_a_reason() {
         let backend = NothingProcessBackend;

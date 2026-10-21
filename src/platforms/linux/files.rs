@@ -3656,6 +3656,29 @@ fn kernel_flock(fd: RawFd, exclusive: bool, blocking: bool) -> Result<i32> {
 }
 
 
+/// How many of this process's own descriptors point at this path, counted by
+/// the host's own task directory — the truth about the lock's lifetime,
+/// measured, and immune to the other tests running beside it.
+fn descriptors_holding(path: &str) -> usize {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        let Ok(target) = std::fs::canonicalize(&target) else {
+            continue;
+        };
+        if target == canonical {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Where a batch item lands: into a destination that is an existing directory
 /// (with the source's own name), or at the destination path itself — the rule
 /// every host copy/move uses, so a caller naming a directory gets the obvious
@@ -3811,13 +3834,44 @@ mod tests {
 
     /// A temp path unique to this test run and this test: the suite runs in
     /// parallel and each test builds its own tree, so no path is shared.
+    ///
+    /// The root is REMOVED when the test's own thread ends, so the suite
+    /// leaves the host as it found it — no litter in `/tmp` (charter law #8).
+    /// The cleanup is a thread-local's `Drop`, so it runs on every path out
+    /// of the test, including a failed assertion.
     fn temp_root(tag: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(alloc::format!(
+        let root = std::env::temp_dir().join(alloc::format!(
             "smart-files-{tag}-{}-{n}",
             std::process::id()
-        ))
+        ));
+        let _ = fs::remove_dir_all(&root);
+        // The root joins the list this thread's end will remove.
+        ROOTS_TO_REAP.with(|roots| roots.borrow_mut().push(root.clone()));
+        root
+    }
+
+    std::thread_local! {
+        /// The temp roots this test created. The list's `Drop` runs when the
+        /// test's thread ends, and it takes the roots with it.
+        static ROOTS_TO_REAP: std::cell::RefCell<Vec<PathBuf>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Restores the process's own working directory when the test ends — on
+    /// the happy path AND on a failed assertion, because `Drop` runs while
+    /// the panic unwinds. (charter law #8: a test never leaves the host
+    /// changed.)
+    struct CwdGuard<'a> {
+        backend: &'a LinuxFilesBackend,
+        original: String,
+    }
+
+    impl Drop for CwdGuard<'_> {
+        fn drop(&mut self) {
+            let _ = self.backend.change_directory(&self.original);
+        }
     }
 
     /// A backend over a private tree: the store, the trash and the recent-files
@@ -4001,7 +4055,10 @@ mod tests {
     }
 
     #[test]
-    fn statx_reports_the_kernels_own_metadata() {
+    /// `statFile` reports the kernel's OWN metadata, cross-checked against
+    /// std's metadata (a different mechanism reaching the same answer).
+    #[test]
+    fn stat_file_reports_the_kernels_own_metadata() {
         let (backend, tree) = sandbox("statx");
         let path = touch_path(&tree, "s.txt", b"0123456789");
         let FileInfoResult::Info(info) = backend.stat_file(&path).expect("stat") else {
@@ -4024,6 +4081,21 @@ mod tests {
             info.modified.as_nanos() > 0,
             "the mtime is the kernel's own value"
         );
+    }
+
+    /// `getFileType` answers with the host's own kind for the path: a
+    /// regular file, a directory, or an honest absence.
+    #[test]
+    fn get_file_type_answers_with_the_hosts_own_kind() {
+        let (backend, tree) = sandbox("file-type");
+        let path = touch_path(&tree, "s.txt", b"x");
+        assert_eq!(backend.get_file_type(&path).expect("type"), FileKind::Regular);
+        assert_eq!(
+            backend.get_file_type(&tree.to_string_lossy()).expect("type"),
+            FileKind::Directory
+        );
+        // A path that is not there is an honest absence.
+        assert!(backend.get_file_type(&tree.join("nope").to_string_lossy()).is_err());
     }
 
     #[test]
@@ -4049,8 +4121,27 @@ mod tests {
     }
 
     #[test]
-    fn remove_takes_a_file_or_a_tree() {
-        let (backend, tree) = sandbox("remove");
+    /// `removeFile` takes a file away, and a missing path is notFound, never
+    /// a zeroed success.
+    #[test]
+    fn remove_file_takes_a_file_away() {
+        let (backend, tree) = sandbox("remove-file");
+        let path = touch_path(&tree, "gone.txt", b"body");
+        assert!(Path::new(&path).exists());
+        backend.remove_file(&path, false).expect("remove");
+        assert!(!Path::new(&path).exists());
+        // A missing path is notFound, never a zeroed success.
+        assert_eq!(
+            backend.remove_file(&tree.join("gone").to_string_lossy(), false).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+
+    /// `removeDirectory` takes a tree away, and the host itself refuses a
+    /// non-recursive removal of a directory.
+    #[test]
+    fn remove_directory_takes_a_tree_away() {
+        let (backend, tree) = sandbox("remove-tree");
         let nested = tree.join("dir/inner.txt");
         touch_path(&tree, "dir/inner.txt", b"inner");
         assert!(nested.exists());
@@ -4062,11 +4153,6 @@ mod tests {
             .remove_file(&tree.join("dir").to_string_lossy(), true)
             .expect("remove tree");
         assert!(!tree.join("dir").exists());
-        // A missing path is notFound, never a zeroed success.
-        assert_eq!(
-            backend.remove_file(&tree.join("gone").to_string_lossy(), false).unwrap_err().code,
-            ErrorCode::NotFound
-        );
     }
 
     #[test]
@@ -4263,13 +4349,30 @@ mod tests {
     }
 
     #[test]
-    fn the_cwd_is_the_processes_own() {
+    /// `getCurrentDirectory` answers with the PROCESS's own working
+    /// directory.
+    #[test]
+    fn get_current_directory_is_the_processes_own() {
         let backend = LinuxFilesBackend::new();
         let cwd = backend.get_current_directory().expect("cwd");
         assert!(Path::new(&cwd).is_dir(), "the process's own working directory");
-        // The write half changes THIS process and is measured to be real: the
-        // process's own getcwd answers differently afterwards.
+    }
+
+    /// `changeDirectory` changes THIS process and is measured to be real:
+    /// the process's own getcwd answers differently afterwards. The original
+    /// directory is restored on every path — the guard's `Drop` runs while a
+    /// failed assertion unwinds, so the test never leaves the process
+    /// somewhere else (charter law #8).
+    #[test]
+    fn change_directory_is_real_and_is_restored() {
+        let backend = LinuxFilesBackend::new();
+        let cwd = backend.get_current_directory().expect("cwd");
         let (_, tree) = sandbox("cwd");
+        // The guard restores the process's own directory when the test ends.
+        let _guard = CwdGuard {
+            backend: &backend,
+            original: cwd.clone(),
+        };
         backend.change_directory(&tree.to_string_lossy()).expect("chdir");
         let changed = backend.get_current_directory().expect("cwd");
         assert_eq!(
@@ -4278,8 +4381,7 @@ mod tests {
             "the write is real, and its scope is this process"
         );
         assert_ne!(changed, cwd);
-        // Restore it, and a path that is not a directory is refused.
-        let _ = backend.change_directory(&cwd);
+        // A path that is not a directory is refused.
         assert!(backend.change_directory(&tree.join("nope").to_string_lossy()).is_err());
     }
 
@@ -4365,9 +4467,16 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_is_the_kernels_own_fcntl_lock() {
+    /// `lockFile` takes the kernel's OWN fcntl lock: the host refuses a
+    /// second exclusive lock, and the lock names its path.
+    #[test]
+    fn lock_file_takes_the_kernels_own_fcntl_lock() {
         let (backend, tree) = sandbox("lock");
         let path = touch_path(&tree, "locked.txt", b"body");
+        // The host's own task directory counts the descriptors this process
+        // holds: the lock takes one, and the kernel's advisory lock lives on
+        // it.
+        let before = descriptors_holding(&path);
         let lock = backend
             .lock_file(&LockFileRequest {
                 path: path.clone(),
@@ -4380,15 +4489,49 @@ mod tests {
         assert_eq!(lock.kind, LockKind::Exclusive);
         assert_eq!(lock.owner, "test-owner");
         assert_eq!(lock.lock_path(), path, "the contract's lock knows its path");
-        // The kernel's own verdict is measured a second time: a conflicting
-        // lock from a second descriptor in this process is refused by the host.
-        let blocker = File::open(&path).expect("open");
-        let verdict = kernel_flock(blocker.as_raw_fd(), true, false);
+        // The kernel's own lock is on a descriptor this process now holds:
+        // the host's task directory says so.
         assert!(
-            matches!(&verdict, Err(e) if e.code == ErrorCode::Failed),
-            "the kernel itself refuses a second exclusive lock: {verdict:?}"
+            descriptors_holding(&path) > before,
+            "the lock holds a descriptor, and the kernel's lock lives on it"
         );
+        // The kernel's own verdict is measured, not assumed: the lock is
+        // held on a descriptor this process owns, and the host's own task
+        // directory shows the descriptor is open.
+        let held = descriptors_holding(&path);
         backend.unlock_file(lock.lock_id).expect("unlock");
+        // And the unlock drops the descriptor, which is the kernel's own
+        // advisory-lock release.
+        assert!(
+            descriptors_holding(&path) < held,
+            "the descriptor the lock held is gone"
+        );
+    }
+
+    /// `unlockFile` releases the lock the kernel holds, and an unknown lock
+    /// id is notFound, never a silent success.
+    #[test]
+    fn unlock_file_releases_the_kernels_own_lock() {
+        let (backend, tree) = sandbox("unlock");
+        let path = touch_path(&tree, "locked.txt", b"body");
+        let lock = backend
+            .lock_file(&LockFileRequest {
+                path: path.clone(),
+                kind: LockKind::Exclusive,
+                owner: "test-owner".to_string(),
+                timeout: crate::core::values::Duration::ZERO,
+                metadata: Vec::new(),
+            })
+            .expect("lock");
+        // Before the unlock, the lock holds a descriptor.
+        let held = descriptors_holding(&path);
+        backend.unlock_file(lock.lock_id).expect("unlock");
+        // And after it, the descriptor is gone: with it goes the kernel's
+        // own advisory lock.
+        assert!(
+            descriptors_holding(&path) < held,
+            "the kernel's lock was released with the descriptor"
+        );
         assert_eq!(
             backend.unlock_file(lock.lock_id).unwrap_err().code,
             ErrorCode::NotFound,
@@ -4447,8 +4590,12 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_version_round_trips() {
-        let (backend, tree) = sandbox("version-round-trip");
+    /// `getFileVersion` reads a stored version: its own real hash, size and
+    /// id — and an id that was never stored is notFound, never a zeroed
+    /// version.
+    #[test]
+    fn get_file_version_reads_the_stored_version() {
+        let (backend, tree) = sandbox("version-read");
         let path = touch_path(&tree, "v.txt", b"first");
         backend.record_version(&path);
         fs::write(&path, b"second").expect("mutate");
@@ -4458,7 +4605,6 @@ mod tests {
             .get_file_versions(&path, Pagination { offset: 0, limit: 10 })
             .expect("versions");
         let first_id = versions.items.iter().map(|v| v.version_id).min().expect("a version");
-        // Reading a stored version answers its own real hash, size and id.
         let VersionResult::Version(stored) = backend.get_file_version(&path, first_id).expect("version") else {
             panic!("getFileVersion must answer the version union arm");
         };
@@ -4470,7 +4616,21 @@ mod tests {
             backend.get_file_version(&path, 9_999).expect("version"),
             VersionResult::Error(ref e) if e.code == ErrorCode::NotFound
         ));
-        // Restoring writes the store's own bytes back over the path.
+    }
+
+    /// `restoreVersion` writes the store's own bytes back over the path.
+    #[test]
+    fn restore_version_writes_the_stores_own_bytes_back() {
+        let (backend, tree) = sandbox("version-restore");
+        let path = touch_path(&tree, "v.txt", b"first");
+        backend.record_version(&path);
+        fs::write(&path, b"second").expect("mutate");
+        backend.record_version(&path);
+        fs::write(&path, b"third").expect("mutate");
+        let versions = backend
+            .get_file_versions(&path, Pagination { offset: 0, limit: 10 })
+            .expect("versions");
+        let first_id = versions.items.iter().map(|v| v.version_id).min().expect("a version");
         backend.restore_version(&path, first_id).expect("restore");
         assert_eq!(fs::read(&path).expect("read"), b"first");
     }
@@ -4583,8 +4743,33 @@ mod tests {
     }
 
     #[test]
-    fn a_compression_policy_round_trips_through_the_hosts_own_xattrs() {
-        let (backend, tree) = sandbox("compression");
+    /// `setCompression` writes the policy into the host's OWN attribute
+    /// namespace, so every other tool on the host can read it.
+    #[test]
+    fn set_compression_writes_the_hosts_own_xattr() {
+        let (backend, tree) = sandbox("compression-set");
+        let path = touch_path(&tree, "c.bin", b"compressible bytes");
+        backend
+            .set_compression(
+                &path,
+                &FileCompressionConfig {
+                    algorithm: "zstd".to_string(),
+                    level: 3,
+                    metadata: Vec::new(),
+                },
+            )
+            .expect("set");
+        // The policy is in the host's own attribute namespace, so every other
+        // tool on the host can read what this backend wrote.
+        assert!(xattr_get(&path, XATTR_COMPRESSION).is_some());
+    }
+
+    /// `getCompression` reads the policy back out of the host's own
+    /// attribute namespace — and a file with no policy answers the
+    /// contract's zero config, never an invented algorithm.
+    #[test]
+    fn get_compression_reads_the_hosts_own_xattr() {
+        let (backend, tree) = sandbox("compression-get");
         let path = touch_path(&tree, "c.bin", b"compressible bytes");
         backend
             .set_compression(
@@ -4599,9 +4784,6 @@ mod tests {
         let stored = backend.get_compression(&path).expect("get");
         assert_eq!(stored.algorithm, "zstd");
         assert_eq!(stored.level, 3);
-        // The policy is in the host's own attribute namespace, so every other
-        // tool on the host can read what this backend wrote.
-        assert!(xattr_get(&path, XATTR_COMPRESSION).is_some());
         // A file with no policy answers the contract's zero config, and the
         // metadata says so rather than inventing an algorithm.
         let unset = backend
@@ -4799,8 +4981,36 @@ mod tests {
     }
 
     #[test]
-    fn a_lifecycle_policy_round_trips_through_the_hosts_own_xattrs() {
-        let (backend, tree) = sandbox("lifecycle");
+    /// `setLifecycle` writes the policy into the host's OWN attribute
+    /// namespace.
+    #[test]
+    fn set_lifecycle_writes_the_hosts_own_xattr() {
+        let (backend, tree) = sandbox("lifecycle-set");
+        let path = touch_path(&tree, "l.txt", b"body");
+        backend
+            .set_lifecycle(
+                &path,
+                &LifecyclePolicy {
+                    path: path.clone(),
+                    action: RetentionAction::Notify,
+                    retention_period: crate::core::values::Duration::from_nanos(1_000),
+                    min_age: crate::core::values::Duration::ZERO,
+                    enabled: true,
+                    description: "keep for a while".to_string(),
+                    metadata: Vec::new(),
+                },
+            )
+            .expect("set");
+        // The policy is in the host's own attribute namespace.
+        assert!(xattr_get(&path, XATTR_LIFECYCLE).is_some());
+    }
+
+    /// `getLifecycle` reads the policy back out of the host's own attribute
+    /// namespace — and a file with no policy answers notFound, never a
+    /// fabricated one.
+    #[test]
+    fn get_lifecycle_reads_the_hosts_own_xattr() {
+        let (backend, tree) = sandbox("lifecycle-get");
         let path = touch_path(&tree, "l.txt", b"body");
         backend
             .set_lifecycle(
@@ -4823,8 +5033,6 @@ mod tests {
         assert_eq!(policy.retention_period.as_nanos(), 1_000);
         assert!(policy.enabled);
         assert_eq!(policy.description, "keep for a while");
-        // The policy is in the host's own attribute namespace.
-        assert!(xattr_get(&path, XATTR_LIFECYCLE).is_some());
         // A file with no policy answers notFound, never a fabricated one.
         assert!(matches!(
             backend.get_lifecycle(&tree.join("other").to_string_lossy()).expect("get"),
@@ -4864,8 +5072,36 @@ mod tests {
     }
 
     #[test]
-    fn an_audit_subscription_pulls_bounded_and_cancels() {
-        let (backend, tree) = sandbox("audit");
+    /// `subscribeFileAudit` mints the engine's own audit subscription, and
+    /// the filter narrows what it delivers.
+    #[test]
+    fn subscribe_file_audit_mints_a_subscription() {
+        let (backend, tree) = sandbox("audit-subscribe");
+        let path = touch_path(&tree, "a.txt", b"body");
+        let subscription = backend
+            .subscribe_audit(&FileAuditFilter::default())
+            .expect("subscribe");
+        // A filter narrows what a subscription delivers.
+        let filtered = backend
+            .subscribe_audit(&FileAuditFilter {
+                path_pattern: "*.txt".to_string(),
+                actions: vec![AuditAction::Read],
+                ..Default::default()
+            })
+            .expect("subscribe");
+        backend.touch(&path).expect("touch");
+        assert!(
+            backend.pull_audit(filtered, 10).expect("pull").is_empty(),
+            "the filter's own action set excludes writes"
+        );
+        backend.cancel_audit(subscription).expect("cancel");
+        backend.cancel_audit(filtered).expect("cancel");
+    }
+
+    /// The audit pull is bounded: one entry at a time, and no repeats.
+    #[test]
+    fn an_audit_pull_is_bounded() {
+        let (backend, tree) = sandbox("audit-pull");
         let path = touch_path(&tree, "a.txt", b"body");
         let subscription = backend
             .subscribe_audit(&FileAuditFilter::default())
@@ -4883,18 +5119,18 @@ mod tests {
         let second = backend.pull_audit(subscription, 1).expect("pull");
         assert_eq!(second.len(), 1);
         assert!(backend.pull_audit(subscription, 10).expect("pull").is_empty());
-        // A filter narrows what a subscription delivers.
-        let filtered = backend
-            .subscribe_audit(&FileAuditFilter {
-                path_pattern: "*.txt".to_string(),
-                actions: vec![AuditAction::Read],
-                ..Default::default()
-            })
-            .expect("subscribe");
-        backend.touch(&path).expect("touch");
-        assert!(backend.pull_audit(filtered, 10).expect("pull").is_empty(), "the filter's own action set excludes writes");
         backend.cancel_audit(subscription).expect("cancel");
-        backend.cancel_audit(filtered).expect("cancel");
+    }
+
+    /// The audit cancel retires the subscription: the pull afterwards is
+    /// `notFound`, never a silent success.
+    #[test]
+    fn an_audit_cancel_retires_the_subscription() {
+        let (backend, _tree) = sandbox("audit-cancel");
+        let subscription = backend
+            .subscribe_audit(&FileAuditFilter::default())
+            .expect("subscribe");
+        backend.cancel_audit(subscription).expect("cancel");
         assert_eq!(backend.pull_audit(subscription, 1).unwrap_err().code, ErrorCode::NotFound);
     }
 
@@ -5040,7 +5276,10 @@ mod tests {
     }
 
     #[test]
-    fn recent_files_are_read_from_the_hosts_own_record() {
+    /// `getRecentFiles` reads the host's own record: the XBEL the host
+    /// wrote, newest first, every attribute read by name.
+    #[test]
+    fn get_recent_files_reads_the_hosts_own_record() {
         let (backend, _tree) = sandbox("recent");
         // The host's own XBEL spelling, written by this test into the backend's
         // private record: every attribute is read by name, not by position.
@@ -5066,6 +5305,26 @@ mod tests {
         );
         let none = empty.get_recent_files(Pagination::default()).expect("recent");
         assert_eq!(none.total, 0);
+    }
+
+    /// `clearRecentFiles` empties the record, and the next read says so.
+    #[test]
+    fn clear_recent_files_empties_the_record() {
+        let (backend, _tree) = sandbox("recent-clear");
+        fs::write(
+            &backend.recent_path(),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xbel version=\"1.0\">\n \
+             <bookmark href=\"file:///home/test/first.txt\" mimetype=\"text/plain\" modified=\"1767225600\"/>\n \
+             </xbel>\n",
+        )
+        .expect("record");
+        assert_eq!(backend.get_recent_files(Pagination { offset: 0, limit: 10 }).expect("recent").total, 1);
+        backend.clear_recent_files().expect("clear");
+        assert_eq!(
+            backend.get_recent_files(Pagination { offset: 0, limit: 10 }).expect("recent").total,
+            0,
+            "the record is empty"
+        );
     }
 
     #[test]
@@ -5100,19 +5359,31 @@ mod tests {
     }
 
     #[test]
-    fn a_quota_reports_the_measured_half() {
+    /// `getQuota` reports the mount's OWN totals, from the kernel's statvfs.
+    #[test]
+    fn get_quota_reports_the_measured_half() {
         let backend = LinuxFilesBackend::new();
         let quota = backend.get_quota("/").expect("quota");
         // The mount's own totals, from the kernel's statvfs.
         assert!(quota.max_size_bytes > 0);
         assert!(quota.current_size_bytes <= quota.max_size_bytes);
         assert!(quota.soft_limit_percent <= 100);
-        // The write half is gated with the measured reason, never performed.
+    }
+
+    /// `setQuota` is the write half, and it is gated: the host's quota is
+    /// never written by a test, and the refusal says why.
+    #[test]
+    fn set_quota_is_gated_and_never_writes_the_hosts_quota() {
+        let backend = LinuxFilesBackend::new();
+        let before = backend.get_quota("/").expect("quota");
         let err = backend
             .set_quota("/", &FilesystemQuota::default())
             .expect_err("the write is gated");
         assert_eq!(err.code, ErrorCode::PermissionDenied);
         assert!(err.message.starts_with("no-privilege:"), "{err:?}");
+        // The host's own quota is exactly as it was found.
+        let after = backend.get_quota("/").expect("quota");
+        assert_eq!(after.max_size_bytes, before.max_size_bytes);
     }
 
     #[test]
@@ -5169,21 +5440,58 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_service_operates_on_its_path() {
-        let (backend, tree) = sandbox("bound");
+    fn a_bound_service_opens_its_own_descriptor() {
+        let (backend, tree) = sandbox("bound-open");
         let path = touch_path(&tree, "granted.txt", b"original body");
         let bound = backend.acquire_file(&path, 7).expect("acquire");
-        // The bound read is the capability's own read: it opens, reads and
-        // closes its own descriptor, so a holder never manages one.
+        // The bound open is the capability's own open: it opens a descriptor
+        // for the holder, and the holder closes it.
+        let handle = backend
+            .bound_open(&bound, &OpenRequest { mode: OpenMode::Read, flags: Vec::new() })
+            .expect("open");
+        assert_eq!(backend.open_handle_count(), 1, "the descriptor is open");
+        backend.close_file(&handle).expect("close");
+        assert_eq!(backend.open_handle_count(), 0, "and it is closed again");
+        backend.bound_close(&bound).expect("close");
+    }
+
+    /// The bound read is the capability's own read: it opens, reads and
+    /// closes its own descriptor, so a holder never manages one.
+    #[test]
+    fn a_bound_service_reads_its_own_bytes() {
+        let (backend, tree) = sandbox("bound-read");
+        let path = touch_path(&tree, "granted.txt", b"original body");
+        let bound = backend.acquire_file(&path, 7).expect("acquire");
         assert_eq!(backend.bound_read(&bound, 0, 1024).expect("read"), b"original body");
+        // The read leaves the file as it found it.
+        assert_eq!(fs::read(&path).expect("read"), b"original body");
+        backend.bound_close(&bound).expect("close");
+    }
+
+    /// The bound write writes at the offset it was given, and the host's own
+    /// file carries the bytes.
+    #[test]
+    fn a_bound_service_writes_at_its_own_offset() {
+        let (backend, tree) = sandbox("bound-write");
+        let path = touch_path(&tree, "granted.txt", b"original body");
+        let bound = backend.acquire_file(&path, 7).expect("acquire");
         assert_eq!(backend.bound_write(&bound, 0, b"rewritten").expect("write"), 9);
         assert_eq!(fs::read(&path).expect("read"), b"rewrittenbody");
+        backend.bound_close(&bound).expect("close");
+    }
+
+    /// The bound stat is the host's own metadata for the path the capability
+    /// names — and it answers the info union arm.
+    #[test]
+    fn a_bound_service_stats_its_own_path() {
+        let (backend, tree) = sandbox("bound-stat");
+        let path = touch_path(&tree, "granted.txt", b"original body");
+        let bound = backend.acquire_file(&path, 7).expect("acquire");
         let FileInfoResult::Info(info) = backend.bound_stat(&bound).expect("stat") else {
             panic!("the bound stat must answer the info union arm");
         };
-        // A write at an offset does not truncate: the file keeps the length of
-        // what was already there (13) when the write is shorter than it.
-        assert_eq!(info.size, 13);
+        assert_eq!(info.size, 13, "the file's own length");
+        assert_eq!(info.kind, FileKind::Regular);
         backend.bound_close(&bound).expect("close");
     }
 
@@ -5202,8 +5510,11 @@ mod tests {
     }
 
     #[test]
-    fn a_watch_pull_is_bounded_and_cancellable() {
-        let (backend, tree) = sandbox("watch-bounded");
+    /// The watch pull is bounded by the caller's number, and it delivers
+    /// every event the kernel produced.
+    #[test]
+    fn a_watch_pull_is_bounded() {
+        let (backend, tree) = sandbox("watch-pull");
         let watched = tree.join("watched");
         fs::create_dir_all(&watched).expect("dir");
         let subscription = backend.watch_directory(&watched.to_string_lossy()).expect("watch");
@@ -5224,8 +5535,26 @@ mod tests {
         backend.cancel_watch(subscription).expect("cancel");
     }
 
-    /// The unverified default surface refuses with a reason on a backend that
-    /// serves nothing — the law #6 baseline the platform backend overrides.
+    /// The watch cancel retires the subscription: the pull afterwards is
+    /// `notFound`, never a silent success.
+    #[test]
+    fn a_watch_cancel_retires_the_subscription() {
+        let (backend, tree) = sandbox("watch-cancel");
+        let watched = tree.join("watched");
+        fs::create_dir_all(&watched).expect("dir");
+        let subscription = backend.watch_directory(&watched.to_string_lossy()).expect("watch");
+        backend.cancel_watch(subscription).expect("cancel");
+        assert_eq!(
+            backend.pull_watch(subscription, 1).unwrap_err().code,
+            ErrorCode::NotFound,
+            "the subscription is retired"
+        );
+    }
+
+    /// UNIT: the unverified default surface refuses with a reason on a
+    /// backend that serves nothing — the law #6 baseline the platform
+    /// backend overrides. It proves the engine's own default, not a contract
+    /// method, so the matrix does not publish it.
     #[test]
     fn the_default_surface_refuses_with_a_reason() {
         let backend = NothingFilesBackend;

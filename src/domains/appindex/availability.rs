@@ -134,19 +134,19 @@ pub const APPINDEX_AVAILABILITY: &[MethodAvailability] = &[
     MethodAvailability::degraded(
         "getPinned",
         4,
-        "l3_linux_appindex::the_pinned_set_is_the_engines_own_memory",
+        "l3_linux_appindex::get_pinned_answers_with_the_engines_own_pinned_set",
         "the pinned set is this engine's own in-process set: the host's pinned applications live in the desktop shell's own store (dconf), which this backend neither reads nor writes, so the answer is the engine's memory and not the launcher's",
     ),
     MethodAvailability::degraded(
         "pinApp",
         5,
-        "l3_linux_appindex::the_pinned_set_is_the_engines_own_memory",
+        "l3_linux_appindex::pin_app_records_the_pin_in_the_engines_own_memory",
         "the same in-process pinned set as @getPinned: the engine records the pin in its own memory (it does not survive the process exit) and never writes the host launcher’s store, which is a host-mutating act (law #8)",
     ),
     MethodAvailability::degraded(
         "unpinApp",
         6,
-        "l3_linux_appindex::the_pinned_set_is_the_engines_own_memory",
+        "l3_linux_appindex::unpin_app_takes_the_pin_back_out_of_the_engines_own_memory",
         "the same in-process pinned set as @getPinned",
     ),
     MethodAvailability::real(
