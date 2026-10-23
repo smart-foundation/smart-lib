@@ -82,6 +82,93 @@ impl<B> vc::Server for VcardService<B>
 where
     B: VcardBackend + 'static,
 {
+    fn import_v_card(
+        self: Rc<Self>,
+        _params: vc::ImportVCardParams,
+        _results: vc::ImportVCardResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("importVCard") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn export_v_card(
+        self: Rc<Self>,
+        _params: vc::ExportVCardParams,
+        _results: vc::ExportVCardResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("exportVCard") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn parse_v_card(
+        self: Rc<Self>,
+        _params: vc::ParseVCardParams,
+        _results: vc::ParseVCardResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("parseVCard") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn format_v_card(
+        self: Rc<Self>,
+        _params: vc::FormatVCardParams,
+        _results: vc::FormatVCardResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("formatVCard") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_supported_versions(
+        self: Rc<Self>,
+        _params: vc::GetSupportedVersionsParams,
+        _results: vc::GetSupportedVersionsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getSupportedVersions") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_sync_token(
+        self: Rc<Self>,
+        _params: vc::GetSyncTokenParams,
+        _results: vc::GetSyncTokenResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getSyncToken") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn sync_changes(
+        self: Rc<Self>,
+        _params: vc::SyncChangesParams,
+        _results: vc::SyncChangesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("syncChanges") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn resolve_conflict(
+        self: Rc<Self>,
+        _params: vc::ResolveConflictParams,
+        _results: vc::ResolveConflictResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("resolveConflict") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
 }
 
 pub struct VcardDomain<B> {

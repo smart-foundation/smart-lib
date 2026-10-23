@@ -82,6 +82,610 @@ impl<B> ct::Server for ContentService<B>
 where
     B: ContentBackend + 'static,
 {
+    fn publish(
+        self: Rc<Self>,
+        _params: ct::PublishParams,
+        _results: ct::PublishResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("publish") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn publish_many(
+        self: Rc<Self>,
+        _params: ct::PublishManyParams,
+        _results: ct::PublishManyResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("publishMany") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn update(
+        self: Rc<Self>,
+        _params: ct::UpdateParams,
+        _results: ct::UpdateResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("update") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn unpublish(
+        self: Rc<Self>,
+        _params: ct::UnpublishParams,
+        _results: ct::UnpublishResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("unpublish") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn delete(
+        self: Rc<Self>,
+        _params: ct::DeleteParams,
+        _results: ct::DeleteResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("delete") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn trash(
+        self: Rc<Self>,
+        _params: ct::TrashParams,
+        _results: ct::TrashResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("trash") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn restore(
+        self: Rc<Self>,
+        _params: ct::RestoreParams,
+        _results: ct::RestoreResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("restore") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn empty_trash(
+        self: Rc<Self>,
+        _params: ct::EmptyTrashParams,
+        _results: ct::EmptyTrashResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("emptyTrash") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn query(
+        self: Rc<Self>,
+        _params: ct::QueryParams,
+        _results: ct::QueryResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("query") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get(
+        self: Rc<Self>,
+        _params: ct::GetParams,
+        _results: ct::GetResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("get") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe(
+        self: Rc<Self>,
+        _params: ct::SubscribeParams,
+        _results: ct::SubscribeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribe") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn add_relationship(
+        self: Rc<Self>,
+        _params: ct::AddRelationshipParams,
+        _results: ct::AddRelationshipResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("addRelationship") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn remove_relationship(
+        self: Rc<Self>,
+        _params: ct::RemoveRelationshipParams,
+        _results: ct::RemoveRelationshipResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("removeRelationship") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_relationships(
+        self: Rc<Self>,
+        _params: ct::GetRelationshipsParams,
+        _results: ct::GetRelationshipsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getRelationships") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn semantic_search(
+        self: Rc<Self>,
+        _params: ct::SemanticSearchParams,
+        _results: ct::SemanticSearchResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("semanticSearch") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_content_graph(
+        self: Rc<Self>,
+        _params: ct::GetContentGraphParams,
+        _results: ct::GetContentGraphResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getContentGraph") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn react_to_content(
+        self: Rc<Self>,
+        _params: ct::ReactToContentParams,
+        _results: ct::ReactToContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("reactToContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_reactions(
+        self: Rc<Self>,
+        _params: ct::GetReactionsParams,
+        _results: ct::GetReactionsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getReactions") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn add_provenance(
+        self: Rc<Self>,
+        _params: ct::AddProvenanceParams,
+        _results: ct::AddProvenanceResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("addProvenance") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_provenance(
+        self: Rc<Self>,
+        _params: ct::GetProvenanceParams,
+        _results: ct::GetProvenanceResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getProvenance") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn erase_content(
+        self: Rc<Self>,
+        _params: ct::EraseContentParams,
+        _results: ct::EraseContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("eraseContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_undo_history(
+        self: Rc<Self>,
+        _params: ct::GetUndoHistoryParams,
+        _results: ct::GetUndoHistoryResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getUndoHistory") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn undo_content(
+        self: Rc<Self>,
+        _params: ct::UndoContentParams,
+        _results: ct::UndoContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("undoContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn encrypt_content(
+        self: Rc<Self>,
+        _params: ct::EncryptContentParams,
+        _results: ct::EncryptContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("encryptContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn decrypt_content(
+        self: Rc<Self>,
+        _params: ct::DecryptContentParams,
+        _results: ct::DecryptContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("decryptContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn rotate_encryption_key(
+        self: Rc<Self>,
+        _params: ct::RotateEncryptionKeyParams,
+        _results: ct::RotateEncryptionKeyResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("rotateEncryptionKey") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn geotag_content(
+        self: Rc<Self>,
+        _params: ct::GeotagContentParams,
+        _results: ct::GeotagContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("geotagContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_by_geo_location(
+        self: Rc<Self>,
+        _params: ct::GetByGeoLocationParams,
+        _results: ct::GetByGeoLocationResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getByGeoLocation") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn ai_tag_content(
+        self: Rc<Self>,
+        _params: ct::AiTagContentParams,
+        _results: ct::AiTagContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("aiTagContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_accessibility_report(
+        self: Rc<Self>,
+        _params: ct::GetAccessibilityReportParams,
+        _results: ct::GetAccessibilityReportResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getAccessibilityReport") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn batch_publish(
+        self: Rc<Self>,
+        _params: ct::BatchPublishParams,
+        _results: ct::BatchPublishResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("batchPublish") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn create_branch(
+        self: Rc<Self>,
+        _params: ct::CreateBranchParams,
+        _results: ct::CreateBranchResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("createBranch") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn list_branches(
+        self: Rc<Self>,
+        _params: ct::ListBranchesParams,
+        _results: ct::ListBranchesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listBranches") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn merge_branch(
+        self: Rc<Self>,
+        _params: ct::MergeBranchParams,
+        _results: ct::MergeBranchResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("mergeBranch") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn create_composite(
+        self: Rc<Self>,
+        _params: ct::CreateCompositeParams,
+        _results: ct::CreateCompositeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("createComposite") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_composite(
+        self: Rc<Self>,
+        _params: ct::GetCompositeParams,
+        _results: ct::GetCompositeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getComposite") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn update_composite(
+        self: Rc<Self>,
+        _params: ct::UpdateCompositeParams,
+        _results: ct::UpdateCompositeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("updateComposite") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn add_lineage(
+        self: Rc<Self>,
+        _params: ct::AddLineageParams,
+        _results: ct::AddLineageResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("addLineage") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_lineage(
+        self: Rc<Self>,
+        _params: ct::GetLineageParams,
+        _results: ct::GetLineageResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getLineage") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_audit_trail(
+        self: Rc<Self>,
+        _params: ct::GetAuditTrailParams,
+        _results: ct::GetAuditTrailResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getAuditTrail") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_rate_limit(
+        self: Rc<Self>,
+        _params: ct::SetRateLimitParams,
+        _results: ct::SetRateLimitResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setRateLimit") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_rate_limit(
+        self: Rc<Self>,
+        _params: ct::GetRateLimitParams,
+        _results: ct::GetRateLimitResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getRateLimit") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn generate_preview(
+        self: Rc<Self>,
+        _params: ct::GeneratePreviewParams,
+        _results: ct::GeneratePreviewResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("generatePreview") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_preview(
+        self: Rc<Self>,
+        _params: ct::GetPreviewParams,
+        _results: ct::GetPreviewResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getPreview") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_dependencies(
+        self: Rc<Self>,
+        _params: ct::GetDependenciesParams,
+        _results: ct::GetDependenciesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getDependencies") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn add_dependency(
+        self: Rc<Self>,
+        _params: ct::AddDependencyParams,
+        _results: ct::AddDependencyResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("addDependency") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn remove_dependency(
+        self: Rc<Self>,
+        _params: ct::RemoveDependencyParams,
+        _results: ct::RemoveDependencyResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("removeDependency") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn schedule_expiration(
+        self: Rc<Self>,
+        _params: ct::ScheduleExpirationParams,
+        _results: ct::ScheduleExpirationResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("scheduleExpiration") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn cancel_expiration(
+        self: Rc<Self>,
+        _params: ct::CancelExpirationParams,
+        _results: ct::CancelExpirationResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("cancelExpiration") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_replication_status(
+        self: Rc<Self>,
+        _params: ct::GetReplicationStatusParams,
+        _results: ct::GetReplicationStatusResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getReplicationStatus") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_quality_score(
+        self: Rc<Self>,
+        _params: ct::GetQualityScoreParams,
+        _results: ct::GetQualityScoreResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getQualityScore") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_recommendations(
+        self: Rc<Self>,
+        _params: ct::GetRecommendationsParams,
+        _results: ct::GetRecommendationsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getRecommendations") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn add_translation(
+        self: Rc<Self>,
+        _params: ct::AddTranslationParams,
+        _results: ct::AddTranslationResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("addTranslation") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_translations(
+        self: Rc<Self>,
+        _params: ct::GetTranslationsParams,
+        _results: ct::GetTranslationsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getTranslations") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_translated_content(
+        self: Rc<Self>,
+        _params: ct::GetTranslatedContentParams,
+        _results: ct::GetTranslatedContentResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getTranslatedContent") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
 }
 
 pub struct ContentDomain<B> {

@@ -82,6 +82,159 @@ impl<B> mf::Server for ManifestService<B>
 where
     B: ManifestBackend + 'static,
 {
+    fn resolve(
+        self: Rc<Self>,
+        _params: mf::ResolveParams,
+        _results: mf::ResolveResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("resolve") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn list(
+        self: Rc<Self>,
+        _params: mf::ListParams,
+        _results: mf::ListResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("list") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe(
+        self: Rc<Self>,
+        _params: mf::SubscribeParams,
+        _results: mf::SubscribeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribe") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn pull(
+        self: Rc<Self>,
+        _params: mf::PullParams,
+        _results: mf::PullResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("pull") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn compose(
+        self: Rc<Self>,
+        _params: mf::ComposeParams,
+        _results: mf::ComposeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("compose") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn diff(
+        self: Rc<Self>,
+        _params: mf::DiffParams,
+        _results: mf::DiffResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("diff") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn validate(
+        self: Rc<Self>,
+        _params: mf::ValidateParams,
+        _results: mf::ValidateResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("validate") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn sign(
+        self: Rc<Self>,
+        _params: mf::SignParams,
+        _results: mf::SignResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("sign") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn verify(
+        self: Rc<Self>,
+        _params: mf::VerifyParams,
+        _results: mf::VerifyResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("verify") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn migrate(
+        self: Rc<Self>,
+        _params: mf::MigrateParams,
+        _results: mf::MigrateResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("migrate") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn create_template(
+        self: Rc<Self>,
+        _params: mf::CreateTemplateParams,
+        _results: mf::CreateTemplateResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("createTemplate") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn compose_with_config(
+        self: Rc<Self>,
+        _params: mf::ComposeWithConfigParams,
+        _results: mf::ComposeWithConfigResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("composeWithConfig") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn validate_dependencies(
+        self: Rc<Self>,
+        _params: mf::ValidateDependenciesParams,
+        _results: mf::ValidateDependenciesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("validateDependencies") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn resolve_by_name(
+        self: Rc<Self>,
+        _params: mf::ResolveByNameParams,
+        _results: mf::ResolveByNameResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("resolveByName") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
 }
 
 pub struct ManifestDomain<B> {

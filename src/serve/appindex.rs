@@ -82,6 +82,192 @@ impl<B> ai::Server for AppindexService<B>
 where
     B: AppindexBackend + 'static,
 {
+    fn list_apps(
+        self: Rc<Self>,
+        _params: ai::ListAppsParams,
+        _results: ai::ListAppsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listApps") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_app(
+        self: Rc<Self>,
+        _params: ai::GetAppParams,
+        _results: ai::GetAppResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getApp") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn launch(
+        self: Rc<Self>,
+        _params: ai::LaunchParams,
+        _results: ai::LaunchResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("launch") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn launch_url(
+        self: Rc<Self>,
+        _params: ai::LaunchUrlParams,
+        _results: ai::LaunchUrlResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("launchUrl") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_pinned(
+        self: Rc<Self>,
+        _params: ai::GetPinnedParams,
+        _results: ai::GetPinnedResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getPinned") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn pin_app(
+        self: Rc<Self>,
+        _params: ai::PinAppParams,
+        _results: ai::PinAppResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("pinApp") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn unpin_app(
+        self: Rc<Self>,
+        _params: ai::UnpinAppParams,
+        _results: ai::UnpinAppResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("unpinApp") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn search_apps(
+        self: Rc<Self>,
+        _params: ai::SearchAppsParams,
+        _results: ai::SearchAppsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("searchApps") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_recent_apps(
+        self: Rc<Self>,
+        _params: ai::GetRecentAppsParams,
+        _results: ai::GetRecentAppsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getRecentApps") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn clear_recent_apps(
+        self: Rc<Self>,
+        _params: ai::ClearRecentAppsParams,
+        _results: ai::ClearRecentAppsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("clearRecentApps") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe(
+        self: Rc<Self>,
+        _params: ai::SubscribeParams,
+        _results: ai::SubscribeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribe") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn pull(
+        self: Rc<Self>,
+        _params: ai::PullParams,
+        _results: ai::PullResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("pull") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn cancel(
+        self: Rc<Self>,
+        _params: ai::CancelParams,
+        _results: ai::CancelResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("cancel") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_stats(
+        self: Rc<Self>,
+        _params: ai::GetStatsParams,
+        _results: ai::GetStatsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getStats") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn list_capabilities(
+        self: Rc<Self>,
+        _params: ai::ListCapabilitiesParams,
+        _results: ai::ListCapabilitiesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listCapabilities") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_dependents(
+        self: Rc<Self>,
+        _params: ai::GetDependentsParams,
+        _results: ai::GetDependentsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getDependents") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn batch_get(
+        self: Rc<Self>,
+        _params: ai::BatchGetParams,
+        _results: ai::BatchGetResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("batchGet") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
 }
 
 pub struct AppindexDomain<B> {

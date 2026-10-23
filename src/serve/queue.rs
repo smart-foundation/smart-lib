@@ -82,6 +82,346 @@ impl<B> que::Server for QueueService<B>
 where
     B: QueueBackend + 'static,
 {
+    fn enqueue(
+        self: Rc<Self>,
+        _params: que::EnqueueParams,
+        _results: que::EnqueueResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("enqueue") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn dequeue(
+        self: Rc<Self>,
+        _params: que::DequeueParams,
+        _results: que::DequeueResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("dequeue") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn peek(
+        self: Rc<Self>,
+        _params: que::PeekParams,
+        _results: que::PeekResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("peek") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_queue(
+        self: Rc<Self>,
+        _params: que::GetQueueParams,
+        _results: que::GetQueueResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getQueue") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn clear_queue(
+        self: Rc<Self>,
+        _params: que::ClearQueueParams,
+        _results: que::ClearQueueResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("clearQueue") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn delete_queue(
+        self: Rc<Self>,
+        _params: que::DeleteQueueParams,
+        _results: que::DeleteQueueResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("deleteQueue") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn list_queues(
+        self: Rc<Self>,
+        _params: que::ListQueuesParams,
+        _results: que::ListQueuesResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listQueues") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe_queue(
+        self: Rc<Self>,
+        _params: que::SubscribeQueueParams,
+        _results: que::SubscribeQueueResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribeQueue") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe_with_filter(
+        self: Rc<Self>,
+        _params: que::SubscribeWithFilterParams,
+        _results: que::SubscribeWithFilterResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribeWithFilter") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_statistics(
+        self: Rc<Self>,
+        _params: que::GetStatisticsParams,
+        _results: que::GetStatisticsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getStatistics") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn enqueue_all(
+        self: Rc<Self>,
+        _params: que::EnqueueAllParams,
+        _results: que::EnqueueAllResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("enqueueAll") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn dequeue_ack(
+        self: Rc<Self>,
+        _params: que::DequeueAckParams,
+        _results: que::DequeueAckResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("dequeueAck") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn ack(
+        self: Rc<Self>,
+        _params: que::AckParams,
+        _results: que::AckResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("ack") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn nack(
+        self: Rc<Self>,
+        _params: que::NackParams,
+        _results: que::NackResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("nack") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn replay(
+        self: Rc<Self>,
+        _params: que::ReplayParams,
+        _results: que::ReplayResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("replay") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_delivery_mode(
+        self: Rc<Self>,
+        _params: que::SetDeliveryModeParams,
+        _results: que::SetDeliveryModeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setDeliveryMode") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_dead_letter_policy(
+        self: Rc<Self>,
+        _params: que::SetDeadLetterPolicyParams,
+        _results: que::SetDeadLetterPolicyResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setDeadLetterPolicy") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_ordering(
+        self: Rc<Self>,
+        _params: que::SetOrderingParams,
+        _results: que::SetOrderingResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setOrdering") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_encryption(
+        self: Rc<Self>,
+        _params: que::SetEncryptionParams,
+        _results: que::SetEncryptionResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setEncryption") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_message_ttl(
+        self: Rc<Self>,
+        _params: que::SetMessageTtlParams,
+        _results: que::SetMessageTtlResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setMessageTtl") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_flow_control(
+        self: Rc<Self>,
+        _params: que::SetFlowControlParams,
+        _results: que::SetFlowControlResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setFlowControl") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn list_dead_letters(
+        self: Rc<Self>,
+        _params: que::ListDeadLettersParams,
+        _results: que::ListDeadLettersResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listDeadLetters") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn retry_dead_letter(
+        self: Rc<Self>,
+        _params: que::RetryDeadLetterParams,
+        _results: que::RetryDeadLetterResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("retryDeadLetter") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn create_consumer_group(
+        self: Rc<Self>,
+        _params: que::CreateConsumerGroupParams,
+        _results: que::CreateConsumerGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("createConsumerGroup") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn delete_consumer_group(
+        self: Rc<Self>,
+        _params: que::DeleteConsumerGroupParams,
+        _results: que::DeleteConsumerGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("deleteConsumerGroup") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_consumer_group(
+        self: Rc<Self>,
+        _params: que::GetConsumerGroupParams,
+        _results: que::GetConsumerGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getConsumerGroup") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn list_consumer_groups(
+        self: Rc<Self>,
+        _params: que::ListConsumerGroupsParams,
+        _results: que::ListConsumerGroupsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listConsumerGroups") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn add_consumer_to_group(
+        self: Rc<Self>,
+        _params: que::AddConsumerToGroupParams,
+        _results: que::AddConsumerToGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("addConsumerToGroup") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn remove_consumer_from_group(
+        self: Rc<Self>,
+        _params: que::RemoveConsumerFromGroupParams,
+        _results: que::RemoveConsumerFromGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("removeConsumerFromGroup") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn dequeue_from_group(
+        self: Rc<Self>,
+        _params: que::DequeueFromGroupParams,
+        _results: que::DequeueFromGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("dequeueFromGroup") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn deduplicate(
+        self: Rc<Self>,
+        _params: que::DeduplicateParams,
+        _results: que::DeduplicateResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("deduplicate") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
 }
 
 pub struct QueueDomain<B> {

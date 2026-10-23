@@ -82,6 +82,434 @@ impl<B> med::Server for MediaService<B>
 where
     B: MediaBackend + 'static,
 {
+    fn list_players(
+        self: Rc<Self>,
+        _params: med::ListPlayersParams,
+        _results: med::ListPlayersResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listPlayers") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_player(
+        self: Rc<Self>,
+        _params: med::GetPlayerParams,
+        _results: med::GetPlayerResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getPlayer") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn play(
+        self: Rc<Self>,
+        _params: med::PlayParams,
+        _results: med::PlayResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("play") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn pause(
+        self: Rc<Self>,
+        _params: med::PauseParams,
+        _results: med::PauseResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("pause") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn stop(
+        self: Rc<Self>,
+        _params: med::StopParams,
+        _results: med::StopResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("stop") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn next(
+        self: Rc<Self>,
+        _params: med::NextParams,
+        _results: med::NextResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("next") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn previous(
+        self: Rc<Self>,
+        _params: med::PreviousParams,
+        _results: med::PreviousResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("previous") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn seek(
+        self: Rc<Self>,
+        _params: med::SeekParams,
+        _results: med::SeekResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("seek") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_metadata(
+        self: Rc<Self>,
+        _params: med::GetMetadataParams,
+        _results: med::GetMetadataResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getMetadata") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_position(
+        self: Rc<Self>,
+        _params: med::GetPositionParams,
+        _results: med::GetPositionResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getPosition") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_volume(
+        self: Rc<Self>,
+        _params: med::SetVolumeParams,
+        _results: med::SetVolumeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setVolume") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_position(
+        self: Rc<Self>,
+        _params: med::SetPositionParams,
+        _results: med::SetPositionResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setPosition") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn open_uri(
+        self: Rc<Self>,
+        _params: med::OpenUriParams,
+        _results: med::OpenUriResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("openUri") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe_player(
+        self: Rc<Self>,
+        _params: med::SubscribePlayerParams,
+        _results: med::SubscribePlayerResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribePlayer") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_supported_formats(
+        self: Rc<Self>,
+        _params: med::GetSupportedFormatsParams,
+        _results: med::GetSupportedFormatsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getSupportedFormats") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn transcode(
+        self: Rc<Self>,
+        _params: med::TranscodeParams,
+        _results: med::TranscodeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("transcode") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_recommendations(
+        self: Rc<Self>,
+        _params: med::GetRecommendationsParams,
+        _results: med::GetRecommendationsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getRecommendations") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_analytics(
+        self: Rc<Self>,
+        _params: med::GetAnalyticsParams,
+        _results: med::GetAnalyticsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getAnalytics") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn share_media(
+        self: Rc<Self>,
+        _params: med::ShareMediaParams,
+        _results: med::ShareMediaResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("shareMedia") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn download_media(
+        self: Rc<Self>,
+        _params: med::DownloadMediaParams,
+        _results: med::DownloadMediaResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("downloadMedia") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_crossfade(
+        self: Rc<Self>,
+        _params: med::SetCrossfadeParams,
+        _results: med::SetCrossfadeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setCrossfade") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_sync_group(
+        self: Rc<Self>,
+        _params: med::SetSyncGroupParams,
+        _results: med::SetSyncGroupResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setSyncGroup") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn create_playlist(
+        self: Rc<Self>,
+        _params: med::CreatePlaylistParams,
+        _results: med::CreatePlaylistResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("createPlaylist") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn add_to_playlist(
+        self: Rc<Self>,
+        _params: med::AddToPlaylistParams,
+        _results: med::AddToPlaylistResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("addToPlaylist") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn remove_from_playlist(
+        self: Rc<Self>,
+        _params: med::RemoveFromPlaylistParams,
+        _results: med::RemoveFromPlaylistResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("removeFromPlaylist") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn reorder_playlist(
+        self: Rc<Self>,
+        _params: med::ReorderPlaylistParams,
+        _results: med::ReorderPlaylistResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("reorderPlaylist") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_recommendations_with_scores(
+        self: Rc<Self>,
+        _params: med::GetRecommendationsWithScoresParams,
+        _results: med::GetRecommendationsWithScoresResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getRecommendationsWithScores") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_share_preview(
+        self: Rc<Self>,
+        _params: med::GetSharePreviewParams,
+        _results: med::GetSharePreviewResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getSharePreview") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_download_status(
+        self: Rc<Self>,
+        _params: med::GetDownloadStatusParams,
+        _results: med::GetDownloadStatusResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getDownloadStatus") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn list_downloads(
+        self: Rc<Self>,
+        _params: med::ListDownloadsParams,
+        _results: med::ListDownloadsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("listDownloads") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn pause_download(
+        self: Rc<Self>,
+        _params: med::PauseDownloadParams,
+        _results: med::PauseDownloadResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("pauseDownload") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn resume_download(
+        self: Rc<Self>,
+        _params: med::ResumeDownloadParams,
+        _results: med::ResumeDownloadResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("resumeDownload") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn cancel_download(
+        self: Rc<Self>,
+        _params: med::CancelDownloadParams,
+        _results: med::CancelDownloadResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("cancelDownload") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe_download(
+        self: Rc<Self>,
+        _params: med::SubscribeDownloadParams,
+        _results: med::SubscribeDownloadResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribeDownload") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn set_crossfade_config(
+        self: Rc<Self>,
+        _params: med::SetCrossfadeConfigParams,
+        _results: med::SetCrossfadeConfigResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("setCrossfadeConfig") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn get_crossfade_config(
+        self: Rc<Self>,
+        _params: med::GetCrossfadeConfigParams,
+        _results: med::GetCrossfadeConfigResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("getCrossfadeConfig") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn send_live_interaction(
+        self: Rc<Self>,
+        _params: med::SendLiveInteractionParams,
+        _results: med::SendLiveInteractionResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("sendLiveInteraction") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe_live_interactions(
+        self: Rc<Self>,
+        _params: med::SubscribeLiveInteractionsParams,
+        _results: med::SubscribeLiveInteractionsResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribeLiveInteractions") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
+
+    fn subscribe_transcode(
+        self: Rc<Self>,
+        _params: med::SubscribeTranscodeParams,
+        _results: med::SubscribeTranscodeResults,
+    ) -> impl core::future::Future<Output = Result<(), capnp::Error>> {
+        core::future::ready(match unavailable("subscribeTranscode") {
+            Some(e) => Err(e),
+            None => Ok(()),
+        })
+    }
 }
 
 pub struct MediaDomain<B> {
