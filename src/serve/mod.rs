@@ -77,6 +77,10 @@ pub mod router;
 pub mod service;
 pub mod stream;
 
+#[cfg(feature = "domain-audio")]
+pub mod audio;
+#[cfg(feature = "domain-clipboard")]
+pub mod clipboard;
 #[cfg(feature = "domain-clock")]
 pub mod clock;
 #[cfg(feature = "domain-files")]
@@ -91,6 +95,22 @@ pub mod process;
 pub mod settings;
 #[cfg(feature = "domain-time")]
 pub mod time;
+#[cfg(feature = "domain-vcard")]
+pub mod vcard;
+#[cfg(feature = "domain-queue")]
+pub mod queue;
+#[cfg(feature = "domain-power")]
+pub mod power;
+#[cfg(feature = "domain-media")]
+pub mod media;
+#[cfg(feature = "domain-manifest")]
+pub mod manifest;
+#[cfg(feature = "domain-database")]
+pub mod database;
+#[cfg(feature = "domain-content")]
+pub mod content;
+#[cfg(feature = "domain-appindex")]
+pub mod appindex;
 
 pub use router::{InterfaceRouter, Route};
 pub use service::{ClientSession, ServeError, ServedDomain, Service};
