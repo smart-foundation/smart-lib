@@ -77,8 +77,6 @@ pub mod router;
 pub mod service;
 pub mod stream;
 
-#[cfg(feature = "domain-audio")]
-pub mod audio;
 #[cfg(feature = "domain-clipboard")]
 pub mod clipboard;
 #[cfg(feature = "domain-clock")]
