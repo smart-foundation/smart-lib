@@ -58,7 +58,7 @@ jobs:
 
       - name: Build the daemon
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
-        run: cargo build --bin smart-service --features "$DAEMON_FEATURES"
+        run: ./scripts/ci-annotate.sh cargo build --bin smart-service --features "$DAEMON_FEATURES"
 
       - name: Daemon reports what it serves
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
@@ -73,9 +73,9 @@ jobs:
       - name: Clipboard, archive and database tests
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
         run: |
-          cargo test --lib --features "$DAEMON_FEATURES" -- clipboard
-          cargo test --lib --features "$DAEMON_FEATURES" -- database
-          cargo test --lib --features "$DAEMON_FEATURES" -- archive
+          ./scripts/ci-annotate.sh cargo test --lib --features "$DAEMON_FEATURES" -- clipboard
+          ./scripts/ci-annotate.sh cargo test --lib --features "$DAEMON_FEATURES" -- database
+          ./scripts/ci-annotate.sh cargo test --lib --features "$DAEMON_FEATURES" -- archive
 
       - name: The daemon actually binds and answers
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
@@ -126,12 +126,12 @@ jobs:
       - name: Unit tests (config, errors, model)
         working-directory: crates/smart-clipboard-proto
         env: { SMART_SCHEMA_DIR: ../../../smart-protocol-official/schema }
-        run: cargo test --lib
+        run: ../../scripts/ci-annotate.sh cargo test --lib
 
       - name: Contract round trip against a served backend
         working-directory: crates/smart-clipboard-proto
         env: { SMART_SCHEMA_DIR: ../../../smart-protocol-official/schema }
-        run: cargo test --test contract_roundtrip -- --nocapture
+        run: ../../scripts/ci-annotate.sh cargo test --test contract_roundtrip -- --nocapture
 
   app:
     name: app · gpui product
@@ -169,7 +169,7 @@ jobs:
           # gpui links a Vulkan loader; a runner has no GPU, which is fine for a
           # build and for the pure tests below (nothing opens a window here).
           WGPU_BACKEND: vulkan
-        run: cargo build
+        run: ../../scripts/ci-annotate.sh cargo build
 
       - name: The app explains itself without a display
         working-directory: crates/smart-clipboard
@@ -185,7 +185,7 @@ jobs:
         env: { SMART_SCHEMA_DIR: ../../../smart-protocol-official/schema }
         # These are the parts with no GPU in them: the store's command/event
         # reducer, the formatting helpers, the image decoder, the query grammar.
-        run: cargo test --bin smart-clipboard
+        run: ../../scripts/ci-annotate.sh cargo test --bin smart-clipboard
 
   hygiene:
     name: hygiene · formatting (advisory)
