@@ -36,10 +36,18 @@ if [ "$STATUS" -ne 0 ]; then
         printf '::error::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-900)"
     done
     # Test failures: the assertion, and the left/right pair that explains it.
-    grep -E '^(failures:|    [a-z_]+::|thread .* panicked|  left:| right:|assertion)' "$CLEAN" \
-        | head -20 \
+    #
+    # A panic is two lines — `thread 'x' panicked at src/f.rs:12:5:` and then the
+    # message, which is the only line carrying *why* (a `Display`ed error, an
+    # `expect`'s text). So the message line is captured with it; grep alone
+    # would drop it.
+    awk '
+        /^(failures:|    [a-z_][a-z_0-9]*::|  left:| right:|assertion)/ { print "::error::" $0; next }
+        /thread .* panicked at/ { print "::error::" $0; want = 1; next }
+        want { print "::error::" $0; want = 0 }
+    ' "$CLEAN" | head -24 \
         | while IFS= read -r line; do
-            printf '::error::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-400)"
+            printf '%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-700)"
         done
     # The last lines name the failing crate and target.
     tail -6 "$CLEAN" | while IFS= read -r line; do

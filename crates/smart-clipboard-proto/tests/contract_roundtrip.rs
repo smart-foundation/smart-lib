@@ -130,8 +130,13 @@ impl ClipboardBackend for Ledger {
 /// shared, which is the only thing this test needs to reach.
 fn serve(class: CapabilityClass) -> (String, Arc<Ledger>) {
     let ledger = Arc::new(Ledger::default());
+    // Unique per *test*, not per process: `cargo test` runs tests on parallel
+    // threads, and two tests that shared a socket path would unlink each
+    // other's listener — a flaky connect that looks like a contract bug.
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = format!(
-        "/tmp/smart-clipboard-proto-{}-{}.sock",
+        "/tmp/smart-clipboard-proto-{}-{seq}-{}.sock",
         std::process::id(),
         match class {
             CapabilityClass::Control => "control",
