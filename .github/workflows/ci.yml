@@ -170,6 +170,16 @@ jobs:
             crates/smart-clipboard -> target
             crates/smart-clipboard-proto -> target
 
+      - name: Resolve the dependency tree
+        working-directory: crates/smart-clipboard
+        run: |
+          # Resolution only, so a broken *transitive* crate is named before the
+          # twenty-minute build gets to it. Annotations are the only channel
+          # whose text survives this host, so the answer is emitted as one.
+          cargo generate-lockfile
+          TREE=$(cargo tree --invert xattr --depth 4 2>&1 || true)
+          echo "::error ::xattr holders => $(echo "$TREE" | tr '\n' '~' | cut -c1-900)"
+
       - name: Build the app
         working-directory: crates/smart-clipboard
         run: ../../scripts/ci-annotate.sh cargo build
