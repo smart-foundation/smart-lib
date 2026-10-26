@@ -292,7 +292,7 @@ impl<'a> ClipboardClient<'a> {
                 }
             }
             Ok(WhichReader::Error(error)) => PreviewState::Failed {
-                message: text_of(error.get_message()),
+                message: text_of(error.and_then(|error| error.get_message())),
             },
             Err(error) => PreviewState::Failed {
                 message: format!("getPreview union: {error}"),
@@ -330,6 +330,11 @@ impl<'a> ClipboardClient<'a> {
         use crate::schema::clipboard_capnp::conversion_result::WhichReader;
         match union.which() {
             Ok(WhichReader::Content(reader)) => {
+                let Ok(reader) = reader else {
+                    return Err(ClientError::Decode(
+                        "convertContent content: the payload is not readable".to_string(),
+                    ));
+                };
                 let (mime, bytes) = read_content(&reader);
                 Ok(Representation::Content { mime, bytes })
             }
@@ -338,7 +343,7 @@ impl<'a> ClipboardClient<'a> {
             }),
             Ok(WhichReader::Error(error)) => Err(ClientError::Refused(Refusal::from_reason_text(
                 "convertContent",
-                &text_of(error.get_message()),
+                &text_of(error.and_then(|error| error.get_message())),
             ))),
             Ok(WhichReader::Unknown(())) => Err(ClientError::Decode(
                 "convertContent: the service answered `unknown`".to_string(),
@@ -489,6 +494,11 @@ impl<'a> ClipboardClient<'a> {
         use crate::schema::clipboard_capnp::content_result::WhichReader;
         match union.which() {
             Ok(WhichReader::Content(reader)) => {
+                let Ok(reader) = reader else {
+                    return Err(ClientError::Decode(
+                        "getContent content: the payload is not readable".to_string(),
+                    ));
+                };
                 let (mime, bytes) = read_content(&reader);
                 let size = bytes.len() as u64;
                 let text = String::from_utf8(bytes).ok();
@@ -501,7 +511,7 @@ impl<'a> ClipboardClient<'a> {
             Ok(WhichReader::Empty(())) => Ok(LiveContent::Empty),
             Ok(WhichReader::Error(error)) => Err(ClientError::Refused(Refusal::from_reason_text(
                 "getContent",
-                &text_of(error.get_message()),
+                &text_of(error.and_then(|error| error.get_message())),
             ))),
             Ok(WhichReader::Unknown(())) => Err(ClientError::Decode(
                 "getContent: the service answered `unknown`".to_string(),
@@ -652,7 +662,7 @@ fn check_void(
             // prefix; `Refusal::from_reason_text` reads it, so a
             // `permissionDenied` here keeps its class instead of flattening to
             // "failed".
-            let message = text_of(error.get_message());
+            let message = text_of(error.and_then(|error| error.get_message()));
             Err(ClientError::Refused(Refusal::from_reason_text(verb, &message)))
         }
         Err(error) => Err(ClientError::Decode(format!("{verb} union: {error}"))),

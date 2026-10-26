@@ -69,6 +69,12 @@ pub mod schema {
     pub mod types_capnp {
         include!(concat!(env!("OUT_DIR"), "/types_capnp.rs"));
     }
+    pub mod logging_capnp {
+        include!(concat!(env!("OUT_DIR"), "/logging_capnp.rs"));
+    }
+    pub mod diagnostics_capnp {
+        include!(concat!(env!("OUT_DIR"), "/diagnostics_capnp.rs"));
+    }
     pub mod capability_capnp {
         include!(concat!(env!("OUT_DIR"), "/capability_capnp.rs"));
     }
