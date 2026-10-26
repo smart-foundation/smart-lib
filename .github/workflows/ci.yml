@@ -151,7 +151,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             capnproto libcapnp-dev \
-            libwayland-dev libxkbcommon-dev libx11-xcb-dev libvulkan-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libvulkan-dev \
             libfontconfig-dev libfreetype-dev libssl-dev libclang-dev \
             pkg-config clang
           capnp --version
