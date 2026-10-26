@@ -363,7 +363,12 @@ mod tests {
         archive.put(&item(2, "image/png", b"two")).expect("put");
         let items = archive.load().expect("load");
         assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![3, 2, 1]);
-        assert_eq!(items[1].first_text(), Some("two"));
+        // The text view only exists for text payloads; the image's bytes are
+        // still there, which is what a thumbnail read needs after a restart.
+        assert_eq!(items[0].first_text(), Some("three"));
+        assert_eq!(items[1].first_text(), None);
+        assert_eq!(items[1].offers[0].0, "image/png");
+        assert_eq!(items[1].offers[0].1, b"two".to_vec());
     }
 
     /// Remove and clear are the archive's own answers, and removing an absent

@@ -322,7 +322,13 @@ mod tests {
     /// counts what the loop asks it, so the loop's *cost* is assertable too.
     struct ScriptedHost {
         owners: Mutex<Vec<u64>>,
+        /// The owner the script last reported, so the payload can differ per
+        /// copy — two owners serving identical bytes are one history row, and a
+        /// test that wants two rows has to change the content.
+        current: Mutex<u64>,
         targets: Vec<String>,
+        /// A fixed payload; empty means "one per owner", which is how the loop
+        /// test gets two distinguishable copies.
         payload: Vec<u8>,
         reads: AtomicUsize,
         polls: AtomicUsize,
@@ -337,10 +343,14 @@ mod tests {
 
         fn read(&self, mime_type: &str) -> std::result::Result<SelectionRead, String> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            if self.targets.iter().any(|target| target == mime_type) {
-                Ok(SelectionRead::Data(self.payload.clone()))
+            if !self.targets.iter().any(|target| target == mime_type) {
+                return Ok(SelectionRead::NotOffered("not offered here".to_string()));
+            }
+            if self.payload.is_empty() {
+                let owner = *self.current.lock().unwrap();
+                Ok(SelectionRead::Data(alloc::format!("copy from owner {owner}").into_bytes()))
             } else {
-                Ok(SelectionRead::NotOffered("not offered here".to_string()))
+                Ok(SelectionRead::Data(self.payload.clone()))
             }
         }
 
@@ -355,12 +365,14 @@ mod tests {
         fn owner_token(&self) -> Option<u64> {
             let index = self.polls.fetch_add(1, Ordering::SeqCst);
             let owners = self.owners.lock().unwrap();
+            let owner = owners[index.min(owners.len() - 1)];
+            *self.current.lock().unwrap() = owner;
             if index + 1 >= self.stop_after_polls {
                 // The loop honours this on its next check, which is what a
                 // daemon's SIGTERM path does.
                 self.stop.store(true, Ordering::SeqCst);
             }
-            Some(owners[index.min(owners.len() - 1)])
+            Some(owner)
         }
     }
 
@@ -369,6 +381,7 @@ mod tests {
         (
             ScriptedHost {
                 owners: Mutex::new(owners),
+                current: Mutex::new(0),
                 targets: targets(offered),
                 payload: payload.to_vec(),
                 reads: AtomicUsize::new(0),
@@ -386,7 +399,9 @@ mod tests {
     #[test]
     fn the_loop_ingests_once_per_new_owner() {
         let backend = Arc::new(Mutex::new(LinuxClipboardBackend::solid()));
-        let (host, stop) = scripted(vec![7, 7, 7, 9, 9], &["text/plain"], b"copied elsewhere", 5);
+        // Distinct payloads per owner (an empty payload means "one per owner"):
+        // two different copies, so the loop's dedupe cannot mask a missed read.
+        let (host, stop) = scripted(vec![7, 7, 7, 9, 9], &["text/plain"], b"", 5);
         run_loop(&host, &backend, Duration::from_millis(1), &stop);
         assert!(stop.load(Ordering::SeqCst), "the script stopped the loop");
         let page = backend
@@ -395,6 +410,8 @@ mod tests {
             .get_history(Pagination { offset: 0, limit: 10 })
             .expect("history");
         assert_eq!(page.total, 2, "two owners, two copies, no duplicates");
+        assert_eq!(page.items[0].text, "copy from owner 9");
+        assert_eq!(page.items[1].text, "copy from owner 7");
         assert_eq!(host.reads.load(Ordering::SeqCst), 2, "one read per observed change");
         assert_eq!(host.polls.load(Ordering::SeqCst), 5);
     }
