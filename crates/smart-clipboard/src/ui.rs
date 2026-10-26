@@ -227,7 +227,13 @@ pub fn glyph(theme: &Theme, family: MimeFamily, size: f32) -> Div {
                 .flex_col()
                 .gap(px(2.0))
                 .child(bar(size * 0.44, 3.0, color))
-                .child(div().flex().gap(px(1.0)).child(bar(size * 0.18, 3.0, color)).child(bar(size * 0.18, 3.0, color))),
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(1.0))
+                        .child(bar(size * 0.18, 3.0, color))
+                        .child(bar(size * 0.18, 3.0, color)),
+                ),
         ),
         MimeFamily::Image => tile.child(
             div()
@@ -300,10 +306,30 @@ pub fn checker(theme: &Theme, size: f32) -> Div {
         .bg(theme.checker_a)
         .flex()
         .flex_wrap()
-        .child(div().w(px(size / 2.0)).h(px(size / 2.0)).bg(theme.checker_b))
-        .child(div().w(px(size / 2.0)).h(px(size / 2.0)).bg(theme.checker_a))
-        .child(div().w(px(size / 2.0)).h(px(size / 2.0)).bg(theme.checker_a))
-        .child(div().w(px(size / 2.0)).h(px(size / 2.0)).bg(theme.checker_b))
+        .child(
+            div()
+                .w(px(size / 2.0))
+                .h(px(size / 2.0))
+                .bg(theme.checker_b),
+        )
+        .child(
+            div()
+                .w(px(size / 2.0))
+                .h(px(size / 2.0))
+                .bg(theme.checker_a),
+        )
+        .child(
+            div()
+                .w(px(size / 2.0))
+                .h(px(size / 2.0))
+                .bg(theme.checker_a),
+        )
+        .child(
+            div()
+                .w(px(size / 2.0))
+                .h(px(size / 2.0))
+                .bg(theme.checker_b),
+        )
 }
 
 /// A skeleton line: what the UI draws while a *service* answer is in flight.

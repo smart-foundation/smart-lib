@@ -99,14 +99,12 @@ impl Parsed {
     pub fn matches(&self, item: &Item, preview: Option<&str>, now_ns: u64) -> bool {
         self.terms.iter().all(|term| match term {
             Term::Kind(family) => item.family() == *family,
-            Term::Mime(prefix) => item
-                .mimes
-                .iter()
-                .any(|mime| mime.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase())),
+            Term::Mime(prefix) => item.mimes.iter().any(|mime| {
+                mime.to_ascii_lowercase()
+                    .starts_with(&prefix.to_ascii_lowercase())
+            }),
             Term::Pinned => item.pinned,
-            Term::Sensitive => preview
-                .map(crate::format::looks_sensitive)
-                .unwrap_or(false),
+            Term::Sensitive => preview.map(crate::format::looks_sensitive).unwrap_or(false),
             Term::Newer(window) => match item.captured_at_ns {
                 // An item whose clock the service could not read is *not*
                 // silently dropped from a time filter: it is unknown, and the

@@ -42,7 +42,10 @@ use smart_clipboard_proto::{contract, ServiceLocation};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.iter().any(|argument| argument == "--help" || argument == "-h") {
+    if args
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
         print_help();
         return;
     }

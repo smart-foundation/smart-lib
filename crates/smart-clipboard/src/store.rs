@@ -323,9 +323,7 @@ impl Store {
 
     /// The preview text of an item, when the service served one.
     pub fn preview_text(&self, id: ItemId) -> Option<&str> {
-        self.previews
-            .get(&id.0)
-            .and_then(|state| state.snippet())
+        self.previews.get(&id.0).and_then(|state| state.snippet())
     }
 
     /// The rows the list should draw: facet filter, then sort, both local.
@@ -635,10 +633,7 @@ impl Store {
         }
         if let Some(item) = self.items.iter().find(|item| item.id == id) {
             if let Some(mime) = item.image_mime() {
-                if !matches!(
-                    self.contents.get(&id.0),
-                    Some(ContentState::Ready { .. })
-                ) {
+                if !matches!(self.contents.get(&id.0), Some(ContentState::Ready { .. })) {
                     effects.push(Command::Content {
                         id,
                         mime: mime.to_string(),
@@ -678,7 +673,9 @@ impl Store {
             return Vec::new();
         };
         if all_representations {
-            return vec![Command::Copy(CopyTarget::AllRepresentations { id: item.id })];
+            return vec![Command::Copy(CopyTarget::AllRepresentations {
+                id: item.id,
+            })];
         }
         let mime = item
             .mimes
@@ -1021,7 +1018,11 @@ mod tests {
             .unwrap()
             .methods
             .iter()
-            .any(|row| row.name == "setContent" && !matches!(row.observation, smart_clipboard_proto::Observation::Untested)));
+            .any(|row| row.name == "setContent"
+                && !matches!(
+                    row.observation,
+                    smart_clipboard_proto::Observation::Untested
+                )));
         let toast = store.toasts.last().expect("a toast");
         assert_eq!(toast.kind, ToastKind::Warn);
         assert!(toast.detail.contains("permissionDenied"));

@@ -37,8 +37,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    div, img, px, uniform_list, AnyElement, ClickEvent, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString,
+    div, img, px, uniform_list, AnyElement, ClickEvent, Context, Entity, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, StyledImage, Subscription, Window,
 };
 use smart_clipboard_proto::{Item, PreviewState};
@@ -135,12 +135,7 @@ impl PaletteView {
         }
     }
 
-    fn row(
-        &mut self,
-        index: usize,
-        rows: &Arc<Vec<Item>>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn row(&mut self, index: usize, rows: &Arc<Vec<Item>>, cx: &mut Context<Self>) -> AnyElement {
         let Some(item) = rows.get(index).cloned() else {
             return div().into_any_element();
         };
@@ -152,9 +147,9 @@ impl PaletteView {
         let now = crate::app::now_ns();
 
         let snippet = match &preview {
-            Some(PreviewState::Ready { text, available, .. }) if *available && !text.is_empty() => {
-                format::snippet(text, 96)
-            }
+            Some(PreviewState::Ready {
+                text, available, ..
+            }) if *available && !text.is_empty() => format::snippet(text, 96),
             Some(PreviewState::Loading) | Some(PreviewState::NotRequested) | None => {
                 "…".to_string()
             }
@@ -200,7 +195,11 @@ impl PaletteView {
             .w_full()
             .px(px(Space::LG))
             .rounded(px(Radius::SMALL))
-            .bg(if selected { theme.selection } else { theme.canvas })
+            .bg(if selected {
+                theme.selection
+            } else {
+                theme.canvas
+            })
             .cursor_pointer()
             .hover(move |style| style.bg(theme.raised))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -352,7 +351,11 @@ impl Render for PaletteView {
                             .px(px(Space::LG))
                             .border_b_1()
                             .border_color(theme.line)
-                            .child(ui::glyph(&theme, smart_clipboard_proto::MimeFamily::Text, 20.0))
+                            .child(ui::glyph(
+                                &theme,
+                                smart_clipboard_proto::MimeFamily::Text,
+                                20.0,
+                            ))
                             .child(search_text)
                             .child(div().w(px(1.5)).h(px(20.0)).bg(if focused {
                                 theme.signal

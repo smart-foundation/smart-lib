@@ -69,14 +69,17 @@ fn main() {
     // same arrangement the engine uses — so the same rewrite applies, and it is
     // done *here* rather than by moving the modules, because a product should not
     // reshape the contract's own output.
-    rewrite_paths(&std::env::var("OUT_DIR").expect("OUT_DIR"), &[
-        "types_capnp",
-        "logging_capnp",
-        "diagnostics_capnp",
-        "capability_capnp",
-        "discovery_capnp",
-        "clipboard_capnp",
-    ]);
+    rewrite_paths(
+        &std::env::var("OUT_DIR").expect("OUT_DIR"),
+        &[
+            "types_capnp",
+            "logging_capnp",
+            "diagnostics_capnp",
+            "capability_capnp",
+            "discovery_capnp",
+            "clipboard_capnp",
+        ],
+    );
 
     // The identity of the contract this binary was built against. Shown in
     // the app's About panel; logged when a service publishes a different
@@ -105,7 +108,9 @@ fn rewrite_paths(out_dir: &str, stems: &[&str]) {
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(&path) else { continue };
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let mut rewritten = source.clone();
         for stem in stems {
             let from = format!("crate::{stem}");
@@ -114,11 +119,14 @@ fn rewrite_paths(out_dir: &str, stems: &[&str]) {
             // `crate::schema::schema::types_capnp`, so the search text is
             // anchored on the *unprefixed* form and only unprefixed occurrences
             // are replaced.
-            rewritten = rewritten.replace(&from, &to).replace("crate::schema::schema::", "crate::schema::");
+            rewritten = rewritten
+                .replace(&from, &to)
+                .replace("crate::schema::schema::", "crate::schema::");
         }
         if rewritten != source {
-            std::fs::write(&path, rewritten)
-                .unwrap_or_else(|error| panic!("build.rs: cannot rewrite {}: {error}", path.display()));
+            std::fs::write(&path, rewritten).unwrap_or_else(|error| {
+                panic!("build.rs: cannot rewrite {}: {error}", path.display())
+            });
         }
     }
 }

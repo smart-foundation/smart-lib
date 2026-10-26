@@ -22,9 +22,7 @@ use gpui::{
     ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
     StyledImage, Subscription,
 };
-use smart_clipboard_proto::{
-    ContentState, MimeFamily, Observation, PreviewState, RefusalClass,
-};
+use smart_clipboard_proto::{ContentState, MimeFamily, Observation, PreviewState, RefusalClass};
 
 use crate::app::{ClipboardApp, InspectorTab, Thumb};
 use crate::format;
@@ -83,7 +81,11 @@ impl InspectorView {
             } else {
                 alpha(theme.text_faint, 0.0)
             };
-            let foreground = if selected { theme.text } else { theme.text_faint };
+            let foreground = if selected {
+                theme.text
+            } else {
+                theme.text_faint
+            };
             row = row.child(
                 div()
                     .id(gpui::ElementId::named_usize(
@@ -273,13 +275,20 @@ impl InspectorView {
                     .gap(px(Space::MD))
                     .child(ui::mono(theme, mime.clone()))
                     .child(
-                        ui::button(theme, SharedString::from(format!("copy-{mime}")), "Copy as", ui::ButtonKind::Quiet)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        ui::button(
+                            theme,
+                            SharedString::from(format!("copy-{mime}")),
+                            "Copy as",
+                            ui::ButtonKind::Quiet,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
                                 this.app.update(cx, |app, cx| {
                                     app.copy_representation(id, wanted.clone());
                                     cx.notify();
                                 });
-                            })),
+                            },
+                        )),
                     ),
             );
         }
@@ -299,62 +308,61 @@ impl InspectorView {
 
         let pinned = item.pinned;
         let id = item.id;
-        column = column
-            .child(ui::divider(theme))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(Space::MD))
-                    .child(
-                        ui::button(theme, "inspector-copy", "Copy", ui::ButtonKind::Primary)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.app.update(cx, |app, cx| {
-                                    app.copy(false);
-                                    cx.notify();
-                                });
-                            })),
-                    )
-                    .child(
-                        ui::button(
-                            theme,
-                            "inspector-offer",
-                            "Offer all",
-                            ui::ButtonKind::Secondary,
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+        column = column.child(ui::divider(theme)).child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(Space::MD))
+                .child(
+                    ui::button(theme, "inspector-copy", "Copy", ui::ButtonKind::Primary).on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.app.update(cx, |app, cx| {
-                                app.copy(true);
+                                app.copy(false);
                                 cx.notify();
                             });
-                        })),
-                    )
-                    .child(
-                        ui::button(
-                            theme,
-                            "inspector-pin",
-                            if pinned { "Unpin" } else { "Pin" },
-                            ui::ButtonKind::Quiet,
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.app.update(cx, |app, cx| {
-                                app.toggle_pin();
-                                cx.notify();
-                            });
-                        })),
-                    )
-                    .child(
-                        ui::button(theme, "inspector-delete", "Delete", ui::ButtonKind::Danger)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                let _ = id;
-                                this.app.update(cx, |app, cx| {
-                                    app.request_delete();
-                                    cx.notify();
-                                });
-                            })),
+                        }),
                     ),
-            );
+                )
+                .child(
+                    ui::button(
+                        theme,
+                        "inspector-offer",
+                        "Offer all",
+                        ui::ButtonKind::Secondary,
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.app.update(cx, |app, cx| {
+                            app.copy(true);
+                            cx.notify();
+                        });
+                    })),
+                )
+                .child(
+                    ui::button(
+                        theme,
+                        "inspector-pin",
+                        if pinned { "Unpin" } else { "Pin" },
+                        ui::ButtonKind::Quiet,
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.app.update(cx, |app, cx| {
+                            app.toggle_pin();
+                            cx.notify();
+                        });
+                    })),
+                )
+                .child(
+                    ui::button(theme, "inspector-delete", "Delete", ui::ButtonKind::Danger)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let _ = id;
+                            this.app.update(cx, |app, cx| {
+                                app.request_delete();
+                                cx.notify();
+                            });
+                        })),
+                ),
+        );
 
         if let Some(hint) = write_hint {
             column = column.child(
@@ -466,7 +474,9 @@ impl InspectorView {
                 .into_any_element(),
             _ => {
                 let body: AnyElement = match &preview {
-                    Some(PreviewState::Ready { text, available, .. }) if *available => div()
+                    Some(PreviewState::Ready {
+                        text, available, ..
+                    }) if *available => div()
                         // Scrolling is a *stateful* behaviour in gpui: the element
                         // needs an id to own its scroll offset, which is also why
                         // the offset survives a re-render.
@@ -739,9 +749,10 @@ impl InspectorView {
                     );
                 }
 
-                column = column
-                    .child(ui::divider(theme))
-                    .child(ui::section_label(theme, "method matrix (observed, this session)"));
+                column = column.child(ui::divider(theme)).child(ui::section_label(
+                    theme,
+                    "method matrix (observed, this session)",
+                ));
                 let mut matrix = div().flex().flex_col().gap(px(Space::XXS));
                 for row in &service.methods {
                     let (dot, label) = match &row.observation {
@@ -778,13 +789,11 @@ impl InspectorView {
                             ),
                     );
                 }
-                column = column
-                    .child(matrix)
-                    .child(ui::provenance(
-                        theme,
-                        "The contract publishes no method list, so this matrix is what the app \
+                column = column.child(matrix).child(ui::provenance(
+                    theme,
+                    "The contract publishes no method list, so this matrix is what the app \
                          observed — never what it assumed.",
-                    ));
+                ));
             }
         }
 
@@ -833,7 +842,10 @@ impl InspectorView {
             .child(ui::field(
                 theme,
                 "clipboard interface",
-                format!("0x{:016x}", smart_clipboard_proto::contract::CLIPBOARD_INTERFACE_ID),
+                format!(
+                    "0x{:016x}",
+                    smart_clipboard_proto::contract::CLIPBOARD_INTERFACE_ID
+                ),
             ))
             .child(ui::provenance(
                 theme,

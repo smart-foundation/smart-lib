@@ -93,7 +93,10 @@ impl RefusalClass {
     /// "start a service that serves a clipboard backend" — different fixes,
     /// so different words.
     pub fn is_authority(&self) -> bool {
-        matches!(self, RefusalClass::PermissionDenied | RefusalClass::NoPrivilege)
+        matches!(
+            self,
+            RefusalClass::PermissionDenied | RefusalClass::NoPrivilege
+        )
     }
 }
 
@@ -162,7 +165,10 @@ impl Refusal {
     /// The sentence a user reads: class and reason, in the engine's words.
     pub fn headline(&self) -> String {
         if self.reason.is_empty() {
-            format!("{}: the service declined {} without a reason", self.class, self.verb)
+            format!(
+                "{}: the service declined {} without a reason",
+                self.class, self.verb
+            )
         } else {
             format!("{}: {}", self.class, self.reason)
         }
@@ -170,7 +176,10 @@ impl Refusal {
 }
 
 fn is_known_token(token: &str) -> bool {
-    !matches!(RefusalClass::from_reason(&format!("{token}: x")), RefusalClass::Open(_))
+    !matches!(
+        RefusalClass::from_reason(&format!("{token}: x")),
+        RefusalClass::Open(_)
+    )
 }
 
 /// Everything that can go wrong on the client side.
@@ -239,7 +248,11 @@ impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClientError::NoService { attempts } => {
-                write!(f, "no smart service answered; tried {} endpoint(s)", attempts.len())
+                write!(
+                    f,
+                    "no smart service answered; tried {} endpoint(s)",
+                    attempts.len()
+                )
             }
             ClientError::Transport(detail) => write!(f, "transport: {detail}"),
             ClientError::DomainNotServed { published } => write!(

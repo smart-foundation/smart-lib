@@ -90,8 +90,8 @@ pub use client::{
     ClipboardClient, CopyReport, CopyTarget, LiveContent, Page, Query, Representation,
 };
 pub use config::{Candidate, EndpointSource, ServiceLocation};
-pub use error::{ClientError, Refusal, RefusalClass};
 pub use contract::MimeFamily;
+pub use error::{ClientError, Refusal, RefusalClass};
 pub use model::{
     Authority, CapabilityRow, ChangeEvent, ChangeKind, ContentState, Item, ItemId, Observation,
     PreviewState, ServedMethod, ServiceInfo,

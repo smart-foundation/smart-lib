@@ -38,9 +38,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    div, img, px, uniform_list, AnyElement, AppContext, ClickEvent, Context, Div, Entity, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, StyledImage, Subscription, Window,
+    div, img, px, uniform_list, AnyElement, AppContext, ClickEvent, Context, Div, Entity,
+    FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Window,
 };
 use smart_clipboard_proto::{Item, ItemId, MimeFamily, PreviewState};
 
@@ -273,29 +273,33 @@ impl LibraryView {
                         theme.panel
                     })),
             )
-            .child(ui::button(
-                theme,
-                "layout-toggle",
-                match layout {
-                    Layout::List => "Gallery",
-                    Layout::Gallery => "List",
-                },
-                ui::ButtonKind::Quiet,
-            )
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.app.update(cx, |app, cx| {
-                    app.toggle_layout();
-                    cx.notify();
-                });
-            })))
-            .child(ui::button(theme, "sort-toggle", "Sort", ui::ButtonKind::Quiet).on_click(
-                cx.listener(|this, _: &ClickEvent, _, cx| {
+            .child(
+                ui::button(
+                    theme,
+                    "layout-toggle",
+                    match layout {
+                        Layout::List => "Gallery",
+                        Layout::Gallery => "List",
+                    },
+                    ui::ButtonKind::Quiet,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.app.update(cx, |app, cx| {
-                        app.cycle_sort();
+                        app.toggle_layout();
                         cx.notify();
                     });
-                }),
-            ))
+                })),
+            )
+            .child(
+                ui::button(theme, "sort-toggle", "Sort", ui::ButtonKind::Quiet).on_click(
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.app.update(cx, |app, cx| {
+                            app.cycle_sort();
+                            cx.notify();
+                        });
+                    }),
+                ),
+            )
             .child(
                 ui::button(theme, "refresh", "Refresh", ui::ButtonKind::Quiet).on_click(
                     cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -306,12 +310,14 @@ impl LibraryView {
                     }),
                 ),
             )
-            .child(ui::button(theme, "palette", "Palette", ui::ButtonKind::Primary).on_click(
-                cx.listener(|this, _: &ClickEvent, window, cx| {
-                    open_palette(&this.app, cx);
-                    window.focus(&this.focus);
-                }),
-            ))
+            .child(
+                ui::button(theme, "palette", "Palette", ui::ButtonKind::Primary).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        open_palette(&this.app, cx);
+                        window.focus(&this.focus);
+                    }),
+                ),
+            )
     }
 
     fn rail(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -356,7 +362,11 @@ impl LibraryView {
             } else {
                 theme.panel
             };
-            let foreground = if is_active { theme.text } else { theme.text_muted };
+            let foreground = if is_active {
+                theme.text
+            } else {
+                theme.text_muted
+            };
             rail = rail.child(
                 div()
                     .id(gpui::ElementId::named_usize("facet", facet as usize))
@@ -394,35 +404,37 @@ impl LibraryView {
 
         // A footer that says what the rail is: a local filter over the loaded
         // window, not a search of the service.
-        rail = rail
-            .child(div().flex_1())
-            .child(ui::divider(theme))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(Space::SM))
-                    .px(px(Space::LG))
-                    .py(px(Space::MD))
-                    .child(ui::provenance(
-                        theme,
-                        "filters apply to the loaded window only — the contract's search is text",
-                    ))
-                    .child(ui::badge(
-                        theme,
-                        if connection_is_live(&connection) {
-                            theme.good
-                        } else {
-                            theme.warn
-                        },
-                        connection.label(),
-                    ))
-                    .child(ui::provenance(theme, capture)),
-            );
+        rail = rail.child(div().flex_1()).child(ui::divider(theme)).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(Space::SM))
+                .px(px(Space::LG))
+                .py(px(Space::MD))
+                .child(ui::provenance(
+                    theme,
+                    "filters apply to the loaded window only — the contract's search is text",
+                ))
+                .child(ui::badge(
+                    theme,
+                    if connection_is_live(&connection) {
+                        theme.good
+                    } else {
+                        theme.warn
+                    },
+                    connection.label(),
+                ))
+                .child(ui::provenance(theme, capture)),
+        );
         rail
     }
 
-    fn list_panel(&mut self, theme: &Theme, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn list_panel(
+        &mut self,
+        theme: &Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (connected, loading, visible, facet, hidden, label, sort, local) = {
             let app = self.app.read(cx);
             (
@@ -534,9 +546,9 @@ impl LibraryView {
         let family = item.family();
 
         let (snippet, snippet_color) = match &preview {
-            Some(PreviewState::Ready { text, available, .. }) if *available && !text.is_empty() => {
-                (format::snippet(text, 160), theme.text)
-            }
+            Some(PreviewState::Ready {
+                text, available, ..
+            }) if *available && !text.is_empty() => (format::snippet(text, 160), theme.text),
             Some(PreviewState::Loading) | Some(PreviewState::NotRequested) | None => (
                 "asking the service for a preview…".to_string(),
                 theme.text_faint,
@@ -551,9 +563,7 @@ impl LibraryView {
                 ),
                 theme.text_faint,
             ),
-            Some(PreviewState::Refused { refusal }) => {
-                (refusal.headline(), theme.text_faint)
-            }
+            Some(PreviewState::Refused { refusal }) => (refusal.headline(), theme.text_faint),
             Some(PreviewState::Failed { message }) => {
                 (format!("preview failed: {message}"), theme.text_faint)
             }
@@ -705,7 +715,11 @@ impl LibraryView {
         for (item, (id, thumb)) in rows.iter().zip(thumbs.into_iter()) {
             let theme = theme.clone();
             let is_selected = selected == Some(id);
-            let border = if is_selected { theme.signal } else { theme.line };
+            let border = if is_selected {
+                theme.signal
+            } else {
+                theme.line
+            };
             let background = theme.panel;
             let hover = theme.raised;
             let title = rows_title(item, now);
@@ -918,8 +932,7 @@ impl LibraryView {
             );
         }
 
-        panel = panel
-            .child(ui::section_label(theme, "How to fix it"));
+        panel = panel.child(ui::section_label(theme, "How to fix it"));
         let hint = div()
             .flex()
             .flex_col()
@@ -958,7 +971,12 @@ impl LibraryView {
                         }),
                     ),
                 )
-                .child(ui::button(theme, "copy-endpoint", "Copy socket path", ui::ButtonKind::Quiet))
+                .child(ui::button(
+                    theme,
+                    "copy-endpoint",
+                    "Copy socket path",
+                    ui::ButtonKind::Quiet,
+                ))
                 .child(ui::provenance(
                     theme,
                     "this app never spawns the service, and never pretends to be one",
@@ -1032,7 +1050,10 @@ impl LibraryView {
                     .child(ui::provenance(theme, provenance))
                     .child(ui::provenance(
                         theme,
-                        format!("{} · {} of {} methods answered", class, methods.0, methods.2),
+                        format!(
+                            "{} · {} of {} methods answered",
+                            class, methods.0, methods.2
+                        ),
                     ))
                     .child(ui::provenance(theme, capture)),
             )
@@ -1056,11 +1077,7 @@ impl LibraryView {
             return None;
         }
         let toasts = self.app.read(cx).store.toasts.clone();
-        let mut column = div()
-            .flex()
-            .flex_col()
-            .gap(px(Space::MD))
-            .w(px(360.0));
+        let mut column = div().flex().flex_col().gap(px(Space::MD)).w(px(360.0));
         for toast in toasts {
             let color = match toast.kind {
                 ToastKind::Info => theme.signal,
@@ -1157,21 +1174,30 @@ impl LibraryView {
                                         "Delete",
                                         ui::ButtonKind::Danger,
                                     )
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                        this.app.update(cx, |app, cx| {
-                                            app.confirm_delete();
-                                            cx.notify();
-                                        });
-                                    })),
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _, cx| {
+                                            this.app.update(cx, |app, cx| {
+                                                app.confirm_delete();
+                                                cx.notify();
+                                            });
+                                        },
+                                    )),
                                 )
                                 .child(
-                                    ui::button(theme, "cancel-delete", "Keep", ui::ButtonKind::Secondary)
-                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    ui::button(
+                                        theme,
+                                        "cancel-delete",
+                                        "Keep",
+                                        ui::ButtonKind::Secondary,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _: &ClickEvent, _, cx| {
                                             this.app.update(cx, |app, cx| {
                                                 app.cancel_delete();
                                                 cx.notify();
                                             });
-                                        })),
+                                        },
+                                    )),
                                 ),
                         ),
                 )
@@ -1192,45 +1218,46 @@ impl Render for LibraryView {
         let confirm = self.confirm_overlay(&theme, cx);
         let focus = self.focus.clone();
 
-        let mut root = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(theme.canvas)
-            .text_color(theme.text)
-            .track_focus(&focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_key(event, window, cx)
-            }))
-            .child(header)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(rail)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .border_l_1()
-                            .border_color(theme.line)
-                            .child(list),
-                    )
-                    .child(
-                        div()
-                            .w(px(340.0))
-                            .h_full()
-                            .border_l_1()
-                            .border_color(theme.line)
-                            .bg(theme.panel)
-                            .child(inspector),
-                    ),
-            )
-            .child(status);
+        let mut root =
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(theme.canvas)
+                .text_color(theme.text)
+                .track_focus(&focus)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.on_key(event, window, cx)
+                }))
+                .child(header)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(rail)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .border_l_1()
+                                .border_color(theme.line)
+                                .child(list),
+                        )
+                        .child(
+                            div()
+                                .w(px(340.0))
+                                .h_full()
+                                .border_l_1()
+                                .border_color(theme.line)
+                                .bg(theme.panel)
+                                .child(inspector),
+                        ),
+                )
+                .child(status);
 
         if let Some(toasts) = toasts {
             root = root.child(toasts);

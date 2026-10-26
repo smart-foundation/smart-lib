@@ -108,10 +108,8 @@ pub fn decode(bytes: &[u8]) -> Result<(Frame, (u32, u32), bool), String> {
     }
     let format = image::guess_format(bytes)
         .map_err(|error| format!("unrecognised image format: {error}"))?;
-    let animated = matches!(
-        format,
-        image::ImageFormat::Gif | image::ImageFormat::WebP
-    ) && looks_animated(bytes);
+    let animated = matches!(format, image::ImageFormat::Gif | image::ImageFormat::WebP)
+        && looks_animated(bytes);
 
     let image = image::load_from_memory_with_format(bytes, format)
         .map_err(|error| format!("the payload did not decode as {format:?}: {error}"))?;
@@ -202,10 +200,7 @@ pub fn default_filename(mime: &str, captured_at_ns: Option<u64>) -> String {
     let stamp = captured_at_ns
         .map(|nanos| nanos / 1_000_000_000)
         .unwrap_or_default();
-    format!(
-        "smart-clipboard-{stamp}.{}",
-        extension_for(mime)
-    )
+    format!("smart-clipboard-{stamp}.{}", extension_for(mime))
 }
 
 /// Whether a path is inside the user's cache directory, used only by the
@@ -275,6 +270,9 @@ mod tests {
             default_filename("image/png", Some(1_700_000_000_000_000_000)),
             "smart-clipboard-1700000000.png"
         );
-        assert_eq!(default_filename("image/jpeg", None), "smart-clipboard-0.jpg");
+        assert_eq!(
+            default_filename("image/jpeg", None),
+            "smart-clipboard-0.jpg"
+        );
     }
 }

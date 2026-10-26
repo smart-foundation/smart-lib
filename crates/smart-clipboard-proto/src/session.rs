@@ -106,9 +106,7 @@ impl Session {
                 CONNECT_TIMEOUT.as_millis()
             ))
         })?
-        .map_err(|error| {
-            ClientError::Transport(format!("{}: {error}", candidate.address))
-        })?;
+        .map_err(|error| ClientError::Transport(format!("{}: {error}", candidate.address)))?;
 
         // `capnp-rpc` speaks `futures::io`; tokio speaks its own traits. The
         // compat adapters are the documented bridge, and they are why this
@@ -132,9 +130,10 @@ impl Session {
         let discovery_client = <discovery::Client as FromClientHook>::new(bootstrap.clone());
         let capability_client =
             <capability_service::Client as FromClientHook>::new(bootstrap.clone());
-        let clipboard_client = <crate::schema::clipboard_capnp::clipboard::Client as FromClientHook>::new(
-            bootstrap.clone(),
-        );
+        let clipboard_client =
+            <crate::schema::clipboard_capnp::clipboard::Client as FromClientHook>::new(
+                bootstrap.clone(),
+            );
 
         let mut session = Session {
             bootstrap,
@@ -166,11 +165,9 @@ impl Session {
             let mut filter = params.reborrow().init_filter();
             filter.set_name(name);
         }
-        let response = request
-            .send()
-            .promise
-            .await
-            .map_err(|error| ClientError::Transport(format!("discovery.lookup: {}", error.extra)))?;
+        let response = request.send().promise.await.map_err(|error| {
+            ClientError::Transport(format!("discovery.lookup: {}", error.extra))
+        })?;
         let results = response
             .get()
             .map_err(|error| ClientError::Decode(format!("discovery.lookup results: {error}")))?;
@@ -204,10 +201,7 @@ impl Session {
         let mut metadata = std::collections::BTreeMap::new();
         if let Ok(map) = descriptor.get_metadata() {
             for entry in map.get_entries().into_iter().flatten() {
-                metadata.insert(
-                    text_of(entry.get_key()),
-                    text_of(entry.get_value()),
-                );
+                metadata.insert(text_of(entry.get_key()), text_of(entry.get_value()));
             }
         }
 
@@ -270,7 +264,12 @@ impl Session {
 
         let mut rows = Vec::new();
         for capability in caps.iter() {
-            let id = id_text(capability.get_id().map(|data| data.to_vec()).unwrap_or_default());
+            let id = id_text(
+                capability
+                    .get_id()
+                    .map(|data| data.to_vec())
+                    .unwrap_or_default(),
+            );
             let target = text_of(capability.get_target());
             let mut operations = Vec::new();
             if let Ok(list) = capability.get_operations() {
@@ -340,7 +339,10 @@ impl Session {
             out.push(ServiceInfo {
                 name: text_of(descriptor.get_name()),
                 category: text_of(descriptor.get_category()),
-                schema_id: descriptor.get_id().map(|id| id.get_id()).unwrap_or_default(),
+                schema_id: descriptor
+                    .get_id()
+                    .map(|id| id.get_id())
+                    .unwrap_or_default(),
                 state: state_token(descriptor.get_state().unwrap_or(ServiceState::Unknown)),
                 endpoints: Vec::new(),
                 metadata: Default::default(),

@@ -182,13 +182,13 @@ mod tests {
 
     #[test]
     fn the_flag_wins_and_is_tried_first() {
-        let plan = ServiceLocation::resolve(
-            &args(&["--socket", "/run/user/1000/smart.sock"]),
-            |key| match key {
-                "SMART_SERVICE_SOCKET" => Some("/tmp/other.sock".to_string()),
-                _ => None,
-            },
-        );
+        let plan =
+            ServiceLocation::resolve(&args(&["--socket", "/run/user/1000/smart.sock"]), |key| {
+                match key {
+                    "SMART_SERVICE_SOCKET" => Some("/tmp/other.sock".to_string()),
+                    _ => None,
+                }
+            });
         assert_eq!(plan.candidates[0].address, "/run/user/1000/smart.sock");
         assert_eq!(plan.candidates[0].source, EndpointSource::Argument);
         assert_eq!(plan.candidates[1].source, EndpointSource::Environment);
@@ -199,18 +199,13 @@ mod tests {
         let plan = ServiceLocation::resolve(&[], |_| None);
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.candidates[0].address, "/tmp/smart-service.sock");
-        assert_eq!(
-            plan.candidates[0].source,
-            EndpointSource::TransportDefault
-        );
+        assert_eq!(plan.candidates[0].source, EndpointSource::TransportDefault);
     }
 
     #[test]
     fn an_address_named_twice_is_tried_once() {
-        let plan = ServiceLocation::resolve(
-            &args(&["--socket", "/tmp/smart-service.sock"]),
-            |_| None,
-        );
+        let plan =
+            ServiceLocation::resolve(&args(&["--socket", "/tmp/smart-service.sock"]), |_| None);
         assert_eq!(plan.candidates.len(), 1);
     }
 
@@ -221,10 +216,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(plan.candidates.len(), 1);
-        assert_eq!(
-            plan.candidates[0].source,
-            EndpointSource::TransportDefault
-        );
+        assert_eq!(plan.candidates[0].source, EndpointSource::TransportDefault);
     }
 
     #[test]

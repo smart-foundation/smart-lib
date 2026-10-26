@@ -39,9 +39,7 @@ use gpui::{
     point, px, size, App, AppContext, Bounds, Context, Entity, RenderImage, SharedString,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
-use smart_clipboard_proto::{
-    BackendEvent, Command, ItemId, ServiceLocation, Worker, WorkerHandle,
-};
+use smart_clipboard_proto::{BackendEvent, Command, ItemId, ServiceLocation, Worker, WorkerHandle};
 
 use crate::preview::{self, DecodeRequest, Decoded};
 use crate::store::{Store, ToastKind};
@@ -209,10 +207,10 @@ impl ClipboardApp {
                 animated,
             }) => {
                 let _ = (original, animated);
-                self.thumbs
-                    .insert(id, Thumb::Ready(Arc::new(RenderImage::new(smallvec::smallvec![
-                        frame
-                    ]))));
+                self.thumbs.insert(
+                    id,
+                    Thumb::Ready(Arc::new(RenderImage::new(smallvec::smallvec![frame]))),
+                );
             }
             UiEvent::Decoded(Decoded::Failed { id, reason }) => {
                 self.thumbs.insert(id, Thumb::Failed(reason));

@@ -230,7 +230,9 @@ impl Worker {
     /// The event stream is `async_channel` rather than tokio's because the UI
     /// side is driven by gpui's executor, not by the worker's runtime: the
     /// only thing the two share is a channel that works under both.
-    pub fn spawn(location: ServiceLocation) -> (WorkerHandle, async_channel::Receiver<BackendEvent>) {
+    pub fn spawn(
+        location: ServiceLocation,
+    ) -> (WorkerHandle, async_channel::Receiver<BackendEvent>) {
         let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = async_channel::unbounded();
         // The actor gets its own sender so a reconnect timer can post
@@ -265,7 +267,12 @@ impl Worker {
             })
             .expect("the protocol worker thread must start");
 
-        (WorkerHandle { commands: command_tx }, event_rx)
+        (
+            WorkerHandle {
+                commands: command_tx,
+            },
+            event_rx,
+        )
     }
 }
 
@@ -513,7 +520,10 @@ impl Actor {
                 self.exhausted = self.window_len as u64 >= page.total
                     || page.items.is_empty()
                     || (page.items.len() as u32) < query.limit;
-                self.send(BackendEvent::Page { page, append: false });
+                self.send(BackendEvent::Page {
+                    page,
+                    append: false,
+                });
             }
             Err(error) => self.report("history", error),
         }

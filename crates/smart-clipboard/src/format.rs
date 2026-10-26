@@ -237,8 +237,12 @@ pub fn looks_sensitive(text: &str) -> bool {
     let has_symbol = trimmed
         .chars()
         .any(|character| "!@#$%^&*_-+=~`|<>?/\\".contains(character));
-    let has_upper = trimmed.chars().any(|character| character.is_ascii_uppercase());
-    let has_lower = trimmed.chars().any(|character| character.is_ascii_lowercase());
+    let has_upper = trimmed
+        .chars()
+        .any(|character| character.is_ascii_uppercase());
+    let has_lower = trimmed
+        .chars()
+        .any(|character| character.is_ascii_lowercase());
     has_digit && has_symbol && has_upper && has_lower
 }
 
@@ -272,7 +276,10 @@ mod tests {
         // 2024-02-29 12:00:00 UTC
         let nanos = 1_709_208_000_u64 * 1_000_000_000;
         assert_eq!(absolute_time(nanos), "2024-02-29 12:00:00 UTC");
-        assert_eq!(absolute_time(0), "the service could not read the clock for this item");
+        assert_eq!(
+            absolute_time(0),
+            "the service could not read the clock for this item"
+        );
     }
 
     #[test]
@@ -294,7 +301,10 @@ mod tests {
 
     #[test]
     fn url_literals_must_be_the_whole_payload() {
-        assert_eq!(url_literal("https://example.com/a"), Some("https://example.com/a"));
+        assert_eq!(
+            url_literal("https://example.com/a"),
+            Some("https://example.com/a")
+        );
         assert_eq!(url_literal("see https://example.com"), None);
         assert_eq!(url_literal("ftp://example.com"), None);
     }
@@ -303,7 +313,9 @@ mod tests {
     fn secret_heuristics_are_conservative() {
         assert!(looks_sensitive("sk-live-9f8a7b6c5d4e"));
         assert!(looks_sensitive("Abc123!@#def"));
-        assert!(!looks_sensitive("hello world, this is a normal sentence with words"));
+        assert!(!looks_sensitive(
+            "hello world, this is a normal sentence with words"
+        ));
         assert!(!looks_sensitive("aaaa"));
         assert!(!looks_sensitive("just some text here"));
     }

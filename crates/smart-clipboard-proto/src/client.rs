@@ -516,9 +516,7 @@ impl<'a> ClipboardClient<'a> {
             Ok(WhichReader::Unknown(())) => Err(ClientError::Decode(
                 "getContent: the service answered `unknown`".to_string(),
             )),
-            Err(error) => Err(ClientError::Decode(format!(
-                "getContent union: {error}"
-            ))),
+            Err(error) => Err(ClientError::Decode(format!("getContent union: {error}"))),
         }
     }
 
@@ -571,15 +569,21 @@ impl<'a> ClipboardClient<'a> {
                     .get_event_type()
                     .unwrap_or(crate::schema::clipboard_capnp::ClipboardEventType::Custom)
                 {
-                    crate::schema::clipboard_capnp::ClipboardEventType::Copied => ChangeKind::Copied,
-                    crate::schema::clipboard_capnp::ClipboardEventType::Pasted => ChangeKind::Pasted,
+                    crate::schema::clipboard_capnp::ClipboardEventType::Copied => {
+                        ChangeKind::Copied
+                    }
+                    crate::schema::clipboard_capnp::ClipboardEventType::Pasted => {
+                        ChangeKind::Pasted
+                    }
                     crate::schema::clipboard_capnp::ClipboardEventType::Cleared => {
                         ChangeKind::Cleared
                     }
                     crate::schema::clipboard_capnp::ClipboardEventType::Expired => {
                         ChangeKind::Expired
                     }
-                    crate::schema::clipboard_capnp::ClipboardEventType::Custom => ChangeKind::Custom,
+                    crate::schema::clipboard_capnp::ClipboardEventType::Custom => {
+                        ChangeKind::Custom
+                    }
                 },
                 mimes: read_mimes(change.get_mime_types()),
             });
@@ -613,7 +617,9 @@ impl From<ClientError> for ContentState {
     fn from(error: ClientError) -> Self {
         match error {
             ClientError::Refused(refusal) => ContentState::Refused { refusal },
-            ClientError::PayloadTooLarge { bytes, limit } => ContentState::TooLarge { bytes, limit },
+            ClientError::PayloadTooLarge { bytes, limit } => {
+                ContentState::TooLarge { bytes, limit }
+            }
             other => ContentState::Failed {
                 message: other.to_string(),
             },
@@ -658,10 +664,7 @@ fn capnp_error(verb: &str, error: capnp::Error) -> ClientError {
 /// A method whose result is the named `T.VoidResult` aliases that struct, so the
 /// results reader *is* the void-result reader — there is no `result` field to
 /// step through.
-fn check_void(
-    verb: &str,
-    reader: types_capnp::void_result::Reader<'_>,
-) -> Result<(), ClientError> {
+fn check_void(verb: &str, reader: types_capnp::void_result::Reader<'_>) -> Result<(), ClientError> {
     use types_capnp::void_result::WhichReader;
     match reader.which() {
         Ok(WhichReader::Success(())) => Ok(()),
@@ -671,7 +674,9 @@ fn check_void(
             // `permissionDenied` here keeps its class instead of flattening to
             // "failed".
             let message = text_of(error.and_then(|error| error.get_message()));
-            Err(ClientError::Refused(Refusal::from_reason_text(verb, &message)))
+            Err(ClientError::Refused(Refusal::from_reason_text(
+                verb, &message,
+            )))
         }
         Err(error) => Err(ClientError::Decode(format!("{verb} union: {error}"))),
     }

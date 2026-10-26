@@ -148,7 +148,11 @@ impl PreviewState {
     /// The one-line text a row can show, if any.
     pub fn snippet(&self) -> Option<&str> {
         match self {
-            PreviewState::Ready { text, available: true, .. } if !text.is_empty() => Some(text),
+            PreviewState::Ready {
+                text,
+                available: true,
+                ..
+            } if !text.is_empty() => Some(text),
             _ => None,
         }
     }
@@ -400,11 +404,7 @@ impl ServiceInfo {
     /// Record that a verb was refused. A later success clears the refusal,
     /// because the matrix reports *this session's latest* answer.
     pub fn note_refused(&mut self, refusal: &Refusal) {
-        if let Some(row) = self
-            .methods
-            .iter_mut()
-            .find(|row| row.name == refusal.verb)
-        {
+        if let Some(row) = self.methods.iter_mut().find(|row| row.name == refusal.verb) {
             row.observation = Observation::Refused(refusal.clone());
         }
     }
@@ -450,7 +450,10 @@ mod tests {
             item(&["image/png", "text/plain"]).family(),
             MimeFamily::Image
         );
-        assert_eq!(item(&["text/html", "text/plain"]).family(), MimeFamily::Text);
+        assert_eq!(
+            item(&["text/html", "text/plain"]).family(),
+            MimeFamily::Text
+        );
         assert_eq!(item(&[]).family(), MimeFamily::Other);
     }
 
