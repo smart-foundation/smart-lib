@@ -3,10 +3,11 @@
 #
 #   ./scripts/ci-apply-fmt.sh [run-id]
 #
-# The hygiene job runs `cargo fmt --all` on the runner, then emits what it would
-# write as base64 chunks in GitHub annotations (`FMTCHUNK 001 <b64>`), because
-# neither the step log nor an artifact is reachable from a restricted network.
-# This script reads those annotations back, rebuilds the diff and applies it.
+# The hygiene job runs `cargo fmt` on the two product crates, then emits what it
+# would write as gzip/base64 chunks in GitHub annotations (`FMTCHUNK 001 <b64>`),
+# because neither the step log nor an artifact is reachable from a restricted
+# network — and because GitHub caps a step at ten annotations, the patch is
+# compressed and chunked. This script reads them back and applies the diff.
 #
 # It reads, it never pushes: the patch lands in the working tree and the next
 # commit carries it.

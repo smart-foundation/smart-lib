@@ -199,41 +199,51 @@ jobs:
   hygiene:
     name: hygiene · formatting (advisory)
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: rustfmt
-        run: ./scripts/ci-annotate.sh cargo fmt --all -- --check
 
-      # `--check` says *that* the tree is unformatted; this says *what* the
-      # formatter would write, so the fix can be applied without a local
-      # rustfmt. The patch rides the annotations (one base64 chunk each),
-      # because a step log is not readable from a restricted network and an
-      # artifact is not either. `scripts/ci-apply-fmt.sh` reassembles it.
-      - name: Publish the formatting patch
-        if: failure() || success()
+      # The two product crates are this delivery's own code, so they are held to
+      # `rustfmt` exactly — and because GitHub caps annotations at ten per step,
+      # the fix is published as a gzip/base64 patch split into chunks
+      # (`scripts/ci-apply-fmt.sh` reassembles and applies it). Ten chunks is
+      # ~24 kB of patch, which is ample for ~6 000 lines of product code.
+      - name: rustfmt (product crates)
         run: |
-          cargo fmt --all || true
-          if git diff --quiet; then
-            echo "::notice::the tree is already formatted"
-            exit 0
-          fi
-          # gzip first: a diff of whitespace changes compresses ~5×, and every
-          # byte saved is an annotation that cannot be clipped.
-          git diff | gzip -9 > /tmp/fmt.gz
+          cargo fmt --manifest-path crates/smart-clipboard-proto/Cargo.toml -- --check
+          cargo fmt --manifest-path crates/smart-clipboard/Cargo.toml -- --check
+
+      - name: Publish the product formatting patch
+        if: failure()
+        run: |
+          cargo fmt --manifest-path crates/smart-clipboard-proto/Cargo.toml || true
+          cargo fmt --manifest-path crates/smart-clipboard/Cargo.toml || true
+          git diff -- crates/smart-clipboard crates/smart-clipboard-proto | gzip -9 > /tmp/fmt.gz
           echo "::notice::formatting patch is $(gzip -dc /tmp/fmt.gz | wc -c) bytes"
-          # Chunks are cut from the *base64* stream in multiples of 4, so each
-          # chunk decodes on its own and the concatenation decodes as a whole.
           base64 -w0 < /tmp/fmt.gz | fold -w 2400 > /tmp/fmt.b64
           index=0
           while IFS= read -r chunk; do
             index=$((index + 1))
             echo "::error::FMTCHUNK $(printf '%03d' "$index") $chunk"
           done < /tmp/fmt.b64
+
+      # The engine tree predates this delivery and is not reformatted wholesale:
+      # a 600 kB whitespace diff would bury the review. It is measured, reported,
+      # and left as its own decision.
+      - name: rustfmt (engine tree, reported not enforced)
+        continue-on-error: true
+        run: |
+          if cargo fmt --all -- --check > /tmp/engine-fmt.txt 2>&1; then
+            echo "::notice::the engine tree is formatted"
+          else
+            changed=$(grep -c '^Diff in ' /tmp/engine-fmt.txt || true)
+            files=$(grep -o '^Diff in [^ ]*' /tmp/engine-fmt.txt | cut -d' ' -f3 | sort -u | tr '\n' ' ')
+            echo "::notice::$changed hunks would change in: $files"
+          fi
+
       - name: The engine still forbids shellouts
         run: |
           # Key principle #1: zero process spawns outside tests. The clipboard
