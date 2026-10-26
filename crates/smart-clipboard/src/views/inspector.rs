@@ -477,7 +477,7 @@ impl InspectorView {
                         .text_color(theme.text)
                         .child(SharedString::from(text.clone()))
                         .into_any_element(),
-                    Some(PreviewState::Ready { available: false, .. }) => div()
+                    Some(PreviewState::Ready { .. }) => div()
                         .text_size(px(Type::SMALL))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(

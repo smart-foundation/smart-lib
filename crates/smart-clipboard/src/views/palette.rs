@@ -158,10 +158,11 @@ impl PaletteView {
             Some(PreviewState::Loading) | Some(PreviewState::NotRequested) | None => {
                 "…".to_string()
             }
-            // `Ready` with `available: false` is the contract saying "there is a
-            // preview object but no text in it": an image, a file, a binary.
-            Some(PreviewState::Ready { available: false, .. })
-            | Some(PreviewState::Unavailable { .. }) => {
+            // The remaining `Ready` is "there is a preview object but no usable
+            // text in it" — an image, a file, a binary, or an empty string. It
+            // shares the words with `Unavailable` because to a reader they are
+            // the same fact; the family name is what makes the row identifiable.
+            Some(PreviewState::Ready { .. }) | Some(PreviewState::Unavailable { .. }) => {
                 format!("{} — no text preview", format::family_title(item.family()))
             }
             Some(PreviewState::Refused { refusal }) => refusal.headline(),

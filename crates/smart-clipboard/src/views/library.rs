@@ -541,11 +541,10 @@ impl LibraryView {
                 "asking the service for a preview…".to_string(),
                 theme.text_faint,
             ),
-            // `Ready` with `available: false` and `Unavailable` are the same
-            // fact for a reader — "no text in this payload" — and the words say
-            // which payload it is rather than which arm produced them.
-            Some(PreviewState::Ready { available: false, .. })
-            | Some(PreviewState::Unavailable { .. }) => (
+            // Any remaining `Ready` — unavailable or empty text — and
+            // `Unavailable` are the same fact for a reader: no text in this
+            // payload. The words name the payload, not the arm that produced it.
+            Some(PreviewState::Ready { .. }) | Some(PreviewState::Unavailable { .. }) => (
                 format!(
                     "{} — no text preview (the service keeps none for this payload)",
                     format::family_title(family)
