@@ -79,9 +79,11 @@ cargo build --release --bin smart-service --features std,rpc,domain-clipboard,do
 ./target/release/smart-service --help
 ```
 
-CI (`.github/workflows/ci.yml`) builds the daemon, runs its clipboard/database/
-archive tests, boots it on a bare runner and waits for its socket, round-trips the
-contract client against a real served backend, and builds the gpui app — so a
+CI (`.github/workflows/ci.yml`) has four jobs, all green: it builds the daemon,
+runs its clipboard/database/archive tests, boots it on a bare runner and waits for
+its socket; round-trips the contract client against a real served backend; builds
+the gpui app against the real platform stack and runs its pure tests; and checks
+that both product crates are formatted and that no shellout has appeared. So a
 green run means "drop it on a desktop and it starts". `./scripts/ci.sh` runs the
 same stages locally.
 
@@ -105,7 +107,9 @@ is `knowledge/30-smart-clipboard-app.md`.
 
 1. **No shellouts.** Zero `Command::new` outside tests. Every backend reads the native mechanism.
 2. **Honest availability.** Every method publishes REAL / DEGRADED / Unavailable with a measured reason. No fabricated numbers.
-3. **Shellout-free by grep.** `grep -rn "Command::new" src/` must return nothing.
+3. **Shellout-free, and provably so.** `python3 scripts/check-no-shellouts.py` — a grep cannot
+   state this rule, because the tree's comments quote the spawns it refuses to make
+   (`Command::new("xclip")`) and the tests start a child to have a process to observe.
 4. **No hardcoded paradigms.** Transports are open tokens, not closed enums. The transport set is extensible.
 5. **The contract is the authority.** This code implements it; it does not define it.
 

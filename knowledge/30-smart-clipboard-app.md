@@ -634,32 +634,64 @@ stages locally so "green in CI" cannot diverge from "green here":
 | **daemon** | it builds, its CLI works, the clipboard/database/archive tests pass, and it **binds a socket and accepts** on a bare runner | builds the bin with the product feature set, runs `--help`/`--version`/`--print-address`, starts it with `--no-watch --no-history` and waits for the socket |
 | **contract-client** | the app's protocol crate round-trips against a *real served backend* | `cargo test` including `tests/contract_roundtrip.rs`, which serves a mock over a unix socket via the engine as a dev-dependency only |
 | **app** | the gpui product compiles against the real platform stack and its pure tests pass | installs wayland/xkbcommon/x11/vulkan headers, `cargo build`, `cargo test --bin smart-clipboard` |
-| **hygiene** (advisory) | formatting, and that no shellout appeared in `src/` | `cargo fmt --check`, the `Command::new` grep |
+| **hygiene** | both product crates are formatted, and no shellout appeared in `src/` | `cargo fmt --check` on each product crate, `scripts/check-no-shellouts.py` |
 
 The schemas are **fetched at a pinned commit**, never vendored: a schema change is
 a contract change and must be a reviewed line in `scripts/ci-fetch-schemas.sh`.
 
+Two details of that workflow are load-bearing and worth knowing before editing it:
+
+* **The formatting patch travels through annotations.** A step log is unreadable
+  from a restricted network and an artifact is unreachable too, so the hygiene job
+  runs `cargo fmt`, gzips the diff, base64s it and emits it as at most ten
+  annotation chunks; `scripts/ci-apply-fmt.sh <run-id>` reassembles and applies
+  them. GitHub clips an annotation's message below its documented limit, and
+  `fold` leaves its last line unterminated, so the chunks are 2 000 characters and
+  the run publishes a `FMTCHUNKS <n>` count that the applier refuses to ignore.
+  That is how the two product crates were formatted without a local toolchain.
+* **The engine tree is measured, not reformatted.** `cargo fmt --all --check`
+  reports how many hunks would change and in which files (2 506 at the time of
+  writing) as a notice. A 600 kB whitespace diff would bury the delivery it is
+  attached to; it is its own change, with its own review.
+
 ### 16.4 The honest status of this tree
 
-The environment this was authored in had **no Rust toolchain and no crates.io
-access**, so the first real `cargo build` of this work happens in the CI run above.
-What that means concretely:
+**All four CI jobs are green** on `arena/e41a3c44-smart-lib`: the daemon builds,
+binds a socket and passes its clipboard/database/archive tests; the contract client
+round-trips against a real served backend; the gpui app builds against the real
+platform stack (wayland, xkbcommon-x11, x11, vulkan) and its reducer, formatter,
+grammar, decoder and query tests pass; and the hygiene job is green.
 
-* every generated capnp name used by the client was checked against the engine's
-  own served implementation (which compiles the same schemas), not remembered;
-* the gpui surface was checked against upstream `main` (window options,
-  `uniform_list`, `RenderImage::new`, `Context::{spawn, listener, processor,
-  observe}`), and the two most drift-prone seams are isolated in `src/app.rs`;
-* the engine-side additions are covered by unit tests that need no seat (the
-  journal's replay/compaction/torn-tail, the archive codec, the watcher's loop
-  against a scripted host, the query grammar);
-* the live proof — a real copy from another application reaching the history, and
-  one write bringing it back — is the founder's, on a real seat, as charter law #8
-  requires.
+That green took twelve CI iterations, and the failures are worth recording because
+each one is a fact about the stack rather than a typo:
 
-If CI is red on the first run, the failures are compile errors in named places,
-not unknown behaviour: that is the point of keeping the reducer, the grammar, the
-codec and the watcher host-independent.
+* **`capnpc` emits `crate::<stem>_capnp` paths**, assuming the generated modules
+  live at the crate root. Both halves of this project keep them under
+  `schema/`, so `build.rs` rewrites the prefix after generation. A schema also
+  pulls its *imports*: `discovery.capnp` needs `diagnostics.capnp` and
+  `logging.capnp`, which need `types.capnp`. Four files was one file too few.
+* **A method whose result is a named struct aliases that struct.** `T.VoidResult`
+  means the results reader *is* the void-result reader — there is no `result`
+  field to step through, and the union accessors return `Result`s of their own.
+* **`gpui` 0.2 spellings**: `WindowOptions.window_background` (not
+  `window_background_appearance`), `FocusHandle::is_focused(&Window)` and
+  `Window::focus(&handle)` (no context argument), `AppContext` in scope for
+  `cx.new`, `InteractiveElement` in scope for `.id`/`.on_click`, an element id
+  before `.overflow_y_scroll()`, and `img()` taking an owned `Arc<RenderImage>`.
+* **gpui's dependency tree does not build against current `libc`.** `xattr`
+  0.2.3 reads `libc::ENOATTR`, which libc defines on Linux through 0.2.185 and
+  removed in 0.2.190. The app pins `libc = "=0.2.185"`, with the reason in
+  `Cargo.toml`; nothing in this product reads extended attributes.
+* **The engine's serve layer is single-threaded by design** (it holds `Rc`
+  domain objects), so a test that serves a backend builds its `Service` *inside*
+  the serving thread; and each test needs its own socket path, because `cargo
+  test` runs them in parallel.
+
+What green does **not** mean: no seat has been driven. The live proof — a real
+copy from another application reaching the history, and one write bringing it
+back — remains the founder's, on a real seat, as charter law #8 requires. CI
+proves the daemon binds and answers, the contract round-trips, and the app
+renders; it cannot prove a compositor delivered a selection.
 
 ## 17. Roadmap, in the order the honesty argument forces
 
@@ -668,7 +700,8 @@ and its session unit (`src/bin/smart-service.rs`, `packaging/systemd/`), the
 installer and the doctor (`install.sh`, `scripts/doctor.sh`), durable history
 (`domains::clipboard::archive` → `serve::clipboard_archive` → `database.kv`),
 live capture (`platforms::linux::clipboard_watch`), concurrent sessions, newest-
-first history, the local query grammar, and CI that runs all of it.
+first history, the local query grammar, and CI that runs all of it — four green
+jobs (§16.3), with the app formatted and its pure logic tested.
 
 Still open:
 
