@@ -263,18 +263,26 @@ impl<'a> ClipboardClient<'a> {
         };
         use crate::schema::clipboard_capnp::preview_result::WhichReader;
         match union.which() {
-            Ok(WhichReader::Preview(reader)) => {
-                self.session.service.note_answered("getPreview");
-                PreviewState::Ready {
-                    text: text_of(reader.get_text_preview()),
-                    available: reader.get_available(),
-                    original_size: reader.get_original_size(),
-                    mime: reader
-                        .get_preview_mime_type()
-                        .map(|mime| mime_text(&mime))
-                        .unwrap_or_default(),
+            Ok(WhichReader::Preview(reader)) => match reader {
+                // The union accessor itself can fail: the pointer is there but
+                // the struct is not readable. That is a decode fault, and it is
+                // reported as one rather than shown as "no preview".
+                Ok(reader) => {
+                    self.session.service.note_answered("getPreview");
+                    PreviewState::Ready {
+                        text: text_of(reader.get_text_preview()),
+                        available: reader.get_available(),
+                        original_size: reader.get_original_size(),
+                        mime: reader
+                            .get_preview_mime_type()
+                            .map(|mime| mime_text(&mime))
+                            .unwrap_or_default(),
+                    }
                 }
-            }
+                Err(error) => PreviewState::Failed {
+                    message: format!("getPreview preview: {error}"),
+                },
+            },
             Ok(WhichReader::Unknown(())) => {
                 self.session.service.note_answered("getPreview");
                 PreviewState::Unavailable {

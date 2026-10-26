@@ -6,9 +6,10 @@
 //! types tomorrow, this crate's build would not notice — because it never
 //! reads them.
 //!
-//! Four files, and only four: the domain this product exists for, the two
-//! foundation surfaces it must speak to reach it (discovery, capability) and
-//! their shared `types.capnp`. Everything else in the 89-schema contract is
+//! Six files and their closure: the domain this product exists for
+//! (`clipboard`), the two foundation surfaces it must speak to reach it
+//! (`discovery`, `capability`), and the three files those import
+//! (`types`, `diagnostics`, `logging`). Everything else in the 89-schema contract is
 //! deliberately not compiled here; a clipboard app that compiled the whole
 //! tree would be paying for domains it will never call (charter law #2, and
 //! law #11 for the build box).
@@ -32,8 +33,10 @@
 use std::path::{Path, PathBuf};
 
 /// The schemas this product speaks. Order matters only for readability.
-const SCHEMAS: [&str; 4] = [
+const SCHEMAS: [&str; 6] = [
     "types.capnp",
+    "logging.capnp",
+    "diagnostics.capnp",
     "capability.capnp",
     "discovery.capnp",
     "clipboard.capnp",
@@ -68,6 +71,8 @@ fn main() {
     // reshape the contract's own output.
     rewrite_paths(&std::env::var("OUT_DIR").expect("OUT_DIR"), &[
         "types_capnp",
+        "logging_capnp",
+        "diagnostics_capnp",
         "capability_capnp",
         "discovery_capnp",
         "clipboard_capnp",

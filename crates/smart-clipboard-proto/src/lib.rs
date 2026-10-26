@@ -85,8 +85,9 @@ pub use client::{
 };
 pub use config::{Candidate, EndpointSource, ServiceLocation};
 pub use error::{ClientError, Refusal, RefusalClass};
+pub use contract::MimeFamily;
 pub use model::{
-    Authority, CapabilityRow, ChangeEvent, ChangeKind, ContentState, Item, ItemId, MimeFamily,
-    Observation, PreviewState, ServedMethod, ServiceInfo,
+    Authority, CapabilityRow, ChangeEvent, ChangeKind, ContentState, Item, ItemId, Observation,
+    PreviewState, ServedMethod, ServiceInfo,
 };
 pub use worker::{BackendEvent, Command, Worker, WorkerHandle, PULL_BATCH, PULL_INTERVAL};
