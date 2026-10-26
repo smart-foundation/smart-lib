@@ -28,6 +28,11 @@ JOB=$(gh api "repos/$REPO/actions/runs/$RUN/jobs" \
 [ -n "$JOB" ] || { printf 'run %s has no hygiene job\n' "$RUN" >&2; exit 1; }
 
 PATCH=$(mktemp)
+# How many chunks the run said it published. A missing chunk is a broken patch,
+# and a broken patch applied halfway is worse than none, so this is verified
+# before `git apply` ever runs.
+EXPECTED=$(gh api --paginate "repos/$REPO/check-runs/$JOB/annotations" \
+    -q '.[] | .message' | sed -n 's/^FMTCHUNKS //p' | head -1)
 # Annotations come back newest-first, and a patch is worthless out of order, so
 # the chunk number is the sort key.
 gh api --paginate "repos/$REPO/check-runs/$JOB/annotations" \
@@ -37,6 +42,12 @@ gh api --paginate "repos/$REPO/check-runs/$JOB/annotations" \
     | while read -r number chunk; do
         printf '%s' "$chunk"
     done > "$PATCH.b64"
+GOT=$(wc -l < "$PATCH.b64")
+if [ -n "${EXPECTED:-}" ] && [ "$GOT" -ne "$EXPECTED" ]; then
+    printf '!! the run published %s chunks but %s arrived — not applying\n' \
+        "$EXPECTED" "$GOT" >&2
+    exit 1
+fi
 # The chunks are base64 of a gzip stream, concatenated in order: decode once,
 # decompress once.
 base64 -d < "$PATCH.b64" | gzip -dc > "$PATCH"
