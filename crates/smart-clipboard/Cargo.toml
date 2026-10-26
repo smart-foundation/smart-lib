@@ -31,6 +31,18 @@ path = "src/main.rs"
 # fixes this app needs, pin the git revision instead:
 #   gpui = { git = "https://github.com/zed-industries/zed", rev = "<sha>" }
 gpui = { version = "0.2.2", features = ["x11", "wayland"] }
+
+# gpui 0.2.2 -> gpui_http_client -> zed-async-tar 0.5.0-zed -> xattr 0.2.3, and
+# xattr 0.2.3 reads `libc::ENOATTR`. libc defines that constant on Linux through
+# 0.2.185 and has removed it since 0.2.190, so an unpinned build of this app does
+# not compile at all — on any machine, not just CI.
+#
+# The pin is the smallest possible fix. xattr's own repair is a major-version
+# bump, which a `[patch.crates-io]` entry cannot express for a `^0.2` requirement,
+# and replacing the HTTP client's tar backend is not this product's decision.
+# Nothing here reads extended attributes: the code path ships because gpui
+# depends on it, and a stale libc minor is cheaper than a vendored fork.
+libc = "=0.2.185"
 # Must be the same `image` major that gpui uses: `RenderImage::new` takes an
 # `image::Frame`, so a version skew would be a type error at the seam where a
 # decoded screenshot becomes a drawable.
