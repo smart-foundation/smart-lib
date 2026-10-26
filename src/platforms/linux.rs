@@ -26,6 +26,13 @@ pub mod netlink;
 #[path = "linux/clipboard.rs"]
 pub mod clipboard;
 
+// The clipboard domain's live-capture half: the selection watcher thread that
+// turns another client's copy into the contract's `Copied` event, on its own
+// seat connection, without ever writing the selection.
+#[cfg(all(feature = "domain-clipboard", feature = "std"))]
+#[path = "linux/clipboard_watch.rs"]
+pub mod clipboard_watch;
+
 // The logging domain's native sink surface (law #9): the host's own log files
 // and per-service svlogd supervisor directories, measured (readable or
 // root-only with the OS's own words), plus this process's own stderr — the one

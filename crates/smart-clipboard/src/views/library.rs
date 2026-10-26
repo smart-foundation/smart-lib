@@ -423,7 +423,7 @@ impl LibraryView {
     }
 
     fn list_panel(&mut self, theme: &Theme, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let (connected, loading, visible, facet, hidden, label, sort) = {
+        let (connected, loading, visible, facet, hidden, label, sort, local) = {
             let app = self.app.read(cx);
             (
                 app.store.connection.is_connected(),
@@ -433,6 +433,7 @@ impl LibraryView {
                 app.store.hidden_by_facet(),
                 app.store.window_label(),
                 app.store.sort,
+                app.store.local_filter_label(),
             )
         };
 
@@ -440,7 +441,16 @@ impl LibraryView {
             return self.connection_panel(theme, cx).into_any_element();
         }
         if visible.is_empty() && !loading {
-            let (headline, body) = if hidden > 0 {
+            let (headline, body) = if let Some(local) = local.as_ref() {
+                (
+                    "Nothing matches the search predicates",
+                    format!(
+                        "“{local}” is applied by this app to the loaded rows, not by the \
+                         service — its search is text-only. {hidden} item(s) are hidden by \
+                         the current filter; clear the field to see the whole window."
+                    ),
+                )
+            } else if hidden > 0 {
                 (
                     "Nothing matches this filter",
                     format!(
@@ -469,7 +479,7 @@ impl LibraryView {
                 .flex_col()
                 .flex_1()
                 .h_full()
-                .child(list_header_strip(theme, &label, sort))
+                .child(list_header_strip(theme, &label, sort, local.as_deref()))
                 .child(ui::empty_state(theme, headline, body))
                 .into_any_element();
         }
@@ -912,13 +922,19 @@ impl LibraryView {
             .bg(alpha(theme.signal, 0.07))
             .border_1()
             .border_color(alpha(theme.signal, 0.30))
-            .child(ui::mono(
-                theme,
-                "cargo run --example smart-service -- --socket /tmp/smart-service.sock",
-            ))
+            // The fix is the *installed* one: the daemon is a binary with a
+            // session unit now, not a cargo example. A user who copied a command
+            // from this panel gets a clipboard that records copies, not a build
+            // that has to stay open in a terminal.
+            .child(ui::mono(theme, "systemctl --user enable --now smart-service"))
+            .child(ui::mono(theme, "smart-service --socket /tmp/smart-service.sock"))
             .child(ui::provenance(
                 theme,
                 "or point this app at a running service with --socket <path> / $SMART_SERVICE_SOCKET",
+            ))
+            .child(ui::provenance(
+                theme,
+                "nothing installed yet: ./install.sh in the smart-lib checkout builds and starts it",
             ));
         panel = panel.child(hint).child(
             div()
@@ -1247,7 +1263,7 @@ fn rows_title(item: &Item, now: u64) -> String {
 }
 
 /// The strip above the list: what the window is, and how it was ordered.
-fn list_header_strip(theme: &Theme, label: &str, sort: Sort) -> Div {
+fn list_header_strip(theme: &Theme, label: &str, sort: Sort, local: Option<&str>) -> Div {
     div()
         .flex()
         .items_center()
@@ -1263,16 +1279,28 @@ fn list_header_strip(theme: &Theme, label: &str, sort: Sort) -> Div {
                 .text_color(theme.text_muted)
                 .child(SharedString::from(label.to_string())),
         )
-        .child(
-            div()
+        .child({
+            // The local half of the search field is *named*, with its cost: a
+            // predicate over the loaded window is a different promise from a
+            // search over the service's history, and this strip is the only place
+            // a user can tell which one they got.
+            let chips = div()
                 .flex()
                 .items_center()
                 .gap(px(Space::MD))
-                .child(ui::chip(theme, "server search", true))
-                .child(ui::chip(
+                .child(ui::chip(theme, "server search", true));
+            let chips = match local {
+                Some(local) => chips.child(ui::chip(
                     theme,
-                    SharedString::from(format!("order: {}", sort.label())),
-                    false,
+                    SharedString::from(format!("local: {local}")),
+                    true,
                 )),
-        )
+                None => chips,
+            };
+            chips.child(ui::chip(
+                theme,
+                SharedString::from(format!("order: {}", sort.label())),
+                false,
+            ))
+        })
 }

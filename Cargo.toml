@@ -59,6 +59,18 @@ required-features = [
   "std",
 ]
 
+# The daemon. This is the difference between a tree that can serve the contract
+# and a machine that serves it: `cargo install --path . --bin smart-service`
+# (or `./install.sh`) puts it on the host, and the session unit starts it.
+#
+# It serves the clipboard domain over the native seat, archives the history to
+# `database.kv` under the state directory, watches the selection for other
+# clients' copies, and serves every connection on its own thread.
+[[bin]]
+name = "smart-service"
+path = "src/bin/smart-service.rs"
+required-features = ["rpc", "std", "domain-clipboard", "domain-database"]
+
 # The founder's privileged exact state read for the runit service cell (the
 # physical limit: /run/runit/supervise.<name>/stat is root-only on this host,
 # so the exact half of the state read is served by this binary run under

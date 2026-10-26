@@ -30,6 +30,7 @@
 mod app;
 mod format;
 mod preview;
+mod query;
 mod store;
 mod theme;
 mod ui;

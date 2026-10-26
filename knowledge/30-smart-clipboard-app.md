@@ -18,6 +18,58 @@ for any implementation.
 
 ---
 
+## 0.1 What runs on a machine, and which part is which
+
+Three pieces, three owners. The product is only as good as the middle one being
+*actually running*, which is what `install.sh` and the session unit exist for.
+
+| piece | who owns it | how it gets there |
+|---|---|---|
+| **`smart-service`** — the daemon: reads/writes the native selection, watches it for other clients' copies, keeps the history, archives it to `database.kv` | the engine (this repo, `src/bin/smart-service.rs`) | `./install.sh` → `~/.local/bin/smart-service` + a systemd **user** unit started with the graphical session |
+| **the history store** — `database.journal` under `$XDG_STATE_HOME/smart/database` | the engine's database backend | created by the daemon on first start; served on `database.kv` as well, so the history is queryable by any client |
+| **`smart-clipboard`** — the window | the product (this app) | `./install.sh` → `~/.local/bin/smart-clipboard` + a desktop entry |
+
+The daemon is not optional and it is not a detail: the app has no capture path of
+its own, by design. That is why the connection panel now prints the *installed*
+fix (`systemctl --user enable --now smart-service`) rather than a `cargo run`
+line — a user should never have to keep a terminal open to have a clipboard.
+
+```bash
+./install.sh            # build + install + start, for this session
+./scripts/doctor.sh     # "why is my history empty?" — every check, with its fix
+systemctl --user status smart-service
+journalctl --user -u smart-service -n 30
+```
+
+### What "live" means here
+
+A daemon that only records its own writes is not a clipboard history. The
+watcher (`platforms::linux::clipboard_watch`) polls the selection owner on its
+own connection:
+
+```
+every 700 ms   owner_token()  ── changed ──▶ targets() ──▶ read(text, html, image)
+                    │ unchanged                              │
+                    ▼                                        ▼
+                 (sleep)                              backend.ingest(offers)
+                                                      ├─ content fingerprint → no duplicates
+                                                      ├─ ledger entry + `Copied` event
+                                                      └─ durable archive
+```
+
+* On X11 the owner id changes on **every** copy, so a tick costs one
+  `GetSelectionOwner` round trip and payloads are transferred only when something
+  actually happened.
+* On Wayland (`wlr-data-control`) there is no owner id; the watcher reads the
+  preferred target each tick and the backend's fingerprint drops the repeats.
+  More expensive, still correct, and the difference is visible in the daemon's
+  startup report and the app's status bar.
+* The watcher **never writes** the selection. Its `claim`/`relinquish` both
+  return an error in the scripted-host test, which is the assertion that keeps it
+  a reader.
+
+---
+
 ## 1. Why this product exists, and what it refuses to be
 
 A clipboard history is the highest-value, lowest-trust surface on a desktop: it holds
@@ -109,7 +161,7 @@ exercised** — observed, never assumed, because the contract publishes no metho
 |---|---|---|
 | `discovery.lookup` | find the `clipboard` service + its schema id | connection panel, status bar |
 | `capability_service.list` | what this connection may do | status bar, Contract tab |
-| `getHistory` | the unfiltered window | list, total count |
+| `getHistory` | the unfiltered window, served from a ledger that is **restored from the database at startup** | list, total count |
 | `searchHistory` | the text query | search field (debounced 140 ms) |
 | `getPreview` | the row snippet + inspector preview | row subtitle, inspector |
 | `convertContent` | the bytes for a thumbnail / "copy as" | gallery, inspector, copy |
@@ -203,6 +255,34 @@ bug report.
    lets a snippet be read, because scanning beats decoration.
 8. **No motion.** No shimmer, no spring, no cross-fade. The app's states change because data
    arrived, not to entertain. (It also means reduced-motion users get the same app.)
+
+### 6.1 The search field: one box, two jobs, said out loud
+
+The contract's `searchHistory` is a text search over the service's whole history.
+The questions a clipboard user asks are not always text questions ("images from
+the last hour", "the pinned ones"). Answering those by pretending the service did
+it would be the lie this product exists to avoid; refusing them would make the app
+worse than `grep`. So the box takes both and *labels the split*:
+
+| typed | applied by | where |
+|---|---|---|
+| `deploy` | `searchHistory` | the service, over its whole history |
+| `kind:image` `kind:link` `kind:text` `kind:file` `kind:colour` | the app, by the item's first MIME family | the loaded window |
+| `mime:image/png` | the app, prefix match on any offered MIME | the loaded window |
+| `is:pinned` `is:secret` | the app (secret = the local heuristic, same one the inspector shows) | the loaded window |
+| `newer:30m` `newer:2h` `newer:7d` `older:1h` | the app, against the clock it already uses for relative times | the loaded window |
+
+Rules that make it safe to type into:
+
+* **A colon is not syntax.** `https://…`, `10:30` and `note:` stay text, because a
+  colon is common in exactly the things people copy.
+* **An unknown key is a hint, not an error.** `kind:imag` shows up as a hint *and*
+  is searched as text, so a typo filters nothing and hides nothing.
+* **The header strip names the local predicates** (`local: kind:image newer:2h`)
+  beside `server search`, and the empty state explains which of the two rejected
+  the row. The hidden count is always visible.
+* **An item with an unreadable clock never matches a time window** — "unknown" is
+  not "recent", and the row reappears the moment the predicate is removed.
 
 ---
 
@@ -506,6 +586,9 @@ payloads stop being confusable.
 | Error mapping | reason-class token survives the wire, including the `remote exception:` decoration | `proto/src/error.rs` (tests in-crate) |
 | Decoder | small/large/rubbish payloads; drawable MIME set | `src/preview.rs` tests |
 | **Contract round-trip** | a real `Session` against a real served backend: discovery descriptor + schema id, history units, preview `unknown` vs served, `setContent` reaching the backend, read-only refusal keeping `permissionDenied`, worker walking every candidate | `proto/tests/contract_roundtrip.rs` (engine as dev-dependency only) |
+| **Watcher** | one ingest per new owner and none for an unchanged one; the no-owner-token (Wayland) fallback deduping by content; the target preference order including custom MIMEs | `platforms::linux::clipboard_watch` tests against a scripted seat |
+| **Durability** | new-first history and paging; an archived item restored with its pin and payload; mutations reaching the archive; the journal's replay/compaction/torn tail; the archive codec rejecting hostile counts | `platforms::linux::{clipboard,database}` + `serve::clipboard_archive` tests |
+| **Query grammar** | the service/local split, `:` that is not syntax, unknown keys as hints, duration units, AND semantics, unknown capture times never matching a window | `crates/smart-clipboard/src/query.rs` |
 
 Not yet covered, and named so it is not implied: visual regression, a11y tree assertions,
 and a live-service smoke test on a Wayland/X11 seat (needs a session, and per charter law #8
@@ -513,36 +596,85 @@ the live write proof is the founder's to run).
 
 ---
 
-## 16. Build and run
+## 16. Build, run, and prove it
+
+### 16.1 One command
 
 ```bash
-# the app's two crates are excluded from the engine workspace on purpose
-cd crates/smart-clipboard
-SMART_SCHEMA_DIR=/path/to/smart-protocol-official/schema cargo run --release
-
-# a service to talk to (engine, separate workspace)
-cd ../..
-cargo run --example smart-service --features rpc,std,domain-clipboard \
-  -- --socket /tmp/smart-service.sock
+git clone https://github.com/smart-foundation/smart-lib && cd smart-lib
+git clone https://github.com/smart-foundation/smart-protocol-official ../smart-protocol-official
+./install.sh            # daemon + session unit + desktop entry + app
+./scripts/doctor.sh     # every check, with the exact fix for the one that failed
 ```
 
-Toolchain: gpui 0.2.2 needs a recent stable Rust (async closures, 1.85+). If the published
-crate lags, pin the engine's `rev` in `crates/smart-clipboard/Cargo.toml`.
+`install.sh` builds `smart-service` with `std,rpc,domain-clipboard,domain-database`,
+installs it to `$PREFIX/bin` (default `~/.local/bin`), writes a **systemd user
+unit** that starts with the graphical session and restarts on exit, installs the
+app and its desktop entry, and then prints the four checks that prove it works
+(unit active → socket present → copy something → still there after a restart). A
+missing GPU toolchain does **not** fail the install: the daemon is the part that
+records, so the app is skipped *with its own retry command*, never silently.
 
-> **Honest status of this commit.** The Rust toolchain and crates.io are unreachable from the
-> environment this was written in, so neither crate has been compiled here. The API surfaces
-> used were checked against upstream gpui `main` (window options, `uniform_list`,
-> `RenderImage::new(image::Frame)`, `Context::{spawn, listener, processor, observe}`), and the
-> two places where gpui's API is most likely to drift are isolated: window dismissal
-> (`app::close_palette`) and image construction (`app::on_ui`). Everything below the gpui
-> line — the protocol crate, the reducer, the formatters — is dependency-light Rust that
-> compiles or does not, with no runtime behaviour to guess at.
+### 16.2 By hand
 
----
+```bash
+./scripts/ci-fetch-schemas.sh                       # pinned protocol commit
+cargo build --release --bin smart-service --features std,rpc,domain-clipboard,domain-database
+./target/release/smart-service                      # $XDG_RUNTIME_DIR/smart/service.sock
+cd crates/smart-clipboard && cargo run --release
+```
+
+### 16.3 CI, and why it is the same as local
+
+`.github/workflows/ci.yml` has four jobs, and `scripts/ci.sh` runs the same three
+stages locally so "green in CI" cannot diverge from "green here":
+
+| job | proves | how |
+|---|---|---|
+| **daemon** | it builds, its CLI works, the clipboard/database/archive tests pass, and it **binds a socket and accepts** on a bare runner | builds the bin with the product feature set, runs `--help`/`--version`/`--print-address`, starts it with `--no-watch --no-history` and waits for the socket |
+| **contract-client** | the app's protocol crate round-trips against a *real served backend* | `cargo test` including `tests/contract_roundtrip.rs`, which serves a mock over a unix socket via the engine as a dev-dependency only |
+| **app** | the gpui product compiles against the real platform stack and its pure tests pass | installs wayland/xkbcommon/x11/vulkan headers, `cargo build`, `cargo test --bin smart-clipboard` |
+| **hygiene** (advisory) | formatting, and that no shellout appeared in `src/` | `cargo fmt --check`, the `Command::new` grep |
+
+The schemas are **fetched at a pinned commit**, never vendored: a schema change is
+a contract change and must be a reviewed line in `scripts/ci-fetch-schemas.sh`.
+
+### 16.4 The honest status of this tree
+
+The environment this was authored in had **no Rust toolchain and no crates.io
+access**, so the first real `cargo build` of this work happens in the CI run above.
+What that means concretely:
+
+* every generated capnp name used by the client was checked against the engine's
+  own served implementation (which compiles the same schemas), not remembered;
+* the gpui surface was checked against upstream `main` (window options,
+  `uniform_list`, `RenderImage::new`, `Context::{spawn, listener, processor,
+  observe}`), and the two most drift-prone seams are isolated in `src/app.rs`;
+* the engine-side additions are covered by unit tests that need no seat (the
+  journal's replay/compaction/torn-tail, the archive codec, the watcher's loop
+  against a scripted host, the query grammar);
+* the live proof — a real copy from another application reaching the history, and
+  one write bringing it back — is the founder's, on a real seat, as charter law #8
+  requires.
+
+If CI is red on the first run, the failures are compile errors in named places,
+not unknown behaviour: that is the point of keeping the reducer, the grammar, the
+codec and the watcher host-independent.
 
 ## 17. Roadmap, in the order the honesty argument forces
 
-1. **Compile + run on a real seat**, with the founder's live-service proof (read + one write).
+Done since the first draft, because "it builds" was not the ask: the daemon binary
+and its session unit (`src/bin/smart-service.rs`, `packaging/systemd/`), the
+installer and the doctor (`install.sh`, `scripts/doctor.sh`), durable history
+(`domains::clipboard::archive` → `serve::clipboard_archive` → `database.kv`),
+live capture (`platforms::linux::clipboard_watch`), concurrent sessions, newest-
+first history, the local query grammar, and CI that runs all of it.
+
+Still open:
+
+1. **The founder's live proof on a real seat**: copy in another application → the
+   row appears; `⏎` → the paste target gets it. CI proves the daemon binds and the
+   tests prove the loop, but law #8 reserves the live write for a human.
 2. **Global shortcut** for the palette. Not a contract feature: a compositor binding that
    runs `smart-clipboard --palette`, or a portal `GlobalShortcuts` client. The window
    management already supports opening the palette on demand.
@@ -553,6 +685,10 @@ crate lags, pin the engine's `rev` in `crates/smart-clipboard/Cargo.toml`.
 6. **Accessibility pass**: roles, labels, live regions for toasts.
 7. **Collections / saved searches** — needs a contract surface that does not exist yet; not
    faked in the app.
+8. **History compaction policy**: the archive is bounded by the backend's own
+   `maxHistoryCount`/`maxHistorySize`, and evictions leave the store, but a long-lived
+   store wants a user-facing "keep 30 days" dial — which is a *policy* verb, and the
+   contract currently has no room for it (the size-limit pair is the nearest thing).
 
 ---
 

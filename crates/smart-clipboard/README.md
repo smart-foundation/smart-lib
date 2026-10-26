@@ -30,14 +30,25 @@ and the honest list of what is not done — is
 gpui pulls a real platform stack (X11/Wayland, Vulkan), so this crate is its own
 workspace and is excluded from the engine's build.
 
+The daemon is a real binary with a session unit, so the short path is one
+command from the repository root:
+
 ```bash
-# 1. the service (engine side, unix carrier, clipboard domain)
-cargo run --example smart-service --features rpc,std,domain-clipboard \
-  -- --socket /tmp/smart-service.sock
+./install.sh          # builds + installs the daemon and the app, starts the unit
+```
+
+By hand, if you would rather see every step:
+
+```bash
+# 0. the contract's schema tree, beside this checkout (pinned commit)
+./scripts/ci-fetch-schemas.sh
+
+# 1. the daemon (clipboard + the database its history lives in)
+cargo build --release --bin smart-service --features std,rpc,domain-clipboard,domain-database
+./target/release/smart-service --socket /tmp/smart-service.sock
 
 # 2. the app
-cd crates/smart-clipboard
-cargo run --release
+cd crates/smart-clipboard && cargo run --release
 ```
 
 The app finds the service by trying, in order:

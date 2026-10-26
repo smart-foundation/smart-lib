@@ -226,3 +226,115 @@ pub trait ClipboardBackend {
         None
     }
 }
+
+/// A **shared** clipboard backend: one instance behind a `Mutex`, reachable from
+/// every daemon connection and from the selection watcher.
+///
+/// # Why this exists, in one paragraph
+///
+/// `capnp-rpc` gives every connection its own `LocalPool`, so a daemon that
+/// wants two clients at once serves each connection on its own thread. The
+/// domain's backend is one object — the host's clipboard and its ledger — so it
+/// has to cross that boundary, and crossing a thread boundary in Rust means
+/// `Send + Sync`. The platform backends are `Send` but not `Sync` (an
+/// `X11SelectionHost` owns a connection that must not be driven from two threads
+/// at once), and a `Mutex` is exactly the honest answer: the selection protocol
+/// is serialized, because it *is* serialized.
+///
+/// The impl is a thin delegation of every method, so a caller cannot tell a
+/// shared backend from a plain one, and no behaviour lives here.
+#[cfg(feature = "std")]
+impl<T> ClipboardBackend for std::sync::Mutex<T>
+where
+    T: ClipboardBackend + ?Sized,
+{
+    fn clipboard_caps(&self) -> (String, bool, bool) {
+        self.lock().expect("clipboard backend lock").clipboard_caps()
+    }
+
+    fn get_content(&self, mime_type: &str) -> Result<ContentOutcome> {
+        self.lock().expect("clipboard backend lock").get_content(mime_type)
+    }
+
+    fn set_content(&self, content: ClipboardContent) -> Result<()> {
+        self.lock().expect("clipboard backend lock").set_content(content)
+    }
+
+    fn set_offer(&self, offers: &[ClipboardContent]) -> Result<()> {
+        self.lock().expect("clipboard backend lock").set_offer(offers)
+    }
+
+    fn clear_content(&self) -> Result<()> {
+        self.lock().expect("clipboard backend lock").clear_content()
+    }
+
+    fn get_supported_mime_types(&self) -> Result<Vec<String>> {
+        self.lock().expect("clipboard backend lock").get_supported_mime_types()
+    }
+
+    fn subscribe_changes(&self) -> Result<SubscriptionId> {
+        self.lock().expect("clipboard backend lock").subscribe_changes()
+    }
+
+    fn pull_changes(&self, subscription: SubscriptionId, max_events: u32) -> Result<Vec<ClipboardChange>> {
+        self.lock()
+            .expect("clipboard backend lock")
+            .pull_changes(subscription, max_events)
+    }
+
+    fn cancel_changes(&self, subscription: SubscriptionId) -> Result<()> {
+        self.lock().expect("clipboard backend lock").cancel_changes(subscription)
+    }
+
+    fn get_history(&self, page: Pagination) -> Result<Page<ClipboardItem>> {
+        self.lock().expect("clipboard backend lock").get_history(page)
+    }
+
+    fn clear_history(&self) -> Result<()> {
+        self.lock().expect("clipboard backend lock").clear_history()
+    }
+
+    fn search_history(&self, query: &str, page: Pagination) -> Result<Page<ClipboardItem>> {
+        self.lock().expect("clipboard backend lock").search_history(query, page)
+    }
+
+    fn pin_item(&self, item_id: ClipboardId) -> Result<()> {
+        self.lock().expect("clipboard backend lock").pin_item(item_id)
+    }
+
+    fn unpin_item(&self, item_id: ClipboardId) -> Result<()> {
+        self.lock().expect("clipboard backend lock").unpin_item(item_id)
+    }
+
+    fn delete_item(&self, item_id: ClipboardId) -> Result<()> {
+        self.lock().expect("clipboard backend lock").delete_item(item_id)
+    }
+
+    fn get_preview(&self, item_id: ClipboardId) -> Result<PreviewOutcome> {
+        self.lock().expect("clipboard backend lock").get_preview(item_id)
+    }
+
+    fn validate_content(&self, item_id: ClipboardId) -> Result<ValidationOutcome> {
+        self.lock().expect("clipboard backend lock").validate_content(item_id)
+    }
+
+    fn convert_content(&self, item_id: ClipboardId, target_mime_type: &str) -> Result<ConversionOutcome> {
+        self.lock()
+            .expect("clipboard backend lock")
+            .convert_content(item_id, target_mime_type)
+    }
+
+    fn get_size_limits(&self) -> Result<ClipboardSizeLimits> {
+        self.lock().expect("clipboard backend lock").get_size_limits()
+    }
+
+    fn set_size_limits(&self, limits: ClipboardSizeLimits) -> Result<()> {
+        self.lock().expect("clipboard backend lock").set_size_limits(limits)
+    }
+
+    fn last_unavailable_reason(&self, method: &str) -> Option<String> {
+        self.lock()
+            .expect("clipboard backend lock")
+            .last_unavailable_reason(method)
+    }
+}

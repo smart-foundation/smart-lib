@@ -56,6 +56,35 @@ cargo test -j6 -p shell --test network_cmd
 
 The shell's presentation (tables, glyphs, truncation) is being ported to smart-cli's presenter framework.
 
+## Install (this is the part that was missing)
+
+The tree could be built; it could not be *run*. There is now a daemon binary, a
+session unit, and a desktop entry, so a machine records copies after a single
+command:
+
+```bash
+git clone https://github.com/smart-foundation/smart-protocol-official ../smart-protocol-official
+./install.sh            # smart-service + systemd --user unit + smart-clipboard + desktop entry
+./scripts/doctor.sh     # if anything is not working, this says which piece and how to fix it
+```
+
+`smart-service` serves the clipboard domain over the native seat (Wayland
+`zwlr_data_control` or X11's ICCCM protocol — never `wl-paste`/`xclip`), watches
+the selection so **copies made by other applications are captured**, keeps the
+history in a `database.kv` journal under `$XDG_STATE_HOME/smart/database` so it
+survives a restart, and serves each client connection on its own thread.
+
+```bash
+cargo build --release --bin smart-service --features std,rpc,domain-clipboard,domain-database
+./target/release/smart-service --help
+```
+
+CI (`.github/workflows/ci.yml`) builds the daemon, runs its clipboard/database/
+archive tests, boots it on a bare runner and waits for its socket, round-trips the
+contract client against a real served backend, and builds the gpui app — so a
+green run means "drop it on a desktop and it starts". `./scripts/ci.sh` runs the
+same stages locally.
+
 ## Products (the first one)
 
 `crates/smart-clipboard/` is the first finished domain made into a product: a

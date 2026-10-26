@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
+use crate::query::{self, Parsed};
 use smart_clipboard_proto::{
     Authority, BackendEvent, ChangeEvent, ChangeKind, Command, ContentState, CopyTarget, Item,
     ItemId, LiveContent, MimeFamily, Page, PreviewState, Query, Refusal, ServiceInfo,
@@ -276,8 +277,16 @@ pub struct Store {
     pub contents: HashMap<u64, ContentState>,
     /// The selected item.
     pub selected: Option<ItemId>,
-    /// The text in the search field.
+    /// The text in the search field, verbatim (what the user typed).
     pub query: String,
+    /// The search field, parsed: the service's half and the local predicates.
+    ///
+    /// Kept as data rather than re-parsed on every frame: the header draws its
+    /// description, the list filters by it, and both must agree.
+    pub parsed: Parsed,
+    /// The clock the app is currently using for relative times and time filters.
+    /// Set from every event, so "2 minutes ago" and `newer:2m` cannot disagree.
+    pub now_ns: u64,
     /// The text the current window was fetched for (what the header reports).
     pub applied_query: String,
     /// The facet filter.
@@ -324,7 +333,14 @@ impl Store {
         let mut rows: Vec<Item> = self
             .items
             .iter()
-            .filter(|item| self.facet.admits(item, self.preview_text(item.id)))
+            .filter(|item| {
+                self.facet.admits(item, self.preview_text(item.id))
+                    // The second filter is the search field's local half. Both
+                    // are local, and the header says so.
+                    && self
+                        .parsed
+                        .matches(item, self.preview_text(item.id), self.now_ns)
+            })
             .cloned()
             .collect();
         match self.sort {
@@ -401,6 +417,8 @@ impl Store {
     /// this module pure: the app forwards them, and a test can assert on them.
     pub fn apply(&mut self, event: BackendEvent, now_ns: u64) -> Vec<Command> {
         let mut effects = Vec::new();
+        // One clock for timestamps and time filters, advanced by every event.
+        self.now_ns = now_ns;
         match event {
             BackendEvent::Dialling { endpoint, source } => {
                 self.connection = Connection::Dialling {
@@ -565,10 +583,28 @@ impl Store {
     /// and returns the fetch.
     pub fn set_query(&mut self, text: String) -> Vec<Command> {
         self.query = text;
-        self.applied_query = self.query.clone();
+        // One box, two jobs: the predicates stay here, the words go to the
+        // service's own search. Sending `kind:image` to `searchHistory` would
+        // find nothing, which is why the split has to happen before the call.
+        self.parsed = query::parse(&self.query);
+        self.applied_query = self.parsed.service.clone();
         self.selected = None;
         self.loading = true;
         vec![Command::Refresh(Query::first(self.applied_query.clone()))]
+    }
+
+    /// The local half of the search field, described for the header. `None` when
+    /// the app is filtering by nothing but the service's own text search.
+    pub fn local_filter_label(&self) -> Option<String> {
+        if self.parsed.is_local() {
+            Some(format!(
+                "{} applied to the {} loaded rows",
+                self.parsed.describe(),
+                self.items.len()
+            ))
+        } else {
+            None
+        }
     }
 
     /// Re-run the current query.

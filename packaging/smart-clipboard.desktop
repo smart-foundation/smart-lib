@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=smart-clipboard
+GenericName=Clipboard history
+Comment=Everything that reached your clipboard, from the smart-protocol service
+# The app is a client: it finds the service by the contract's own convention and
+# says so if nothing answers. It does not start, stop or own the service.
+Exec=smart-clipboard
+TryExec=smart-clipboard
+# The quick palette, bound to a key by the desktop (see Settings → Keyboard).
+Actions=Palette;
+
+[Desktop Action Palette]
+Name=Quick palette
+Exec=smart-clipboard --palette
+
+Icon=smart-clipboard
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=clipboard;history;paste;copy;screenshot;
+StartupNotify=true
+StartupWMClass=smart-clipboard
