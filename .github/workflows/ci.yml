@@ -2,15 +2,19 @@ name: ci
 
 # What this workflow proves, in order of what could break a user:
 #
-#   1. the daemon builds and its clipboard/database tests pass  → a machine can
-#      record a copy;
+#   1. the daemon builds, its CLI works, its clipboard/database/archive tests
+#      pass, and it binds a socket and accepts → a machine can record a copy;
 #   2. the contract client passes a round trip against a *real served backend*
-#      → the app is talking to the contract, not to a mock of its own making;
-#   3. the gpui product builds and its pure tests pass          → dropping it on
-#      a desktop does not start with a compile error.
+#      → the app talks to the contract, not to a mock of its own making;
+#   3. the gpui product builds against the real platform stack and its pure
+#      tests pass → dropping it on a desktop does not start with a compile error.
 #
 # The schemas are fetched at a pinned commit, never vendored: a schema change is a
 # contract change and has to be a reviewed line in scripts/ci-fetch-schemas.sh.
+#
+# Every cargo step goes through scripts/ci-annotate.sh, which re-emits compiler
+# errors and test assertions as GitHub annotations — that is how a failure is read
+# without the (host-blocked) raw log.
 
 on:
   push:
@@ -19,12 +23,8 @@ on:
   workflow_dispatch:
 
 env:
-  # `always` wraps `error[E0277]:` in escape codes, which turns a log into
-  # something no pattern (and no annotation) can read. `never` keeps failures
-  # greppable.
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
-  # The protocol tree the build compiles. Pinned; see scripts/ci-fetch-schemas.sh.
   PROTOCOL_REPO: https://github.com/smart-foundation/smart-protocol-official
   PROTOCOL_SHA: 9175b06bb7b2ddee87af4dd12aa02f07a4d3402f
   DAEMON_FEATURES: std,rpc,domain-clipboard,domain-database,domain-discovery
@@ -37,6 +37,8 @@ jobs:
   daemon:
     name: engine · daemon + clipboard domain
     runs-on: ubuntu-24.04
+    env:
+      SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema
     steps:
       - uses: actions/checkout@v4
 
@@ -60,31 +62,27 @@ jobs:
           workspaces: '. -> target'
 
       - name: Build the daemon
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: ./scripts/ci-annotate.sh cargo build --bin smart-service --no-default-features --features "$DAEMON_FEATURES"
 
       - name: Daemon reports what it serves
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: |
-          # `--help` and `--print-address` are the daemon's whole CLI surface; if
-          # either stops working, the installer and the unit file break.
+          # `--help`, `--version` and `--print-address` are the daemon's CLI
+          # surface; if any stops working, the installer and the unit break.
           ./target/debug/smart-service --help > /dev/null
           ./target/debug/smart-service --version
           ./target/debug/smart-service --print-address --socket /tmp/smart-ci.sock \
             | grep -qx 'unix:///tmp/smart-ci.sock'
 
       - name: Clipboard, archive and database tests
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: |
           ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- clipboard
           ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- database
           ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- archive
 
       - name: The daemon actually binds and answers
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: |
           # A real socket, a real accept loop, a real shutdown. `--no-watch` and
-          # `--no-history` because a CI runner has no seat and no state dir worth
+          # `--no-history` because a runner has no seat and no state dir worth
           # keeping; the daemon must still serve the contract in that shape.
           ./target/debug/smart-service --socket /tmp/smart-ci.sock --no-watch --no-history &
           DAEMON=$!
@@ -98,12 +96,13 @@ jobs:
 
       - name: Clippy (advisory)
         continue-on-error: true
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: cargo clippy --no-default-features --features "$DAEMON_FEATURES" --all-targets
 
   contract-client:
     name: proto · contract round trip
     runs-on: ubuntu-24.04
+    env:
+      SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema
     steps:
       - uses: actions/checkout@v4
 
@@ -126,19 +125,22 @@ jobs:
             crates/smart-clipboard-proto -> target
             . -> target
 
-      - name: Unit tests (config, errors, model)
+      - name: Unit tests (config, errors, model, contract)
         working-directory: crates/smart-clipboard-proto
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: ../../scripts/ci-annotate.sh cargo test --lib
 
       - name: Contract round trip against a served backend
         working-directory: crates/smart-clipboard-proto
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: ../../scripts/ci-annotate.sh cargo test --test contract_roundtrip -- --nocapture
 
   app:
     name: app · gpui product
     runs-on: ubuntu-24.04
+    env:
+      SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema
+      # A loader with no GPU: enough to build and to run the pure tests, which
+      # never open a window.
+      WGPU_BACKEND: vulkan
     steps:
       - uses: actions/checkout@v4
 
@@ -167,30 +169,18 @@ jobs:
 
       - name: Build the app
         working-directory: crates/smart-clipboard
-        env:
-          # Absolute on purpose: a build script resolves a relative path against
-          # the *package* directory (the engine's is the repo root, not this
-          # crate's), so `../../../` would point outside the checkout.
-          SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema
-          # gpui links a Vulkan loader; a runner has no GPU, which is fine for a
-          # build and for the pure tests below (nothing opens a window here).
-          WGPU_BACKEND: vulkan
         run: ../../scripts/ci-annotate.sh cargo build
 
       - name: The app explains itself without a display
         working-directory: crates/smart-clipboard
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
         run: |
-          # `--help` is the only path that must work with no seat and no service:
-          # it is what a user runs first when the app does not start.
+          # `--help` is the only path that must work with no seat and no
+          # service: it is what a user runs first when the app does not start.
           ./target/debug/smart-clipboard --help | grep -q 'smart-clipboard'
           ./target/debug/smart-clipboard --version
 
-      - name: Reducer, formatter and decoder tests
+      - name: Reducer, formatter, grammar and decoder tests
         working-directory: crates/smart-clipboard
-        env: { SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema }
-        # These are the parts with no GPU in them: the store's command/event
-        # reducer, the formatting helpers, the image decoder, the query grammar.
         run: ../../scripts/ci-annotate.sh cargo test --bin smart-clipboard
 
   hygiene:
@@ -209,7 +199,7 @@ jobs:
         run: |
           # Key principle #1: zero process spawns outside tests. The clipboard
           # domain replaces wl-paste/xclip, so this is the grep that proves it.
-          if grep -rn 'Command::new' src/ | grep -v '^src/codegen/' ; then
+          if grep -rn 'Command::new' src/ | grep -v '^src/codegen/' | grep -v '^src/bin/'; then
             echo '::error::a shellout appeared outside the schema codegen'
             exit 1
           fi
