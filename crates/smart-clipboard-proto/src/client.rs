@@ -654,12 +654,15 @@ fn capnp_error(verb: &str, error: capnp::Error) -> ClientError {
 }
 
 /// Check a contract `T.VoidResult`.
+///
+/// A method whose result is the named `T.VoidResult` aliases that struct, so the
+/// results reader *is* the void-result reader — there is no `result` field to
+/// step through.
 fn check_void(
     verb: &str,
-    result: capnp::Result<types_capnp::void_result::Reader<'_>>,
+    reader: types_capnp::void_result::Reader<'_>,
 ) -> Result<(), ClientError> {
     use types_capnp::void_result::WhichReader;
-    let reader = result.map_err(|error| ClientError::Decode(format!("{verb} result: {error}")))?;
     match reader.which() {
         Ok(WhichReader::Success(())) => Ok(()),
         Ok(WhichReader::Error(error)) => {

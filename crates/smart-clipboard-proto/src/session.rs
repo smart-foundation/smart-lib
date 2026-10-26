@@ -341,7 +341,7 @@ impl Session {
                 name: text_of(descriptor.get_name()),
                 category: text_of(descriptor.get_category()),
                 schema_id: descriptor.get_id().map(|id| id.get_id()).unwrap_or_default(),
-                state: state_token(descriptor.get_state().unwrap_or_default()),
+                state: state_token(descriptor.get_state().unwrap_or(ServiceState::Unknown)),
                 endpoints: Vec::new(),
                 metadata: Default::default(),
                 schema_matches_app: false,

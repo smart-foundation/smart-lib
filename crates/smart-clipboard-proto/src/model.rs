@@ -456,9 +456,9 @@ mod tests {
 
     #[test]
     fn the_text_representation_is_found_wherever_it_sits() {
-        let item = item(&["image/png", "text/plain"]);
-        assert_eq!(item.preferred_text_mime(), Some("text/plain"));
-        assert!(item.image_mime().is_some());
+        let copied = item(&["image/png", "text/plain"]);
+        assert_eq!(copied.preferred_text_mime(), Some("text/plain"));
+        assert!(copied.image_mime().is_some());
         assert_eq!(item(&["image/png"]).preferred_text_mime(), None);
     }
 
