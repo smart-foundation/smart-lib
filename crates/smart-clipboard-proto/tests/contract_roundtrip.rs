@@ -122,10 +122,14 @@ impl ClipboardBackend for Ledger {
 }
 
 /// Serve one backend on a socket and return the path and the backend handle.
+///
+/// The `Service` is built *inside* the serving thread: a `Service` holds
+/// `Rc`-based domain objects (the engine's serve layer is single-threaded by
+/// design, exactly like the engine's own accept loop, which builds one per
+/// connection), so it must not be sent across a thread boundary. The ledger is
+/// shared, which is the only thing this test needs to reach.
 fn serve(class: CapabilityClass) -> (String, Arc<Ledger>) {
     let ledger = Arc::new(Ledger::default());
-    let service =
-        Arc::new(Service::new().with_domain(Arc::new(ClipboardDomain::new(Arc::clone(&ledger)))));
     let path = format!(
         "/tmp/smart-clipboard-proto-{}-{}.sock",
         std::process::id(),
@@ -136,9 +140,11 @@ fn serve(class: CapabilityClass) -> (String, Arc<Ledger>) {
     );
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).expect("bind");
+    let served = Arc::clone(&ledger);
     std::thread::spawn(move || {
+        let service = Service::new().with_domain(Arc::new(ClipboardDomain::new(served)));
         let channel = listener.accept().expect("accept");
-        let _ = serve_connection(service, channel, class);
+        let _ = serve_connection(Arc::new(service), channel, class);
     });
     (path, ledger)
 }

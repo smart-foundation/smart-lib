@@ -36,8 +36,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    point, px, size, App, Bounds, Context, Entity, RenderImage, SharedString, WindowBounds,
-    WindowHandle, WindowKind, WindowOptions,
+    point, px, size, App, AppContext, Bounds, Context, Entity, RenderImage, SharedString,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 use smart_clipboard_proto::{
     BackendEvent, Command, ItemId, ServiceLocation, Worker, WorkerHandle,
@@ -516,7 +516,9 @@ pub fn palette_window_options() -> WindowOptions {
         kind: WindowKind::PopUp,
         focus: true,
         show: true,
-        window_background_appearance: gpui::WindowBackgroundAppearance::Transparent,
+        // Transparent, so a card can float over the desktop without a solid
+        // slab behind it; the card itself paints `theme.canvas`.
+        window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     }
 }

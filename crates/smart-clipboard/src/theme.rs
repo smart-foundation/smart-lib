@@ -35,8 +35,19 @@
 
 use gpui::{rgb, FontWeight, Rgba};
 
+/// A colour at a given alpha. gpui colours are plain structs, so this is a
+/// copy, not an allocation.
+///
+/// It lives here, beside the tokens, because it is a *token operation*: every
+/// tinted surface in the app is a token at a computed alpha, never a new
+/// hand-picked colour. Views that need a tint therefore import one concept,
+/// not two modules.
+pub fn alpha(color: Rgba, value: f32) -> Rgba {
+    Rgba { a: value, ..color }
+}
+
 /// The token set every view renders through.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     /// The window's own background.
     pub canvas: Rgba,

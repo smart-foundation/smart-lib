@@ -265,10 +265,12 @@ impl Render for PaletteView {
                 app.store.loading,
             )
         };
-        let _ = window;
         let rows = Arc::new(self.app.read(cx).store.visible());
         let count = rows.len().min(24);
-        let focused = self.focus.is_focused(cx);
+        // Focus is a property of the *window*, not of the context in gpui 0.2:
+        // a handle can only answer whether it is focused given the window it
+        // might have been focused in.
+        let focused = self.focus.is_focused(window);
 
         let list: AnyElement = if !connected {
             let connection = self.app.read(cx).store.connection.clone();

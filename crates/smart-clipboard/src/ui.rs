@@ -18,17 +18,16 @@
 //! display.
 
 use gpui::{
-    div, px, Div, ElementId, FontWeight, IntoElement, ParentElement, Rgba, SharedString, Styled,
+    div, px, Div, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Rgba,
+    SharedString, Styled,
 };
 use smart_clipboard_proto::MimeFamily;
 
 use crate::theme::{Radius, Space, Theme, Type, Weight};
 
-/// A colour at a given alpha. gpui colours are plain structs, so this is a
-/// copy, not an allocation.
-pub fn alpha(color: Rgba, value: f32) -> Rgba {
-    Rgba { a: value, ..color }
-}
+/// Re-exported from the tokens: `ui::alpha` and `theme::alpha` are the same
+/// function, so the two import paths a view might reach for cannot drift.
+pub use crate::theme::alpha;
 
 /// A hairline.
 pub fn divider(theme: &Theme) -> Div {
