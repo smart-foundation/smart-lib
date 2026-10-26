@@ -158,7 +158,10 @@ impl PaletteView {
             Some(PreviewState::Loading) | Some(PreviewState::NotRequested) | None => {
                 "…".to_string()
             }
-            Some(PreviewState::Unavailable { .. }) => {
+            // `Ready` with `available: false` is the contract saying "there is a
+            // preview object but no text in it": an image, a file, a binary.
+            Some(PreviewState::Ready { available: false, .. })
+            | Some(PreviewState::Unavailable { .. }) => {
                 format!("{} — no text preview", format::family_title(item.family()))
             }
             Some(PreviewState::Refused { refusal }) => refusal.headline(),

@@ -477,6 +477,14 @@ impl InspectorView {
                         .text_color(theme.text)
                         .child(SharedString::from(text.clone()))
                         .into_any_element(),
+                    Some(PreviewState::Ready { available: false, .. }) => div()
+                        .text_size(px(Type::SMALL))
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(
+                            "This payload has no text form. The bytes are in the item; \
+                             copy them as their own MIME type.",
+                        ))
+                        .into_any_element(),
                     Some(PreviewState::Loading) | Some(PreviewState::NotRequested) | None => div()
                         .flex()
                         .flex_col()

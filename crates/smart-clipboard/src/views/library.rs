@@ -222,7 +222,7 @@ impl LibraryView {
 
     // ── the three panes ──────────────────────────────────────────────────
 
-    fn header(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn header(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let (query, focused, layout) = {
             let app = self.app.read(cx);
             (
@@ -541,7 +541,11 @@ impl LibraryView {
                 "asking the service for a preview…".to_string(),
                 theme.text_faint,
             ),
-            Some(PreviewState::Unavailable { .. }) => (
+            // `Ready` with `available: false` and `Unavailable` are the same
+            // fact for a reader — "no text in this payload" — and the words say
+            // which payload it is rather than which arm produced them.
+            Some(PreviewState::Ready { available: false, .. })
+            | Some(PreviewState::Unavailable { .. }) => (
                 format!(
                     "{} — no text preview (the service keeps none for this payload)",
                     format::family_title(family)
@@ -1180,7 +1184,7 @@ impl LibraryView {
 impl Render for LibraryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.app.read(cx).theme();
-        let header = self.header(&theme, cx);
+        let header = self.header(&theme, window, cx);
         let rail = self.rail(&theme, cx);
         let list = self.list_panel(&theme, window, cx);
         let status = self.status_bar(&theme, cx);

@@ -36,7 +36,7 @@ mod theme;
 mod ui;
 mod views;
 
-use gpui::{App, Application, WindowOptions};
+use gpui::{App, AppContext, Application, WindowOptions};
 use smart_clipboard_proto::{contract, ServiceLocation};
 
 fn main() {
