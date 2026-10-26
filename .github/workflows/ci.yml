@@ -228,12 +228,12 @@ jobs:
           echo "::notice::formatting patch is $(gzip -dc /tmp/fmt.gz | wc -c) bytes"
           # Chunks are cut from the *base64* stream in multiples of 4, so each
           # chunk decodes on its own and the concatenation decodes as a whole.
-          base64 -w0 < /tmp/fmt.gz | fold -w 2400 > /tmp/fmt.b64.
+          base64 -w0 < /tmp/fmt.gz | fold -w 2400 > /tmp/fmt.b64
           index=0
-          for part in /tmp/fmt.b64.*; do
+          while IFS= read -r chunk; do
             index=$((index + 1))
-            echo "::error::FMTCHUNK $(printf '%03d' "$index") $part"
-          done
+            echo "::error::FMTCHUNK $(printf '%03d' "$index") $chunk"
+          done < /tmp/fmt.b64
       - name: The engine still forbids shellouts
         run: |
           # Key principle #1: zero process spawns outside tests. The clipboard
