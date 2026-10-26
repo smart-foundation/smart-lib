@@ -30,6 +30,11 @@ resolver = "2"
 # in-process (the corrected architecture: the shell embeds its engine via the
 # per-domain trait object, exactly as the original shell did).
 members = ["crates/shell"]
+# The products are contract clients, not engine components. Each is its own
+# workspace (gpui's and capnp-rpc's dependency trees must never land on the
+# engine's build), and they are excluded so `cargo build` here stays the
+# engine's build. Their builds are `cd crates/smart-clipboard && cargo build`.
+exclude = ["crates/smart-clipboard", "crates/smart-clipboard-proto"]
 
 [lib]
 name = "smart_lib"

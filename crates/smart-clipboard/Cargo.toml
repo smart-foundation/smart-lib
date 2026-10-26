@@ -1,0 +1,50 @@
+# smart-clipboard — the desktop product.
+#
+# A gpui application whose entire job is to *render* what a smart-protocol
+# service says about the clipboard, and to ask that service to hold a copy
+# again. It owns no clipboard backend, no selection transport, no history
+# ledger and no database: those belong to whichever backend the service serves,
+# and the app learns about them only through `clipboard.capnp`.
+#
+# The protocol half lives in `../smart-clipboard-proto` so it can be tested
+# and reused (headless, an agent, a future CLI) without a GPU.
+
+[package]
+name = "smart-clipboard"
+version = "0.1.0"
+edition = "2021"
+description = "The smart-clipboard desktop app: a gpui window over the smart-protocol clipboard contract."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Its own workspace: gpui is a large dependency tree with its own platform
+# requirements, and the engine's build must never pay for it (charter law #10:
+# on this box a stray heavyweight build is how a machine falls over).
+[workspace]
+
+[[bin]]
+name = "smart-clipboard"
+path = "src/main.rs"
+
+[dependencies]
+# gpui is published (0.2.2). If the published crate lags behind the platform
+# fixes this app needs, pin the git revision instead:
+#   gpui = { git = "https://github.com/zed-industries/zed", rev = "<sha>" }
+gpui = { version = "0.2.2", features = ["x11", "wayland"] }
+# Must be the same `image` major that gpui uses: `RenderImage::new` takes an
+# `image::Frame`, so a version skew would be a type error at the seam where a
+# decoded screenshot becomes a drawable.
+image = { version = "0.25", default-features = true }
+smart-clipboard-proto = { path = "../smart-clipboard-proto" }
+async-channel = "2"
+# `RenderImage::new` takes a `SmallVec<[image::Frame; 1]>`; spell that the way
+# gpui does rather than relying on an array conversion.
+smallvec = "1"
+
+[profile.dev]
+# gpui's dependency tree is large; a debug build of it is unusably slow to
+# launch. Dependencies optimised, our code still debuggable.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

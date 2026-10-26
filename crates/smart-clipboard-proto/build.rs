@@ -1,0 +1,100 @@
+//! Compile the contract's own schemas for the client half.
+//!
+//! The app compiles the contract itself rather than importing the engine's
+//! generated types. That is the decoupling rule in one line: a product speaks
+//! schemas, not a library's internals. If `smart-lib` changed its private
+//! types tomorrow, this crate's build would not notice — because it never
+//! reads them.
+//!
+//! Four files, and only four: the domain this product exists for, the two
+//! foundation surfaces it must speak to reach it (discovery, capability) and
+//! their shared `types.capnp`. Everything else in the 89-schema contract is
+//! deliberately not compiled here; a clipboard app that compiled the whole
+//! tree would be paying for domains it will never call (charter law #2, and
+//! law #11 for the build box).
+//!
+//! ## Schema resolution
+//!
+//! Same candidate order as the engine's `build.rs`, so one checkout works for
+//! both halves:
+//!
+//! 1. `$SMART_SCHEMA_DIR` — hermetic/vendored builds, and CI;
+//! 2. `<this crate>/../../../smart-protocol-official/schema` — the layout the
+//!    workspace lives in;
+//! 3. `/home/lufuno/smart/smart-protocol-official/schema` — the canonical
+//!    tree on the founder's box.
+//!
+//! The resolution is *reported*: the generated module carries the resolved
+//! path, and the app's About panel shows the schema triple it was built
+//! against. A client that cannot say which contract it speaks has no business
+//! claiming to speak it.
+
+use std::path::{Path, PathBuf};
+
+/// The schemas this product speaks. Order matters only for readability.
+const SCHEMAS: [&str; 4] = [
+    "types.capnp",
+    "capability.capnp",
+    "discovery.capnp",
+    "clipboard.capnp",
+];
+
+fn main() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    let schema_dir = schema_dir(&manifest_dir);
+
+    let mut command = capnpc::CompilerCommand::new();
+    command.src_prefix(&schema_dir);
+    for schema in SCHEMAS {
+        let path = schema_dir.join(schema);
+        assert!(
+            path.is_file(),
+            "build.rs: the contract schema {} is missing (resolved schema dir: {})",
+            schema,
+            schema_dir.display()
+        );
+        println!("cargo:rerun-if-changed={}", path.display());
+        command.file(path);
+    }
+    command
+        .run()
+        .expect("build.rs: the contract's schemas must compile with the pinned capnpc");
+
+    // The identity of the contract this binary was built against. Shown in
+    // the app's About panel; logged when a service publishes a different
+    // schema id (see `contract::SCHEMA_DRIFT`).
+    println!(
+        "cargo:rustc-env=SMART_CLIPBOARD_SCHEMA_DIR={}",
+        schema_dir.display()
+    );
+    println!("cargo:rerun-if-env-changed=SMART_SCHEMA_DIR");
+    println!("cargo:rerun-if-env-changed=CAPNP");
+}
+
+/// Resolve the canonical schema tree, in the documented order.
+fn schema_dir(manifest_dir: &Path) -> PathBuf {
+    let candidates = match std::env::var_os("SMART_SCHEMA_DIR") {
+        Some(dir) => vec![PathBuf::from(dir)],
+        None => vec![
+            manifest_dir.join("../../../smart-protocol-official/schema"),
+            manifest_dir.join("../smart-protocol-official/schema"),
+            PathBuf::from("/home/lufuno/smart/smart-protocol-official/schema"),
+        ],
+    };
+    for candidate in &candidates {
+        if let Ok(dir) = candidate.canonicalize() {
+            if dir.is_dir() {
+                return dir;
+            }
+        }
+    }
+    let tried: Vec<String> = candidates
+        .iter()
+        .map(|candidate| candidate.display().to_string())
+        .collect();
+    panic!(
+        "build.rs: cannot find the smart-protocol schema tree. Tried:\n  {}\n\
+         Set SMART_SCHEMA_DIR to the contract's `schema/` directory.",
+        tried.join("\n  ")
+    );
+}

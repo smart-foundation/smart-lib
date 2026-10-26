@@ -56,6 +56,22 @@ cargo test -j6 -p shell --test network_cmd
 
 The shell's presentation (tables, glyphs, truncation) is being ported to smart-cli's presenter framework.
 
+## Products (the first one)
+
+`crates/smart-clipboard/` is the first finished domain made into a product: a
+gpui desktop app that is a **pure client** of the clipboard contract. It reads
+history, previews and payloads from whatever service serves `clipboard.capnp`,
+searches them, and asks the service to hold an item again. It owns no clipboard
+backend, no selection transport and no store — it never writes a byte to disk.
+
+`crates/smart-clipboard-proto/` is its contract client (discovery → clipboard →
+capability), with no engine and no gpui, so it can be tested headless and reused.
+Both crates are their own workspaces and are excluded from this one: the engine's
+build never pays for a product's dependency tree.
+
+The specification — UX, wireframes, layout rationale, states, accessibility —
+is `knowledge/30-smart-clipboard-app.md`.
+
 ## Key principles
 
 1. **No shellouts.** Zero `Command::new` outside tests. Every backend reads the native mechanism.
