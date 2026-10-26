@@ -29,12 +29,11 @@ env:
   PROTOCOL_SHA: 9175b06bb7b2ddee87af4dd12aa02f07a4d3402f
   DAEMON_FEATURES: std,rpc,domain-clipboard,domain-database,domain-discovery
 
-# A push does NOT cancel the run in flight. The app job is a twenty-minute gpui
-# build, and cancelling it also throws away the cache it would have saved — which
-# makes every subsequent push start from zero. Waiting is cheaper than losing it.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: false
+# No concurrency group on purpose. Cancelling a run in flight throws away the
+# cache its twenty-minute gpui build would have saved, and *serialising* runs is
+# worse: the run that would tell you what is wrong waits behind the run that is
+# already wrong. Two builds in parallel cost a little CI time and save a lot of
+# human time.
 
 jobs:
   daemon:
