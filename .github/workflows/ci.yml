@@ -19,7 +19,10 @@ on:
   workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
+  # `always` wraps `error[E0277]:` in escape codes, which turns a log into
+  # something no pattern (and no annotation) can read. `never` keeps failures
+  # greppable.
+  CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   # The protocol tree the build compiles. Pinned; see scripts/ci-fetch-schemas.sh.
   PROTOCOL_REPO: https://github.com/smart-foundation/smart-protocol-official

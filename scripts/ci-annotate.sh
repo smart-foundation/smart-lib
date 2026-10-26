@@ -12,9 +12,13 @@
 set -u
 
 LOG=$(mktemp)
+CLEAN=$(mktemp)
 "$@" >"$LOG" 2>&1
 STATUS=$?
 cat "$LOG"
+# Strip ANSI colour: `CARGO_TERM_COLOR=always` is useful in the log and fatal to
+# any pattern that expects `error[E0277]:` to start a line.
+sed 's/\x1b\[[0-9;]*m//g' "$LOG" > "$CLEAN"
 
 if [ "$STATUS" -ne 0 ]; then
     printf '::error::the command failed: %s\n' "$*"
@@ -28,13 +32,13 @@ if [ "$STATUS" -ne 0 ]; then
             else { buf = buf " | " $0 }
         }
         END { if (inblock) print buf }
-    ' "$LOG" | head -25 | while IFS= read -r line; do
+    ' "$CLEAN" | head -25 | while IFS= read -r line; do
         printf '::error::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-900)"
     done
     # The last lines name the failing crate and target.
-    tail -6 "$LOG" | while IFS= read -r line; do
+    tail -6 "$CLEAN" | while IFS= read -r line; do
         printf '::error::%s\n' "$(printf '%s' "$line" | tr -d '\r' | sed 's/%/%25/g' | cut -c1-400)"
     done
 fi
-rm -f "$LOG"
+rm -f "$LOG" "$CLEAN"
 exit "$STATUS"
