@@ -42,7 +42,15 @@ async-channel = "2"
 # A contract-only client test needs *something* on the far side. The engine is
 # a dev-dependency only: it is used to serve a mock backend over a unix socket
 # in `tests/`, never linked into a shipped product binary.
-smart-lib = { path = "../..", features = ["rpc", "std", "domain-clipboard"] }
+# `default-features = false` is the same line the daemon uses: the client test
+# needs the clipboard domain and the wire, not the engine's default domains
+# (whose native seams pull host libraries a test box may not have).
+smart-lib = { path = "../..", default-features = false, features = [
+    "rpc",
+    "std",
+    "domain-clipboard",
+    "domain-discovery",
+] }
 
 [build-dependencies]
 capnpc = "0.27.0"
