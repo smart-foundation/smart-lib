@@ -176,7 +176,7 @@ jobs:
           # twenty-minute build gets to it. Annotations are the only channel
           # whose text survives this host, so the answer is emitted as one.
           cargo generate-lockfile
-          cargo tree --invert xattr --depth 4 2>&1 | head -8 | while IFS= read -r line; do
+          cargo tree --invert xattr --depth 4 2>/dev/null | head -8 | while IFS= read -r line; do
             echo "::error::xattr => $line"
           done
 
