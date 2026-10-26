@@ -27,11 +27,19 @@ JOB=$(gh api "repos/$REPO/actions/runs/$RUN/jobs" \
 [ -n "$JOB" ] || { printf 'run %s has no hygiene job\n' "$RUN" >&2; exit 1; }
 
 PATCH=$(mktemp)
+# Annotations come back newest-first, and a patch is worthless out of order, so
+# the chunk number is the sort key.
 gh api --paginate "repos/$REPO/check-runs/$JOB/annotations" \
     -q '.[] | .message' \
-    | sed -n 's/^FMTCHUNK [0-9]* //p' \
-    | while IFS= read -r chunk; do printf '%s' "$chunk" | base64 -d 2>/dev/null || true; done \
-    > "$PATCH"
+    | sed -n 's/^FMTCHUNK \([0-9]*\) /\1 /p' \
+    | sort -n -k1,1 \
+    | while read -r number chunk; do
+        printf '%s' "$chunk"
+    done > "$PATCH.b64"
+# The chunks are base64 of a gzip stream, concatenated in order: decode once,
+# decompress once.
+base64 -d < "$PATCH.b64" | gzip -dc > "$PATCH"
+rm -f "$PATCH.b64"
 
 if [ ! -s "$PATCH" ]; then
     printf 'run %s published no formatting patch (the tree was already formatted)\n' "$RUN"

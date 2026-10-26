@@ -222,13 +222,17 @@ jobs:
             echo "::notice::the tree is already formatted"
             exit 0
           fi
-          git diff > /tmp/fmt.patch
-          echo "::notice::formatting patch is $(wc -c < /tmp/fmt.patch) bytes"
-          split -b 3000 /tmp/fmt.patch /tmp/fmt.part.
+          # gzip first: a diff of whitespace changes compresses ~5×, and every
+          # byte saved is an annotation that cannot be clipped.
+          git diff | gzip -9 > /tmp/fmt.gz
+          echo "::notice::formatting patch is $(gzip -dc /tmp/fmt.gz | wc -c) bytes"
+          # Chunks are cut from the *base64* stream in multiples of 4, so each
+          # chunk decodes on its own and the concatenation decodes as a whole.
+          base64 -w0 < /tmp/fmt.gz | fold -w 2400 > /tmp/fmt.b64.
           index=0
-          for part in /tmp/fmt.part.*; do
+          for part in /tmp/fmt.b64.*; do
             index=$((index + 1))
-            echo "::error::FMTCHUNK $(printf '%03d' "$index") $(base64 -w0 < "$part")"
+            echo "::error::FMTCHUNK $(printf '%03d' "$index") $part"
           done
       - name: The engine still forbids shellouts
         run: |
