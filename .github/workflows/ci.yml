@@ -208,6 +208,28 @@ jobs:
           components: rustfmt
       - name: rustfmt
         run: ./scripts/ci-annotate.sh cargo fmt --all -- --check
+
+      # `--check` says *that* the tree is unformatted; this says *what* the
+      # formatter would write, so the fix can be applied without a local
+      # rustfmt. The patch rides the annotations (one base64 chunk each),
+      # because a step log is not readable from a restricted network and an
+      # artifact is not either. `scripts/ci-apply-fmt.sh` reassembles it.
+      - name: Publish the formatting patch
+        if: failure() || success()
+        run: |
+          cargo fmt --all || true
+          if git diff --quiet; then
+            echo "::notice::the tree is already formatted"
+            exit 0
+          fi
+          git diff > /tmp/fmt.patch
+          echo "::notice::formatting patch is $(wc -c < /tmp/fmt.patch) bytes"
+          split -b 3000 /tmp/fmt.patch /tmp/fmt.part.
+          index=0
+          for part in /tmp/fmt.part.*; do
+            index=$((index + 1))
+            echo "::error::FMTCHUNK $(printf '%03d' "$index") $(base64 -w0 < "$part")"
+          done
       - name: The engine still forbids shellouts
         run: |
           # Key principle #1: zero process spawns outside tests. The clipboard
