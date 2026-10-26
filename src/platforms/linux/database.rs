@@ -603,12 +603,18 @@ pub mod tests {
             b.set("ns", "k", alloc::format!("value-{round}").as_bytes()).expect("set");
         }
         assert_eq!(b.get("ns", "k").expect("get"), b"value-399".to_vec());
+        // Compaction fires when the journal passes `4 × live + 64` frames, so
+        // the file at rest holds at most that many frames of the live set — not
+        // the 400 that were written. One frame here is ~25 bytes.
         let bytes = b.journal_bytes();
+        let written = 400 * 25;
         assert!(
-            bytes.len() < 512,
-            "the journal compacted to the live set, got {} bytes",
-            bytes.len()
+            bytes.len() < 2500 && bytes.len() < written / 2,
+            "the journal compacted towards the live set: {} bytes for {} bytes written",
+            bytes.len(),
+            written
         );
+        assert!(bytes.len() > 0, "the live key is still on disk");
         drop(b);
         let reopened = LinuxDatabaseBackend::persistent(&root).expect("reopen");
         assert_eq!(reopened.get("ns", "k").expect("get"), b"value-399".to_vec());
