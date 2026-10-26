@@ -35,15 +35,16 @@ use smart_clipboard_proto::{
     Candidate, ClientError, ClipboardClient, EndpointSource, ItemId, PreviewState, Query,
     RefusalClass, ServiceLocation,
 };
+use smart_lib::core::ids::{ClipboardId, ClipboardSourceId};
 use smart_lib::core::Result as EngineResult;
 use smart_lib::domains::clipboard::{
-    ClipboardBackend, ClipboardContent, ClipboardId, ClipboardItem, ClipboardPreview,
-    ClipboardSizeLimits, ClipboardSourceId, ContentOutcome, Page as EnginePage, Pagination,
-    PreviewOutcome,
+    ClipboardBackend, ClipboardContent, ClipboardItem, ClipboardPreview, ClipboardSizeLimits,
+    ContentOutcome, Page as EnginePage, Pagination, PreviewOutcome,
 };
 use smart_lib::serve::clipboard::ClipboardDomain;
 use smart_lib::serve::service::{serve_connection, Service};
 use smart_lib::serve::CapabilityClass;
+use smart_lib::transport::channel::ChannelListener;
 use smart_lib::transport::unix::UnixListener;
 
 /// A backend with two entries and no host access at all: the test is about
