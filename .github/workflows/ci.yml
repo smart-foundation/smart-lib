@@ -259,8 +259,8 @@ jobs:
       - name: The engine still forbids shellouts
         run: |
           # Key principle #1: zero process spawns outside tests. The clipboard
-          # domain replaces wl-paste/xclip, so this is the grep that proves it.
-          if grep -rn 'Command::new' src/ | grep -v '^src/codegen/' | grep -v '^src/bin/'; then
-            echo '::error::a shellout appeared outside the schema codegen'
-            exit 1
-          fi
+          # domain replaces wl-paste/xclip, so this is what proves it. A plain
+          # grep cannot: the tree is full of comments explaining the spawns it
+          # does *not* make, and the tests legitimately start a child to have a
+          # process to observe. The script knows the difference.
+          python3 scripts/check-no-shellouts.py
