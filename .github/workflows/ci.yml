@@ -194,7 +194,7 @@ jobs:
         with:
           components: rustfmt
       - name: rustfmt
-        run: cargo fmt --all -- --check
+        run: ./scripts/ci-annotate.sh cargo fmt --all -- --check
       - name: The engine still forbids shellouts
         run: |
           # Key principle #1: zero process spawns outside tests. The clipboard

@@ -261,7 +261,7 @@ impl<'a> ClipboardClient<'a> {
                 }
             }
         };
-        use crate::schema::clipboard_capnp::get_preview_results::result::WhichReader;
+        use crate::schema::clipboard_capnp::preview_result::WhichReader;
         match union.which() {
             Ok(WhichReader::Preview(reader)) => {
                 self.session.service.note_answered("getPreview");
@@ -283,6 +283,9 @@ impl<'a> ClipboardClient<'a> {
                         .to_string(),
                 }
             }
+            Ok(WhichReader::Error(error)) => PreviewState::Failed {
+                message: text_of(error.get_message()),
+            },
             Err(error) => PreviewState::Failed {
                 message: format!("getPreview union: {error}"),
             },
@@ -316,7 +319,7 @@ impl<'a> ClipboardClient<'a> {
         let union = results
             .get_result()
             .map_err(|error| ClientError::Decode(format!("convertContent result: {error}")))?;
-        use crate::schema::clipboard_capnp::convert_content_results::result::WhichReader;
+        use crate::schema::clipboard_capnp::conversion_result::WhichReader;
         match union.which() {
             Ok(WhichReader::Content(reader)) => {
                 let (mime, bytes) = read_content(&reader);
@@ -325,6 +328,13 @@ impl<'a> ClipboardClient<'a> {
             Ok(WhichReader::Unsupported(())) => Ok(Representation::Unsupported {
                 target: mime.to_string(),
             }),
+            Ok(WhichReader::Error(error)) => Err(ClientError::Refused(Refusal::from_reason_text(
+                "convertContent",
+                &text_of(error.get_message()),
+            ))),
+            Ok(WhichReader::Unknown(())) => Err(ClientError::Decode(
+                "convertContent: the service answered `unknown`".to_string(),
+            )),
             Err(error) => Err(ClientError::Decode(format!(
                 "convertContent union: {error}"
             ))),
@@ -468,7 +478,7 @@ impl<'a> ClipboardClient<'a> {
             .get_result()
             .map_err(|error| ClientError::Decode(format!("getContent result: {error}")))?;
         self.session.service.note_answered("getContent");
-        use crate::schema::clipboard_capnp::get_content_results::result::WhichReader;
+        use crate::schema::clipboard_capnp::content_result::WhichReader;
         match union.which() {
             Ok(WhichReader::Content(reader)) => {
                 let (mime, bytes) = read_content(&reader);
@@ -481,6 +491,13 @@ impl<'a> ClipboardClient<'a> {
                 })
             }
             Ok(WhichReader::Empty(())) => Ok(LiveContent::Empty),
+            Ok(WhichReader::Error(error)) => Err(ClientError::Refused(Refusal::from_reason_text(
+                "getContent",
+                &text_of(error.get_message()),
+            ))),
+            Ok(WhichReader::Unknown(())) => Err(ClientError::Decode(
+                "getContent: the service answered `unknown`".to_string(),
+            )),
             Err(error) => Err(ClientError::Decode(format!(
                 "getContent union: {error}"
             ))),

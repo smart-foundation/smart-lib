@@ -60,6 +60,19 @@ fn main() {
         .run()
         .expect("build.rs: the contract's schemas must compile with the pinned capnpc");
 
+    // capnpc emits `crate::<stem>_capnp` paths, assuming the generated modules
+    // sit at the crate root. This crate keeps them under `schema` (so a reader
+    // can tell generated code from hand-written code at a glance), which is the
+    // same arrangement the engine uses — so the same rewrite applies, and it is
+    // done *here* rather than by moving the modules, because a product should not
+    // reshape the contract's own output.
+    rewrite_paths(&std::env::var("OUT_DIR").expect("OUT_DIR"), &[
+        "types_capnp",
+        "capability_capnp",
+        "discovery_capnp",
+        "clipboard_capnp",
+    ]);
+
     // The identity of the contract this binary was built against. Shown in
     // the app's About panel; logged when a service publishes a different
     // schema id (see `contract::SCHEMA_DRIFT`).
@@ -69,6 +82,40 @@ fn main() {
     );
     println!("cargo:rerun-if-env-changed=SMART_SCHEMA_DIR");
     println!("cargo:rerun-if-env-changed=CAPNP");
+}
+
+/// Point the generated modules' `crate::<stem>_capnp` paths at `crate::schema`.
+///
+/// A plain string replacement over the crate's own four stems: the set is
+/// closed, the stems are known, and a regex would be a dependency for no gain.
+/// Each replacement is skip-safe because the search text is the unprefixed form
+/// and the replacement inserts the prefix exactly once.
+fn rewrite_paths(out_dir: &str, stems: &[&str]) {
+    let entries = match std::fs::read_dir(out_dir) {
+        Ok(entries) => entries,
+        Err(error) => panic!("build.rs: cannot read {out_dir}: {error}"),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else { continue };
+        let mut rewritten = source.clone();
+        for stem in stems {
+            let from = format!("crate::{stem}");
+            let to = format!("crate::schema::{stem}");
+            // `crate::schema::types_capnp` must not become
+            // `crate::schema::schema::types_capnp`, so the search text is
+            // anchored on the *unprefixed* form and only unprefixed occurrences
+            // are replaced.
+            rewritten = rewritten.replace(&from, &to).replace("crate::schema::schema::", "crate::schema::");
+        }
+        if rewritten != source {
+            std::fs::write(&path, rewritten)
+                .unwrap_or_else(|error| panic!("build.rs: cannot rewrite {}: {error}", path.display()));
+        }
+    }
 }
 
 /// Resolve the canonical schema tree, in the documented order.
