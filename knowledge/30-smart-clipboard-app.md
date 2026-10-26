@@ -607,7 +607,11 @@ git clone https://github.com/smart-foundation/smart-protocol-official ../smart-p
 ./scripts/doctor.sh     # every check, with the exact fix for the one that failed
 ```
 
-`install.sh` builds `smart-service` with `std,rpc,domain-clipboard,domain-database`,
+`install.sh` builds `smart-service` with
+`std,rpc,domain-clipboard,domain-database,domain-discovery` (`--no-default-features`:
+the daemon serves the clipboard and the store its history lives in, and nothing
+else, so it never links the domains whose native seams need a bus or an audio
+daemon),
 installs it to `$PREFIX/bin` (default `~/.local/bin`), writes a **systemd user
 unit** that starts with the graphical session and restarts on exit, installs the
 app and its desktop entry, and then prints the four checks that prove it works
@@ -619,7 +623,8 @@ records, so the app is skipped *with its own retry command*, never silently.
 
 ```bash
 ./scripts/ci-fetch-schemas.sh                       # pinned protocol commit
-cargo build --release --bin smart-service --features std,rpc,domain-clipboard,domain-database
+cargo build --release --bin smart-service --no-default-features \
+    --features std,rpc,domain-clipboard,domain-database,domain-discovery
 ./target/release/smart-service                      # $XDG_RUNTIME_DIR/smart/service.sock
 cd crates/smart-clipboard && cargo run --release
 ```

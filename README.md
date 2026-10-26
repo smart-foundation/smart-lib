@@ -75,7 +75,8 @@ history in a `database.kv` journal under `$XDG_STATE_HOME/smart/database` so it
 survives a restart, and serves each client connection on its own thread.
 
 ```bash
-cargo build --release --bin smart-service --features std,rpc,domain-clipboard,domain-database
+cargo build --release --bin smart-service --no-default-features \
+    --features std,rpc,domain-clipboard,domain-database,domain-discovery
 ./target/release/smart-service --help
 ```
 
