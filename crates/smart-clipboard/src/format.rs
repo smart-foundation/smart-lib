@@ -318,8 +318,11 @@ mod tests {
             pinned: false,
             size_bytes: 1434,
         };
+        // `row_meta` takes "now" in nanoseconds, so ten seconds later is
+        // 10_000_000_000 ns, not 10_000_000 — the earlier figure was ten
+        // *milliseconds*, which the formatter correctly called "just now".
         assert_eq!(
-            row_meta(&item, 1_010_000_000),
+            row_meta(&item, 11_000_000_000),
             "text/plain · 1.4 KB · 10s ago"
         );
         assert_eq!(item_summary(&item), "#7 · text/plain · 1.4 KB");
