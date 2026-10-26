@@ -852,6 +852,7 @@ impl InspectorView {
             .child(tabs)
             .child(
                 div()
+                    .id("inspector-scroll")
                     .flex_1()
                     .w_full()
                     .overflow_y_scroll()

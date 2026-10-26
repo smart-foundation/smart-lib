@@ -61,7 +61,7 @@ impl PaletteView {
     pub fn new(app: Entity<ClipboardApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let observed = cx.observe(&app, |_, _, cx| cx.notify());
-        window.focus(&focus, cx);
+        window.focus(&focus);
         app.update(cx, |app, cx| {
             let effects = app.store.request_missing_previews();
             app.dispatch(effects);

@@ -38,7 +38,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    div, img, px, uniform_list, AnyElement, ClickEvent, Context, Div, Entity, FocusHandle,
+    div, img, px, uniform_list, AnyElement, AppContext, ClickEvent, Context, Div, Entity, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, StyledImage, Subscription, Window,
 };
@@ -70,7 +70,7 @@ impl LibraryView {
             let app = app.clone();
             cx.new(|cx| InspectorView::new(app, cx))
         };
-        window.focus(&focus, cx);
+        window.focus(&focus);
         // The first thing the app does is connect, once, from the view that
         // is guaranteed to exist.
         app.update(cx, |app, _| app.connect());
@@ -192,7 +192,7 @@ impl LibraryView {
             }
             "k" if command => {
                 open_palette(&self.app, cx);
-                window.focus(&self.focus, cx);
+                window.focus(&self.focus);
             }
             "f" if command => {
                 self.app.update(cx, |app, cx| {
@@ -227,7 +227,7 @@ impl LibraryView {
             let app = self.app.read(cx);
             (
                 app.store.query.clone(),
-                self.focus.is_focused(cx),
+                self.focus.is_focused(window),
                 app.store.layout,
             )
         };
@@ -309,7 +309,7 @@ impl LibraryView {
             .child(ui::button(theme, "palette", "Palette", ui::ButtonKind::Primary).on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| {
                     open_palette(&this.app, cx);
-                    window.focus(&this.focus, cx);
+                    window.focus(&this.focus);
                 }),
             ))
     }
@@ -509,7 +509,7 @@ impl LibraryView {
             .flex_1()
             .h_full()
             .overflow_hidden()
-            .child(list_header_strip(theme, &label, sort))
+            .child(list_header_strip(theme, &label, sort, local.as_deref()))
             .child(div().flex_1().w_full().overflow_hidden().child(body))
             .child(self.list_footer(theme, cx))
             .into_any_element()
@@ -803,6 +803,10 @@ impl LibraryView {
             )
             .child(
                 div()
+                    // `load more` is a click target, so it is stateful: without
+                    // an id gpui has nothing to hang the handler (or the hover
+                    // response) on.
+                    .id("library-load-more")
                     .text_size(px(Type::MICRO))
                     .text_color(if exhausted {
                         theme.text_faint
