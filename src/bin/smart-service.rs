@@ -60,7 +60,7 @@ use smart_lib::serve::clipboard::ClipboardDomain;
 use smart_lib::serve::clipboard_archive::DatabaseArchive;
 use smart_lib::serve::database::DatabaseDomain;
 use smart_lib::serve::discovery::PublishedEndpoint;
-use smart_lib::serve::service::{serve_connection, Service};
+use smart_lib::serve::service::{serve_connection, Service, ServedDomain};
 use smart_lib::serve::classify;
 use smart_lib::transport::registry::{TransportRegistry, TransportRequest};
 
