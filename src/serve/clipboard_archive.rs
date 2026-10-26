@@ -73,7 +73,7 @@ pub struct DatabaseArchive<D> {
 
 impl<D> DatabaseArchive<D>
 where
-    D: DatabaseBackend + 'static,
+    D: DatabaseBackend + Send + Sync + 'static,
 {
     /// An archive over the `clipboard.history` namespace.
     pub fn new(database: Arc<D>) -> Self {
@@ -101,7 +101,9 @@ where
 
 impl<D> HistoryArchive for DatabaseArchive<D>
 where
-    D: DatabaseBackend + 'static,
+    // `Send + Sync` because the trait promises it: one archive is handed to the
+    // served backend *and* to the selection watcher.
+    D: DatabaseBackend + Send + Sync + 'static,
 {
     fn load(&self) -> Result<Vec<ArchivedItem>> {
         let (keys, _total) = self.database.list_keys(&self.namespace, "", Self::page_all())?;
@@ -269,7 +271,7 @@ pub fn archive_unavailable_reason() -> String {
 /// backend, or say why not.
 pub fn open_archive<D>(database: Arc<D>) -> Result<DatabaseArchive<D>>
 where
-    D: DatabaseBackend + 'static,
+    D: DatabaseBackend + Send + Sync + 'static,
 {
     // Reading the namespace is the only way to find out the store is unusable,
     // so probe it now rather than at the first copy.

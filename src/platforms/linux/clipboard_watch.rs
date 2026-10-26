@@ -44,7 +44,8 @@
 
 extern crate std;
 
-use alloc::string::String;
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

@@ -243,6 +243,12 @@ pub trait ClipboardBackend {
 ///
 /// The impl is a thin delegation of every method, so a caller cannot tell a
 /// shared backend from a plain one, and no behaviour lives here.
+// This module is part of the no_std core, so `std` is not linked for it: the
+// sharing impl is the one place it needs a thread primitive, and it is gated on
+// the feature that links std at all.
+#[cfg(feature = "std")]
+extern crate std;
+
 #[cfg(feature = "std")]
 impl<T> ClipboardBackend for std::sync::Mutex<T>
 where
