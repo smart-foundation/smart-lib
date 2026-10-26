@@ -366,7 +366,7 @@ impl<'a> ClipboardClient<'a> {
         let results = response
             .get()
             .map_err(|error| ClientError::Decode(format!("setContent results: {error}")))?;
-        let outcome = check_void("setContent", results.get_result());
+        let outcome = check_void("setContent", results);
         self.note_outcome("setContent", &outcome);
         outcome
     }
@@ -390,7 +390,7 @@ impl<'a> ClipboardClient<'a> {
         let results = response
             .get()
             .map_err(|error| ClientError::Decode(format!("setOffer results: {error}")))?;
-        let outcome = check_void("setOffer", results.get_result());
+        let outcome = check_void("setOffer", results);
         self.note_outcome("setOffer", &outcome);
         outcome
     }
@@ -408,7 +408,7 @@ impl<'a> ClipboardClient<'a> {
             let results = response
                 .get()
                 .map_err(|error| ClientError::Decode(format!("pinItem results: {error}")))?;
-            let outcome = check_void("pinItem", results.get_result());
+            let outcome = check_void("pinItem", results);
             self.note_outcome("pinItem", &outcome);
             outcome
         } else {
@@ -422,7 +422,7 @@ impl<'a> ClipboardClient<'a> {
             let results = response
                 .get()
                 .map_err(|error| ClientError::Decode(format!("unpinItem results: {error}")))?;
-            let outcome = check_void("unpinItem", results.get_result());
+            let outcome = check_void("unpinItem", results);
             self.note_outcome("unpinItem", &outcome);
             outcome
         }
@@ -440,7 +440,7 @@ impl<'a> ClipboardClient<'a> {
         let results = response
             .get()
             .map_err(|error| ClientError::Decode(format!("deleteItem results: {error}")))?;
-        let outcome = check_void("deleteItem", results.get_result());
+        let outcome = check_void("deleteItem", results);
         self.note_outcome("deleteItem", &outcome);
         outcome
     }
@@ -452,7 +452,7 @@ impl<'a> ClipboardClient<'a> {
         let results = response
             .get()
             .map_err(|error| ClientError::Decode(format!("clearHistory results: {error}")))?;
-        let outcome = check_void("clearHistory", results.get_result());
+        let outcome = check_void("clearHistory", results);
         self.note_outcome("clearHistory", &outcome);
         outcome
     }
@@ -565,7 +565,12 @@ impl<'a> ClipboardClient<'a> {
                     .get_source_id()
                     .map(|source| source.get_id())
                     .unwrap_or_default(),
-                kind: match change.get_event_type().unwrap_or_default() {
+                // An event type this build does not know is reported as
+                // `custom`, the contract's own word for "something else".
+                kind: match change
+                    .get_event_type()
+                    .unwrap_or(crate::schema::clipboard_capnp::ClipboardEventType::Custom)
+                {
                     crate::schema::clipboard_capnp::ClipboardEventType::Copied => ChangeKind::Copied,
                     crate::schema::clipboard_capnp::ClipboardEventType::Pasted => ChangeKind::Pasted,
                     crate::schema::clipboard_capnp::ClipboardEventType::Cleared => {

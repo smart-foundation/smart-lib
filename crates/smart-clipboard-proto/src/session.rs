@@ -47,6 +47,7 @@ use crate::error::ClientError;
 use crate::model::{Authority, CapabilityRow, ServiceInfo};
 use crate::schema::capability_capnp::capability_service;
 use crate::schema::discovery_capnp::discovery;
+use crate::schema::discovery_capnp::ServiceState;
 
 /// How long the app waits for a socket to accept before moving to the next
 /// candidate. A live local socket accepts in microseconds; anything near this
@@ -214,7 +215,7 @@ impl Session {
             name: text_of(descriptor.get_name()),
             category: text_of(descriptor.get_category()),
             schema_id,
-            state: state_token(descriptor.get_state().unwrap_or_default()),
+            state: state_token(descriptor.get_state().unwrap_or(ServiceState::Unknown)),
             endpoints,
             metadata,
             schema_matches_app: schema_id == contract::EXPECTED_CLIPBOARD_SCHEMA_ID,
@@ -274,7 +275,12 @@ impl Session {
             let mut operations = Vec::new();
             if let Ok(list) = capability.get_operations() {
                 for operation in list.iter() {
-                    operations.push(operation_token(operation));
+                    // An ordinal this build does not know is still a fact worth
+                    // showing: it means the service serves a newer contract.
+                    operations.push(match operation {
+                        Ok(operation) => operation_token(operation),
+                        Err(_) => "unrecognised".to_string(),
+                    });
                 }
             }
             let issuer = capability
