@@ -224,7 +224,12 @@ jobs:
           cargo fmt --manifest-path crates/smart-clipboard/Cargo.toml || true
           git diff -- crates/smart-clipboard crates/smart-clipboard-proto | gzip -9 > /tmp/fmt.gz
           echo "::notice::formatting patch is $(gzip -dc /tmp/fmt.gz | wc -c) bytes"
-          base64 -w0 < /tmp/fmt.gz | fold -w 6000 > /tmp/fmt.b64
+          # 2 000 characters per chunk: GitHub clips a single annotation's
+          # message well below its documented limit (4 083 arrived out of 6 000),
+          # and a clipped base64 chunk is a corrupt patch. The count notice below
+          # lets the applier refuse rather than half-apply.
+          gzip -t /tmp/fmt.gz
+          base64 -w0 < /tmp/fmt.gz | fold -w 2000 > /tmp/fmt.b64
           total=$(wc -l < /tmp/fmt.b64)
           echo "::notice::FMTCHUNKS $total"
           index=0

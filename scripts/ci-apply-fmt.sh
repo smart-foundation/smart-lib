@@ -40,7 +40,7 @@ gh api --paginate "repos/$REPO/check-runs/$JOB/annotations" \
     | sed -n 's/^FMTCHUNK \([0-9]*\) /\1 /p' \
     | sort -n -k1,1 \
     | while read -r number chunk; do
-        printf '%s' "$chunk"
+        printf '%s\n' "$chunk"
     done > "$PATCH.b64"
 GOT=$(wc -l < "$PATCH.b64")
 if [ -n "${EXPECTED:-}" ] && [ "$GOT" -ne "$EXPECTED" ]; then
