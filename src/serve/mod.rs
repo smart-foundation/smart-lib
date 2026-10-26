@@ -79,6 +79,10 @@ pub mod stream;
 
 #[cfg(feature = "domain-clipboard")]
 pub mod clipboard;
+/// The clipboard history's durable home: the `database.kv`-backed archive the
+/// composition root wires into a served clipboard backend.
+#[cfg(all(feature = "domain-clipboard", feature = "domain-database"))]
+pub mod clipboard_archive;
 #[cfg(feature = "domain-clock")]
 pub mod clock;
 #[cfg(feature = "domain-files")]

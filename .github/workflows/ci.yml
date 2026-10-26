@@ -1,0 +1,266 @@
+name: ci
+
+# What this workflow proves, in order of what could break a user:
+#
+#   1. the daemon builds, its CLI works, its clipboard/database/archive tests
+#      pass, and it binds a socket and accepts → a machine can record a copy;
+#   2. the contract client passes a round trip against a *real served backend*
+#      → the app talks to the contract, not to a mock of its own making;
+#   3. the gpui product builds against the real platform stack and its pure
+#      tests pass → dropping it on a desktop does not start with a compile error.
+#
+# The schemas are fetched at a pinned commit, never vendored: a schema change is a
+# contract change and has to be a reviewed line in scripts/ci-fetch-schemas.sh.
+#
+# Every cargo step goes through scripts/ci-annotate.sh, which re-emits compiler
+# errors and test assertions as GitHub annotations — that is how a failure is read
+# without the (host-blocked) raw log.
+
+on:
+  push:
+    branches: [master, 'arena/**']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+  PROTOCOL_REPO: https://github.com/smart-foundation/smart-protocol-official
+  PROTOCOL_SHA: 9175b06bb7b2ddee87af4dd12aa02f07a4d3402f
+  DAEMON_FEATURES: std,rpc,domain-clipboard,domain-database,domain-discovery
+
+# No concurrency group on purpose. Cancelling a run in flight throws away the
+# cache its twenty-minute gpui build would have saved, and *serialising* runs is
+# worse: the run that would tell you what is wrong waits behind the run that is
+# already wrong. Two builds in parallel cost a little CI time and save a lot of
+# human time.
+
+jobs:
+  daemon:
+    name: engine · daemon + clipboard domain
+    runs-on: ubuntu-24.04
+    env:
+      SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the capnp compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends capnproto libcapnp-dev
+          capnp --version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Fetch the contract's schema tree (pinned)
+        run: ./scripts/ci-fetch-schemas.sh
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: Build the daemon
+        run: ./scripts/ci-annotate.sh cargo build --bin smart-service --no-default-features --features "$DAEMON_FEATURES"
+
+      - name: Daemon reports what it serves
+        run: |
+          # `--help`, `--version` and `--print-address` are the daemon's CLI
+          # surface; if any stops working, the installer and the unit break.
+          ./target/debug/smart-service --help > /dev/null
+          ./target/debug/smart-service --version
+          ./target/debug/smart-service --print-address --socket /tmp/smart-ci.sock \
+            | grep -qx 'unix:///tmp/smart-ci.sock'
+
+      - name: Clipboard, archive and database tests
+        run: |
+          ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- clipboard
+          ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- database
+          ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- archive
+
+      - name: The daemon actually binds and answers
+        run: |
+          # A real socket, a real accept loop, a real shutdown. `--no-watch` and
+          # `--no-history` because a runner has no seat and no state dir worth
+          # keeping; the daemon must still serve the contract in that shape.
+          ./target/debug/smart-service --socket /tmp/smart-ci.sock --no-watch --no-history &
+          DAEMON=$!
+          for _ in $(seq 1 50); do
+            [ -S /tmp/smart-ci.sock ] && break
+            sleep 0.2
+          done
+          [ -S /tmp/smart-ci.sock ] || { echo "the daemon never bound its socket"; kill $DAEMON; exit 1; }
+          kill $DAEMON
+          wait $DAEMON 2>/dev/null || true
+
+      - name: Clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --no-default-features --features "$DAEMON_FEATURES" --all-targets
+
+  contract-client:
+    name: proto · contract round trip
+    runs-on: ubuntu-24.04
+    env:
+      SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the capnp compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends capnproto libcapnp-dev
+          capnp --version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch the contract's schema tree (pinned)
+        run: ./scripts/ci-fetch-schemas.sh
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/smart-clipboard-proto -> target
+            . -> target
+
+      - name: Unit tests (config, errors, model, contract)
+        working-directory: crates/smart-clipboard-proto
+        run: ../../scripts/ci-annotate.sh cargo test --lib
+
+      - name: Contract round trip against a served backend
+        working-directory: crates/smart-clipboard-proto
+        run: ../../scripts/ci-annotate.sh cargo test --test contract_roundtrip -- --nocapture
+
+  app:
+    name: app · gpui product
+    runs-on: ubuntu-24.04
+    env:
+      SMART_SCHEMA_DIR: ${{ github.workspace }}/../smart-protocol-official/schema
+      # A loader with no GPU: enough to build and to run the pure tests, which
+      # never open a window.
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the platform stack gpui needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            capnproto libcapnp-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libvulkan-dev \
+            libfontconfig-dev libfreetype-dev libssl-dev libclang-dev \
+            pkg-config clang
+          capnp --version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch the contract's schema tree (pinned)
+        run: ./scripts/ci-fetch-schemas.sh
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/smart-clipboard -> target
+            crates/smart-clipboard-proto -> target
+
+      - name: Resolve the dependency tree
+        working-directory: crates/smart-clipboard
+        run: |
+          # Resolution only, so a broken *transitive* crate is named before the
+          # twenty-minute build gets to it. Annotations are the only channel
+          # whose text survives this host, so the answer is emitted as one.
+          cargo generate-lockfile
+          cargo tree --invert xattr --depth 4 2>/dev/null | head -8 | while IFS= read -r line; do
+            echo "::error::xattr => $line"
+          done
+
+      - name: Build the app
+        working-directory: crates/smart-clipboard
+        run: ../../scripts/ci-annotate.sh cargo build
+
+      - name: The app explains itself without a display
+        working-directory: crates/smart-clipboard
+        run: |
+          # `--help` is the only path that must work with no seat and no
+          # service: it is what a user runs first when the app does not start.
+          ./target/debug/smart-clipboard --help | grep -q 'smart-clipboard'
+          ./target/debug/smart-clipboard --version
+
+      - name: Reducer, formatter, grammar and decoder tests
+        working-directory: crates/smart-clipboard
+        run: ../../scripts/ci-annotate.sh cargo test --bin smart-clipboard
+
+  hygiene:
+    name: hygiene · formatting (advisory)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # The two product crates are this delivery's own code, so they are held to
+      # `rustfmt` exactly — and because GitHub caps annotations at ten per step,
+      # the fix is published as a gzip/base64 patch split into chunks
+      # (`scripts/ci-apply-fmt.sh` reassembles and applies it). Ten chunks is
+      # ~24 kB of patch, which is ample for ~6 000 lines of product code.
+      - name: rustfmt (product crates)
+        run: |
+          cargo fmt --manifest-path crates/smart-clipboard-proto/Cargo.toml -- --check
+          cargo fmt --manifest-path crates/smart-clipboard/Cargo.toml -- --check
+
+      - name: Publish the product formatting patch
+        if: failure()
+        run: |
+          cargo fmt --manifest-path crates/smart-clipboard-proto/Cargo.toml || true
+          cargo fmt --manifest-path crates/smart-clipboard/Cargo.toml || true
+          git diff -- crates/smart-clipboard crates/smart-clipboard-proto | gzip -9 > /tmp/fmt.gz
+          echo "::notice::formatting patch is $(gzip -dc /tmp/fmt.gz | wc -c) bytes"
+          # 2 000 characters per chunk: GitHub clips a single annotation's
+          # message well below its documented limit (4 083 arrived out of 6 000),
+          # and a clipped base64 chunk is a corrupt patch. The count notice below
+          # lets the applier refuse rather than half-apply.
+          gzip -t /tmp/fmt.gz
+          base64 -w0 < /tmp/fmt.gz | fold -w 2000 > /tmp/fmt.b64
+          # `fold` leaves the final line unterminated, and both `wc -l` and
+          # `read` then lose it — which is exactly how the first reassembly lost
+          # a kilobyte of patch and every apply failed.
+          printf '\n' >> /tmp/fmt.b64
+          total=$(grep -c . /tmp/fmt.b64)
+          echo "::notice::FMTCHUNKS $total"
+          index=0
+          while IFS= read -r chunk; do
+            index=$((index + 1))
+            echo "::error::FMTCHUNK $(printf '%03d' "$index") $chunk"
+          done < /tmp/fmt.b64
+
+      # The engine tree predates this delivery and is not reformatted wholesale:
+      # a 600 kB whitespace diff would bury the review. It is measured, reported,
+      # and left as its own decision.
+      - name: rustfmt (engine tree, reported not enforced)
+        continue-on-error: true
+        run: |
+          if cargo fmt --all -- --check > /tmp/engine-fmt.txt 2>&1; then
+            echo "::notice::the engine tree is formatted"
+          else
+            changed=$(grep -c '^Diff in ' /tmp/engine-fmt.txt || true)
+            files=$(grep -o '^Diff in [^ ]*' /tmp/engine-fmt.txt | cut -d' ' -f3 | sort -u | tr '\n' ' ')
+            echo "::notice::$changed hunks would change in: $files"
+          fi
+
+      - name: The engine still forbids shellouts
+        run: |
+          # Key principle #1: zero process spawns outside tests. The clipboard
+          # domain replaces wl-paste/xclip, so this is what proves it. A plain
+          # grep cannot: the tree is full of comments explaining the spawns it
+          # does *not* make, and the tests legitimately start a child to have a
+          # process to observe. The script knows the difference.
+          python3 scripts/check-no-shellouts.py

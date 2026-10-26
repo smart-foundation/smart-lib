@@ -1,0 +1,56 @@
+# smart-clipboard-proto — the contract client for the smart-clipboard product.
+#
+# WHAT THIS CRATE IS
+#
+# A pure smart-protocol consumer. It links **no engine**: it does not depend on
+# `smart-lib`, it owns no clipboard backend, it writes no database, it touches
+# no X11/Wayland selection. It compiles the contract's own schemas, dials the
+# service that serves them, discovers the clipboard domain, and speaks the
+# generated capnp interfaces.
+#
+# Why a separate crate from the UI crate: the protocol half must be testable
+# and reusable without a GPU, and a future `smart-cli`-style headless consumer
+# (or an agent) must be able to take exactly this code. The UI crate depends on
+# this one; this one knows nothing about gpui, pixels, or windows.
+#
+# The pinned triad matches the engine's (see the root Cargo.toml): one capnp
+# line for the whole project, so a schema compiled by the app and a schema
+# compiled by the daemon are the same schema.
+
+[package]
+name = "smart-clipboard-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Contract-only smart-protocol client for smart-clipboard: discovery, clipboard, capability. No engine, no backend, no database."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Its own workspace: this crate is not a member of the engine's workspace, so
+# the engine's `cargo build` never pulls capnp-rpc for a product (charter law
+# #10 — the build box pays only for what it builds).
+[workspace]
+
+[dependencies]
+capnp = "0.27.2"
+capnp-rpc = "0.27.1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+async-channel = "2"
+
+[dev-dependencies]
+# A contract-only client test needs *something* on the far side. The engine is
+# a dev-dependency only: it is used to serve a mock backend over a unix socket
+# in `tests/`, never linked into a shipped product binary.
+# `default-features = false` is the same line the daemon uses: the client test
+# needs the clipboard domain and the wire, not the engine's default domains
+# (whose native seams pull host libraries a test box may not have).
+smart-lib = { path = "../..", default-features = false, features = [
+    "rpc",
+    "std",
+    "domain-clipboard",
+    "domain-discovery",
+] }
+
+[build-dependencies]
+capnpc = "0.27.0"

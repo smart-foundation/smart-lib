@@ -42,11 +42,13 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use std::sync::Mutex;
 
-use crate::core::ids::ClipboardId;
+use crate::core::ids::{ClipboardId, ClipboardSourceId};
 use crate::core::{Error, Result};
+use crate::domains::clipboard::archive::{ArchivedItem, HistoryArchive};
 use crate::domains::clipboard::backend::ClipboardBackend;
 use crate::domains::clipboard::types::{
     ClipboardChange, ClipboardContent, ClipboardEventType, ClipboardItem, ClipboardSizeLimits,
@@ -136,6 +138,18 @@ pub trait SelectionHost: Send + 'static {
     /// issued (this backend serves on demand rather than in a dedicated
     /// thread; the seam is where that hook lives so the mock can count it).
     fn serve_pending(&self) {}
+
+    /// A cheap token that changes whenever a different client takes the
+    /// selection — `GetSelectionOwner` on X11, `None` where the protocol has no
+    /// such notion.
+    ///
+    /// This is what makes a selection watcher affordable: comparing a token is a
+    /// round trip, whereas comparing *content* is a full transfer of whatever
+    /// the user just copied. `None` is an honest "this transport cannot tell
+    /// you", and the watcher then falls back to reading and fingerprinting.
+    fn owner_token(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// A seat-less seam: no display, no Wayland compositor. Every read answers
@@ -433,6 +447,17 @@ mod x11 {
     impl SelectionHost for X11SelectionHost {
         fn now_nanos(&self) -> u64 {
             now_nanos()
+        }
+
+        /// The current selection owner's X window id: a fresh id appears on
+        /// every copy (the copying client becomes the owner), and `0` means
+        /// nobody holds the selection.
+        fn owner_token(&self) -> Option<u64> {
+            self.serve_requests();
+            match xproto::get_selection_owner(&self.conn, self.clipboard) {
+                Ok(cookie) => Some(u64::from(cookie.reply().ok()?.owner)),
+                Err(_) => None,
+            }
         }
 
         fn targets(&self) -> Vec<String> {
@@ -1075,6 +1100,56 @@ struct LedgerEntry {
     offers: Vec<ClipboardContent>,
 }
 
+impl LedgerEntry {
+    /// The archive's view of this entry: every representation, because a
+    /// restored item must answer `convertContent` and preview exactly as it did
+    /// before the restart.
+    fn to_archived(&self) -> ArchivedItem {
+        ArchivedItem {
+            id: self.item.id.get(),
+            captured_at: self.item.timestamp,
+            source_id: self.item.source_id.get(),
+            pinned: self.item.pinned,
+            tags: self.item.tags.clone(),
+            offers: self
+                .offers
+                .iter()
+                .map(|offer| (offer.mime_type.clone(), offer.data.clone()))
+                .collect(),
+        }
+    }
+
+    /// Rebuild a ledger entry from the archive. The item's id, timestamp, source
+    /// and pin state are the archived ones — a restore is not a new copy, and
+    /// renumbering it would break every caller holding an id.
+    fn from_archived(item: ArchivedItem) -> Self {
+        let text = item.first_text().unwrap_or_default().to_string();
+        let size_bytes = item.size_bytes();
+        let mime_types = item.mime_types();
+        let offers = item
+            .offers
+            .iter()
+            .map(|(mime_type, data)| ClipboardContent {
+                mime_type: mime_type.clone(),
+                data: data.clone(),
+            })
+            .collect();
+        LedgerEntry {
+            item: ClipboardItem {
+                id: ClipboardId::new(item.id),
+                timestamp: item.captured_at,
+                mime_types,
+                tags: item.tags,
+                pinned: item.pinned,
+                source_id: ClipboardSourceId::new(item.source_id),
+                size_bytes,
+                text: preview_text(&text),
+            },
+            offers,
+        }
+    }
+}
+
 /// One change subscription: a bounded queue of pending events plus the count of
 /// events a pull already collapsed (the contract's "pulls count the updates
 /// they collapse" rule, proven for the network store and honoured here).
@@ -1095,6 +1170,13 @@ struct State {
     /// The MIME targets the last write offered, so `get_supported_mime_types`
     /// answers about our own offer even before a live introspection.
     offered: Vec<String>,
+    /// The fingerprint of the newest payload this backend knows about, whether
+    /// it wrote it or a watcher observed it. It is how a poll of the host
+    /// selection is compared with what the ledger already holds, so the same
+    /// copy is not recorded twice — and it is deliberately a *content* digest,
+    /// not a timestamp, because a selection owner may re-offer identical bytes
+    /// every time it is asked.
+    fingerprint: u64,
 }
 
 /// The default size-limit policy (this backend's own, published DEGRADED): a
@@ -1120,6 +1202,14 @@ pub struct LinuxClipboardBackend {
     transport: String,
     can_read: bool,
     can_write: bool,
+    /// Where history survives the process, when the composition root wired one.
+    /// `None` is the honest default: durable history is off and the ledger is a
+    /// session log.
+    archive: Option<Arc<dyn HistoryArchive>>,
+    /// The last archive failure, verbatim. A store that cannot write must not
+    /// fail a clipboard call, so the failure is recorded here and the daemon
+    /// prints it rather than losing it.
+    archive_error: Mutex<Option<String>>,
 }
 
 impl LinuxClipboardBackend {
@@ -1141,10 +1231,13 @@ impl LinuxClipboardBackend {
                 next_item: 1,
                 limits: DEFAULT_LIMITS,
                 offered: Vec::new(),
+                fingerprint: 0,
             }),
             transport: transport.to_string(),
             can_read,
             can_write,
+            archive: None,
+            archive_error: Mutex::new(None),
         }
     }
 
@@ -1205,6 +1298,220 @@ impl LinuxClipboardBackend {
         ))
     }
 
+    // ── Durable history (the composition root's choice, the domain's seam) ───
+
+    /// Attach a history store and **restore the ledger from it**.
+    ///
+    /// This is what makes `getHistory` a history rather than a session log: on
+    /// the daemon's first connection the ledger is rebuilt from the archive, so
+    /// `getPreview`, `convertContent` and "copy as" answer about an item copied
+    /// yesterday exactly as they do about one copied a second ago.
+    ///
+    /// The restore is best-effort by design. An archive that cannot be read
+    /// leaves the ledger empty and records the reason; refusing to start the
+    /// clipboard because a store is unreadable would trade a working clipboard
+    /// for a perfect history.
+    pub fn attach_archive(mut self, archive: Arc<dyn HistoryArchive>) -> Self {
+        let restored = archive.load();
+        match restored {
+            Ok(items) => {
+                let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                // The archive lists newest first; the ledger's order is the
+                // order copies happened, so restore in reverse.
+                let mut highest = 0u64;
+                for item in items.into_iter().rev() {
+                    highest = highest.max(item.id);
+                    st.ledger.push(LedgerEntry::from_archived(item));
+                }
+                st.next_item = highest + 1;
+                // The newest restored item is also the newest payload this
+                // backend knows, so a watcher tick that re-reads the same
+                // selection does not duplicate it into the history.
+                st.fingerprint = st
+                    .ledger
+                    .last()
+                    .map(|entry| Self::fingerprint_of(&entry.offers))
+                    .unwrap_or(0);
+            }
+            Err(error) => {
+                self.note_archive_error(&format!("history could not be restored: {error}"));
+            }
+        }
+        self.archive = Some(archive);
+        self
+    }
+
+    /// Whether durable history is wired.
+    pub fn has_archive(&self) -> bool {
+        self.archive.is_some()
+    }
+
+    /// The last archive failure, verbatim, for the daemon's diagnostics. `None`
+    /// means no failure has been seen (not that the store is healthy — a store
+    /// that was never asked has no story to tell).
+    pub fn archive_error(&self) -> Option<String> {
+        self.archive_error
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    fn note_archive_error(&self, message: &str) {
+        if let Ok(mut guard) = self.archive_error.lock() {
+            *guard = Some(message.to_string());
+        }
+    }
+
+    /// Persist one ledger entry, if there is an archive. A failure is recorded
+    /// and the call proceeds: the host accepted the copy, so the clipboard call
+    /// succeeded, and saying otherwise would be a lie about the host.
+    fn archive_put(&self, entry: &LedgerEntry) {
+        let Some(archive) = self.archive.as_ref() else { return };
+        match archive.put(&entry.to_archived()) {
+            Ok(()) => {}
+            Err(error) => self.note_archive_error(&format!("history write failed: {error}")),
+        }
+    }
+
+    fn archive_remove(&self, id: u64) {
+        let Some(archive) = self.archive.as_ref() else { return };
+        if let Err(error) = archive.remove(id) {
+            self.note_archive_error(&format!("history delete failed: {error}"));
+        }
+    }
+
+    fn archive_clear(&self) {
+        let Some(archive) = self.archive.as_ref() else { return };
+        if let Err(error) = archive.clear() {
+            self.note_archive_error(&format!("history clear failed: {error}"));
+        }
+    }
+
+    /// Set (or clear) an item's pin, and persist it. A pin outlives the process
+    /// only if the archive hears about it, so this is the one place the flag is
+    /// changed.
+    fn set_pinned(&self, item_id: ClipboardId, pinned: bool) -> Result<()> {
+        let copy = {
+            let mut st = self.state.lock().unwrap();
+            let Some(entry) = st.ledger.iter_mut().find(|e| e.item.id == item_id) else {
+                return Err(Error::not_found());
+            };
+            entry.item.pinned = pinned;
+            entry.clone()
+        };
+        // Outside the state lock: the store is a different lock and a slower
+        // one, and no other caller needs to wait for it to set a pin.
+        self.archive_put(&copy);
+        Ok(())
+    }
+
+    // ── Observed copies (what the selection watcher feeds in) ───────────────
+
+    /// A content digest of one offer set.
+    ///
+    /// FNV-1a over the MIME names and the bytes: cheap, allocation-free, and
+    /// stable across the process. It is a *dedupe* fingerprint, not a security
+    /// hash — a collision costs one skipped history row, which is why the
+    /// watcher also compares the offer count.
+    fn fingerprint_of(offers: &[ClipboardContent]) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for offer in offers {
+            for byte in offer.mime_type.as_bytes().iter().chain(offer.data.iter()) {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// Record a copy **this process did not perform**: another client took the
+    /// selection, and the watcher read what it offered.
+    ///
+    /// Returns the new item's id, or `None` when the payload is byte-identical to
+    /// the newest recorded copy (the selection owner was re-read, or the copy
+    /// before it was ours). Recording the same bytes twice would fill the history
+    /// with duplicates of whatever the user is looking at, which is exactly the
+    /// failure that makes clipboard managers untrustworthy.
+    ///
+    /// Idempotent, bounded by the same size-limit policy as a local copy, and
+    /// journalled through the archive like every other item.
+    pub fn ingest(&self, offers: Vec<ClipboardContent>) -> Option<ClipboardId> {
+        if offers.is_empty() {
+            return None;
+        }
+        let fingerprint = Self::fingerprint_of(&offers);
+        let mut st = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if st.fingerprint == fingerprint
+            && st
+                .ledger
+                .last()
+                .map(|entry| entry.offers.len() == offers.len())
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        let mut keep: Vec<ClipboardContent> = Vec::new();
+        for offer in offers {
+            if st.limits.max_item_size != 0 && offer.size_bytes() > st.limits.max_item_size {
+                continue;
+            }
+            keep.push(offer);
+        }
+        if keep.is_empty() {
+            return None;
+        }
+        let id = ClipboardId::new(st.next_item);
+        st.next_item += 1;
+        let ts = self.host.now_nanos();
+        let mime_types = keep.iter().map(|offer| offer.mime_type.clone()).collect::<Vec<_>>();
+        let text = keep
+            .iter()
+            .find_map(|offer| offer.as_text().map(ToString::to_string))
+            .unwrap_or_default();
+        let size_bytes = keep.iter().map(|offer| offer.size_bytes()).sum();
+        let entry = LedgerEntry {
+            item: ClipboardItem {
+                id,
+                timestamp: ts,
+                mime_types: mime_types.clone(),
+                tags: Vec::new(),
+                pinned: false,
+                // Source 2 is the contract's own way of saying "not this
+                // process": the copy came from another client's selection
+                // owner, observed rather than written.
+                source_id: ClipboardSourceId::new(2),
+                size_bytes,
+                text: preview_text(&text),
+            },
+            offers: keep,
+        };
+        st.fingerprint = fingerprint;
+        st.offered = mime_types.clone();
+        self.ledger_push(&mut st, entry.clone());
+        self.record_change(
+            &mut st,
+            ClipboardChange {
+                id,
+                timestamp: ts,
+                source_id: ClipboardSourceId::new(2),
+                mime_types,
+                event_type: ClipboardEventType::Copied,
+                text: preview_text(&text),
+            },
+        );
+        self.archive_put(&entry);
+        Some(id)
+    }
+
+    /// The newest recorded copy's fingerprint, so a caller (the watcher, a test)
+    /// can ask "is the selection something I already have?" without reading it.
+    pub fn newest_fingerprint(&self) -> u64 {
+        self.state
+            .lock()
+            .map(|st| st.fingerprint)
+            .unwrap_or(0)
+    }
+
     // ── Engine-side bookkeeping (no host state is ever read to decide these) ──
 
     /// Record a change and broadcast it to every active subscription, capping
@@ -1245,6 +1552,10 @@ impl LinuxClipboardBackend {
                 break;
             };
             let removed = st.ledger.remove(idx);
+            // An evicted item leaves the archive as well: the archive is the
+            // ledger's shadow, and a store that keeps what the service says it
+            // forgot would make "clearHistory" a lie.
+            self.archive_remove(removed.item.id.get());
             let ts = self.host.now_nanos();
             self.record_change(
                 st,
@@ -1349,6 +1660,10 @@ impl ClipboardBackend for LinuxClipboardBackend {
                 offers: keep,
             };
             st.offered = mime_types.clone();
+            // A copy we performed is the newest known payload, so an observing
+            // watcher does not record it a second time as an external copy.
+            st.fingerprint = Self::fingerprint_of(&entry.offers);
+            self.archive_put(&entry);
             self.ledger_push(&mut st, entry);
             self.record_change(
                 &mut st,
@@ -1450,9 +1765,15 @@ impl ClipboardBackend for LinuxClipboardBackend {
         let total = st.ledger.len() as u64;
         let offset = page.offset as usize;
         let limit = page.effective_limit() as usize;
+        // **Newest first.** The ledger is stored in the order copies happened so
+        // that eviction is "drop the front", but a history is read backwards:
+        // offset 0 has to be the copy the user just made, or every consumer has
+        // to reverse the page (and one that forgets shows the oldest item as the
+        // newest). Paging a reversed iterator is still paging the same window.
         let items = st
             .ledger
             .iter()
+            .rev()
             .skip(offset)
             .take(limit)
             .map(|e| e.item.clone())
@@ -1463,6 +1784,10 @@ impl ClipboardBackend for LinuxClipboardBackend {
     fn clear_history(&self) -> Result<()> {
         let mut st = self.state.lock().unwrap();
         st.ledger.clear();
+        // The store is emptied with the ledger: a history the service says it
+        // cleared must not come back on the next restart.
+        st.fingerprint = 0;
+        self.archive_clear();
         Ok(())
     }
 
@@ -1472,6 +1797,7 @@ impl ClipboardBackend for LinuxClipboardBackend {
         let mut all: Vec<ClipboardItem> = st
             .ledger
             .iter()
+            .rev()
             .filter(|e| {
                 e.item.text.to_lowercase().contains(&q)
                     || e.item
@@ -1490,21 +1816,11 @@ impl ClipboardBackend for LinuxClipboardBackend {
     }
 
     fn pin_item(&self, item_id: ClipboardId) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
-        let Some(e) = st.ledger.iter_mut().find(|e| e.item.id == item_id) else {
-            return Err(Error::not_found());
-        };
-        e.item.pinned = true;
-        Ok(())
+        self.set_pinned(item_id, true)
     }
 
     fn unpin_item(&self, item_id: ClipboardId) -> Result<()> {
-        let mut st = self.state.lock().unwrap();
-        let Some(e) = st.ledger.iter_mut().find(|e| e.item.id == item_id) else {
-            return Err(Error::not_found());
-        };
-        e.item.pinned = false;
-        Ok(())
+        self.set_pinned(item_id, false)
     }
 
     fn delete_item(&self, item_id: ClipboardId) -> Result<()> {
@@ -1514,6 +1830,9 @@ impl ClipboardBackend for LinuxClipboardBackend {
         if st.ledger.len() == before {
             return Err(Error::not_found());
         }
+        // A pin is a claim on the store ("keep this one"), so a delete has to
+        // remove the archived record too or the item would return.
+        self.archive_remove(item_id.get());
         Ok(())
     }
 
@@ -1705,6 +2024,186 @@ mod tests {
     /// Build a backend over the scripted seat.
     fn seat_backend(s: Scripted) -> LinuxClipboardBackend {
         LinuxClipboardBackend::with_host(Box::new(s), "scripted", true, true)
+    }
+
+    /// A history is read backwards: offset 0 is the copy the user just made.
+    #[test]
+    fn get_history_is_newest_first() {
+        let backend = seat_backend(Scripted::seat());
+        for text in ["first", "second", "third"] {
+            backend
+                .set_content(ClipboardContent {
+                    mime_type: "text/plain".into(),
+                    data: text.as_bytes().to_vec(),
+                })
+                .unwrap();
+        }
+        let page = backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        let texts: Vec<String> = page.items.iter().map(|item| item.text.clone()).collect();
+        assert_eq!(texts, vec!["third".to_string(), "second".to_string(), "first".to_string()]);
+        // Paging still walks the same window: offset 1 of a limit of 1 is the
+        // second-newest copy, not a re-read of the newest.
+        let second = backend.get_history(Pagination { offset: 1, limit: 1 }).unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].text, "second");
+        assert_eq!(second.total, 3);
+        // Search is ordered the same way, because they are the same list.
+        let searched = backend.search_history("i", Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(searched.items.first().map(|item| item.text.as_str()), Some("third"));
+    }
+
+    /// A copy the backend did **not** perform still becomes history — the
+    /// watcher's ingest path, proven without a display — and the same bytes are
+    /// never recorded twice.
+    #[test]
+    fn an_observed_copy_is_recorded_once() {
+        let backend = seat_backend(Scripted::seat());
+        let offers = vec![ClipboardContent {
+            mime_type: "text/plain".into(),
+            data: b"copied in another app".to_vec(),
+        }];
+        let id = backend.ingest(offers.clone()).expect("the first observation is new");
+        assert!(backend.ingest(offers.clone()).is_none(), "the same bytes are not a new copy");
+        // A different payload is a new item, and the item the caller was handed
+        // names the observed copy (source 2 = not this process).
+        let other = backend
+            .ingest(vec![ClipboardContent {
+                mime_type: "text/plain".into(),
+                data: b"a different copy".to_vec(),
+            }])
+            .expect("different bytes are a new copy");
+        assert_ne!(id, other);
+        let page = backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].source_id.get(), 2);
+        // The observed payload is readable through the contract's own preview
+        // path, which is what makes the app's row and inspector work for a copy
+        // this process never made.
+        match backend.get_preview(other).unwrap() {
+            PreviewOutcome::Preview(preview) => {
+                assert!(preview.available);
+                assert_eq!(preview.text_preview, "a different copy");
+            }
+            other => panic!("expected a preview of the observed copy, got {other:?}"),
+        }
+    }
+
+    /// An in-memory archive, so the restore/shadowing invariant is proven
+    /// without a file: the ledger and the archive must never disagree.
+    struct MemoryArchive {
+        items: Mutex<Vec<ArchivedItem>>,
+    }
+
+    impl MemoryArchive {
+        fn new(items: Vec<ArchivedItem>) -> Self {
+            Self { items: Mutex::new(items) }
+        }
+
+        fn snapshot(&self) -> Vec<ArchivedItem> {
+            self.items.lock().unwrap().clone()
+        }
+    }
+
+    impl HistoryArchive for MemoryArchive {
+        fn load(&self) -> Result<Vec<ArchivedItem>> {
+            Ok(self.snapshot())
+        }
+
+        fn put(&self, item: &ArchivedItem) -> Result<()> {
+            let mut items = self.items.lock().unwrap();
+            items.retain(|have| have.id != item.id);
+            items.push(item.clone());
+            Ok(())
+        }
+
+        fn remove(&self, id: u64) -> Result<()> {
+            self.items.lock().unwrap().retain(|have| have.id != id);
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<()> {
+            self.items.lock().unwrap().clear();
+            Ok(())
+        }
+    }
+
+    fn archived(id: u64, text: &str, pinned: bool) -> ArchivedItem {
+        ArchivedItem {
+            id,
+            captured_at: 1_700_000_000_000_000_000 + id,
+            source_id: 1,
+            pinned,
+            tags: Vec::new(),
+            offers: vec![("text/plain".to_string(), text.as_bytes().to_vec())],
+        }
+    }
+
+    /// Attaching an archive restores the ledger from it — ids, pins and payloads
+    /// — and the next copy continues the id sequence instead of reissuing one.
+    #[test]
+    fn attaching_an_archive_restores_the_history() {
+        // The archive contract is newest-first (that is what `load` promises).
+        let archive = Arc::new(MemoryArchive::new(vec![
+            archived(2, "the newer copy", true),
+            archived(1, "the older copy", false),
+        ]));
+        let backend = seat_backend(Scripted::seat()).attach_archive(archive.clone());
+        assert!(backend.has_archive());
+        let page = backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, 2);
+        // Newest first, ids intact, the pin restored.
+        assert_eq!(page.items[0].id, ClipboardId::new(2));
+        assert!(page.items[0].pinned);
+        assert_eq!(page.items[1].id, ClipboardId::new(1));
+        // The payload came back with it: previews and "copy as" work after a
+        // restart instead of answering notFound about a list the caller can see.
+        assert_eq!(
+            backend.get_preview(ClipboardId::new(1)).unwrap(),
+            PreviewOutcome::Preview(crate::domains::clipboard::types::ClipboardPreview {
+                text_preview: "the older copy".to_string(),
+                available: true,
+                original_size: 14,
+                preview_mime_type: "text/plain".to_string(),
+            })
+        );
+        // A new copy does not collide with a restored id.
+        let before = backend.get_history(Pagination { offset: 0, limit: 1 }).unwrap().total;
+        backend
+            .set_content(ClipboardContent {
+                mime_type: "text/plain".into(),
+                data: b"the newest copy".to_vec(),
+            })
+            .unwrap();
+        let page = backend.get_history(Pagination { offset: 0, limit: u32::MAX }).unwrap();
+        assert_eq!(page.total, before + 1);
+        assert_eq!(page.items[0].id, ClipboardId::new(3));
+        // And the archive heard about it (the shadow is in step).
+        let stored = archive.snapshot();
+        assert!(stored.iter().any(|item| item.id == 3));
+        assert_eq!(stored.len(), 3);
+    }
+
+    /// Pin, delete and clear reach the archive, so a restart cannot resurrect a
+    /// deleted item or forget a pin.
+    #[test]
+    fn history_mutations_reach_the_archive() {
+        let archive = Arc::new(MemoryArchive::new(Vec::new()));
+        let backend = seat_backend(Scripted::seat()).attach_archive(archive.clone());
+        backend
+            .set_content(ClipboardContent { mime_type: "text/plain".into(), data: b"one".to_vec() })
+            .unwrap();
+        backend
+            .set_content(ClipboardContent { mime_type: "text/plain".into(), data: b"two".to_vec() })
+            .unwrap();
+        let (first, second) = (ClipboardId::new(1), ClipboardId::new(2));
+        backend.pin_item(first).unwrap();
+        assert!(archive.snapshot().iter().find(|item| item.id == 1).unwrap().pinned);
+        backend.unpin_item(first).unwrap();
+        assert!(!archive.snapshot().iter().find(|item| item.id == 1).unwrap().pinned);
+        backend.delete_item(second).unwrap();
+        assert!(!archive.snapshot().iter().any(|item| item.id == 2));
+        backend.clear_history().unwrap();
+        assert!(archive.snapshot().is_empty());
     }
 
     #[test]

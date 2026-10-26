@@ -13,9 +13,12 @@
 //! What the *host* cannot serve is answered honestly with a reason: neither
 //! X11's CLIPBOARD selection manager nor the wlr-data-control device is a
 //! multi-slot history keeper, so `getHistory`/`clearHistory`/`searchHistory`/
-//! `pin`/`unpin`/`delete` are served by a bounded engine-side ledger of this
-//! process's own copies — published as `DEGRADED-with-reason` in the
-//! availability matrix, never as a fabricated host history.
+//! `pin`/`unpin`/`delete` are served by a bounded engine-side ledger of every
+//! copy this backend saw (its own writes and, when the daemon runs the watcher,
+//! another client's) — published as `DEGRADED-with-reason` in the availability
+//! matrix, never as a fabricated host history. That ledger can be made durable
+//! by the composition root through [`archive::HistoryArchive`]; the domain then
+//! keeps the memory and the archive in step without knowing what either is.
 //!
 //! ## The transport is native (charter law #9)
 //!
@@ -28,6 +31,7 @@
 //! evidence and the shellout-free proof.
 
 pub mod api;
+pub mod archive;
 pub mod availability;
 pub mod backend;
 #[cfg(test)]
@@ -39,6 +43,7 @@ pub use availability::{
     claimed_l3_tests, method_availability_for, status_counts, AvailStatus, MethodAvailability,
     CLIPBOARD_AVAILABILITY, CLIPBOARD_SCHEMA_ID, ReasonClass,
 };
+pub use archive::{ArchivedItem, HistoryArchive, NoArchive};
 pub use backend::ClipboardBackend;
 pub use types::{
     ClipboardChange, ClipboardContent, ClipboardEventType, ClipboardItem, ClipboardPreview,

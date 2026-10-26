@@ -1,0 +1,36 @@
+[Unit]
+# The smart-protocol daemon for this desktop session.
+#
+# It is a *user* unit because the service acts on the user's own seat: their
+# display, their selection, their history. It never asks for privilege and never
+# runs as root — a Control-class connection is earned by the peer's uid, not by
+# the daemon being privileged.
+Description=smart-service — the smart-protocol daemon (clipboard, database)
+Documentation=https://github.com/smart-foundation/smart-lib
+# The clipboard backend needs a seat, so start with the graphical session, not
+# with the login shell.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# %h = the user's home, %t = their runtime directory ($XDG_RUNTIME_DIR).
+# The socket lives in the runtime dir: it exists exactly as long as the session.
+ExecStart=%h/.local/bin/smart-service --socket %t/smart/service.sock
+# Restart on any exit: a daemon that stopped is a clipboard that stopped
+# recording. A crash loop is bounded by the rate limit below.
+Restart=always
+RestartSec=1
+# A crashed daemon must not take the session down with it, and its journal is
+# the place to read why it restarted.
+# (The socket path is printed on stderr at startup; `journalctl --user -u
+# smart-service` shows it beside every capture decision.)
+Environment=SMART_SERVICE_SOCKET=%t/smart/service.sock
+# The daemon writes exactly one thing: the history journal under the state dir.
+# Everything else it touches is host state it only reads.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=smart-service
+
+[Install]
+WantedBy=graphical-session.target

@@ -30,6 +30,11 @@ resolver = "2"
 # in-process (the corrected architecture: the shell embeds its engine via the
 # per-domain trait object, exactly as the original shell did).
 members = ["crates/shell"]
+# The products are contract clients, not engine components. Each is its own
+# workspace (gpui's and capnp-rpc's dependency trees must never land on the
+# engine's build), and they are excluded so `cargo build` here stays the
+# engine's build. Their builds are `cd crates/smart-clipboard && cargo build`.
+exclude = ["crates/smart-clipboard", "crates/smart-clipboard-proto"]
 
 [lib]
 name = "smart_lib"
@@ -53,6 +58,18 @@ required-features = [
   "domain-time",
   "std",
 ]
+
+# The daemon. This is the difference between a tree that can serve the contract
+# and a machine that serves it: `cargo install --path . --bin smart-service`
+# (or `./install.sh`) puts it on the host, and the session unit starts it.
+#
+# It serves the clipboard domain over the native seat, archives the history to
+# `database.kv` under the state directory, watches the selection for other
+# clients' copies, and serves every connection on its own thread.
+[[bin]]
+name = "smart-service"
+path = "src/bin/smart-service.rs"
+required-features = ["rpc", "std", "domain-clipboard", "domain-database"]
 
 # The founder's privileged exact state read for the runit service cell (the
 # physical limit: /run/runit/supervise.<name>/stat is root-only on this host,
