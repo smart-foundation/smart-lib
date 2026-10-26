@@ -24,7 +24,7 @@ env:
   # The protocol tree the build compiles. Pinned; see scripts/ci-fetch-schemas.sh.
   PROTOCOL_REPO: https://github.com/smart-foundation/smart-protocol-official
   PROTOCOL_SHA: 9175b06bb7b2ddee87af4dd12aa02f07a4d3402f
-  DAEMON_FEATURES: std,rpc,domain-clipboard,domain-database
+  DAEMON_FEATURES: std,rpc,domain-clipboard,domain-database,domain-discovery
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -58,7 +58,7 @@ jobs:
 
       - name: Build the daemon
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
-        run: ./scripts/ci-annotate.sh cargo build --bin smart-service --features "$DAEMON_FEATURES"
+        run: ./scripts/ci-annotate.sh cargo build --bin smart-service --no-default-features --features "$DAEMON_FEATURES"
 
       - name: Daemon reports what it serves
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
@@ -73,9 +73,9 @@ jobs:
       - name: Clipboard, archive and database tests
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
         run: |
-          ./scripts/ci-annotate.sh cargo test --lib --features "$DAEMON_FEATURES" -- clipboard
-          ./scripts/ci-annotate.sh cargo test --lib --features "$DAEMON_FEATURES" -- database
-          ./scripts/ci-annotate.sh cargo test --lib --features "$DAEMON_FEATURES" -- archive
+          ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- clipboard
+          ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- database
+          ./scripts/ci-annotate.sh cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- archive
 
       - name: The daemon actually binds and answers
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
@@ -96,7 +96,7 @@ jobs:
       - name: Clippy (advisory)
         continue-on-error: true
         env: { SMART_SCHEMA_DIR: ../smart-protocol-official/schema }
-        run: cargo clippy --features "$DAEMON_FEATURES" --all-targets
+        run: cargo clippy --no-default-features --features "$DAEMON_FEATURES" --all-targets
 
   contract-client:
     name: proto · contract round trip

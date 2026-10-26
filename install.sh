@@ -41,7 +41,11 @@ JOBS="${JOBS:-}"
 
 # The features the daemon is built with. Clipboard is the product; database is
 # where its history lives; rpc + std are the wire and the host.
-DAEMON_FEATURES="std,rpc,domain-clipboard,domain-database"
+# --no-default-features on purpose: the daemon serves the clipboard and the
+# store its history lives in, and nothing else. The engine's defaults include
+# domains whose native seams need libraries (a bus, an audio daemon) that a
+# clipboard daemon has no business linking.
+DAEMON_FEATURES="std,rpc,domain-clipboard,domain-database,domain-discovery"
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -132,7 +136,7 @@ step "Building the daemon (clipboard + database)"
 (
     cd "$REPO_DIR"
     SMART_SCHEMA_DIR="$SCHEMA_DIR" cargo build --release --bin smart-service \
-        --features "$DAEMON_FEATURES" $CARGO_JOBS
+        --no-default-features --features "$DAEMON_FEATURES" $CARGO_JOBS
 ) || die "the daemon did not build. The compiler output above is the whole story; nothing was installed."
 mkdir -p "$BIN_DIR"
 install -m 0755 "$REPO_DIR/target/release/smart-service" "$BIN_DIR/smart-service"

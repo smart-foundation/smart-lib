@@ -13,7 +13,7 @@ STAGE="${1:-all}"
 REPO_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$REPO_DIR"
 
-DAEMON_FEATURES="std,rpc,domain-clipboard,domain-database"
+DAEMON_FEATURES="std,rpc,domain-clipboard,domain-database,domain-discovery"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
@@ -35,14 +35,14 @@ stage_engine() {
     need_capnp
     need_schemas
     step "engine: build the daemon"
-    cargo build --bin smart-service --features "$DAEMON_FEATURES"
+    cargo build --bin smart-service --no-default-features --features "$DAEMON_FEATURES"
     # The full lib suite is enormous (the README warns it OOMs a small box), so the
     # stages that matter for this product run by name.
     step "engine: clipboard domain tests"
-    cargo test --lib --features "$DAEMON_FEATURES" -- clipboard
+    cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- clipboard
     step "engine: database + archive tests"
-    cargo test --lib --features "$DAEMON_FEATURES" -- database
-    cargo test --lib --features "$DAEMON_FEATURES" -- archive
+    cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- database
+    cargo test --lib --no-default-features --features "$DAEMON_FEATURES" -- archive
 }
 
 stage_proto() {
