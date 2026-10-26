@@ -39,10 +39,10 @@ gh api --paginate "repos/$REPO/check-runs/$JOB/annotations" \
     -q '.[] | .message' \
     | sed -n 's/^FMTCHUNK \([0-9]*\) /\1 /p' \
     | sort -n -k1,1 \
-    | while read -r number chunk; do
+    | while read -r number chunk || [ -n "$number" ]; do
         printf '%s\n' "$chunk"
     done > "$PATCH.b64"
-GOT=$(wc -l < "$PATCH.b64")
+GOT=$(grep -c . "$PATCH.b64")
 if [ -n "${EXPECTED:-}" ] && [ "$GOT" -ne "$EXPECTED" ]; then
     printf '!! the run published %s chunks but %s arrived — not applying\n' \
         "$EXPECTED" "$GOT" >&2

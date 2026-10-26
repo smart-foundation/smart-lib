@@ -230,7 +230,11 @@ jobs:
           # lets the applier refuse rather than half-apply.
           gzip -t /tmp/fmt.gz
           base64 -w0 < /tmp/fmt.gz | fold -w 2000 > /tmp/fmt.b64
-          total=$(wc -l < /tmp/fmt.b64)
+          # `fold` leaves the final line unterminated, and both `wc -l` and
+          # `read` then lose it — which is exactly how the first reassembly lost
+          # a kilobyte of patch and every apply failed.
+          printf '\n' >> /tmp/fmt.b64
+          total=$(grep -c . /tmp/fmt.b64)
           echo "::notice::FMTCHUNKS $total"
           index=0
           while IFS= read -r chunk; do
