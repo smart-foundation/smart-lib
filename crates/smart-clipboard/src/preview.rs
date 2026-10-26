@@ -249,9 +249,15 @@ mod tests {
 
     #[test]
     fn rubbish_is_refused_with_words() {
-        let error = decode(b"not an image at all").expect_err("must refuse");
+        // `image::Frame` is not `Debug`, so an `expect_err` cannot print the OK
+        // side; the let-else says the same thing and stays readable.
+        let Err(error) = decode(b"not an image at all") else {
+            panic!("garbage must be refused, not decoded");
+        };
         assert!(error.contains("unrecognised image format"), "{error}");
-        let error = decode(b"").expect_err("must refuse");
+        let Err(error) = decode(b"") else {
+            panic!("an empty payload must be refused");
+        };
         assert!(error.contains("empty payload"), "{error}");
     }
 
