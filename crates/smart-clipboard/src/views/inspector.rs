@@ -409,7 +409,7 @@ impl InspectorView {
                         .rounded(px(Radius::SMALL))
                         .bg(theme.checker_a)
                         .child(
-                            img(Arc::clone(image))
+                            img(image)
                                 .w_full()
                                 .max_h(px(240.0))
                                 .object_fit(ObjectFit::Contain),
@@ -467,6 +467,10 @@ impl InspectorView {
             _ => {
                 let body: AnyElement = match &preview {
                     Some(PreviewState::Ready { text, available, .. }) if *available => div()
+                        // Scrolling is a *stateful* behaviour in gpui: the element
+                        // needs an id to own its scroll offset, which is also why
+                        // the offset survives a re-render.
+                        .id("inspector-preview-text")
                         .max_h(px(220.0))
                         .overflow_y_scroll()
                         .text_size(px(Type::SMALL))

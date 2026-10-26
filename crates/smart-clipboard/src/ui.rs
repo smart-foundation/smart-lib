@@ -19,7 +19,7 @@
 
 use gpui::{
     div, px, Div, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Rgba,
-    SharedString, Styled,
+    SharedString, Stateful, Styled,
 };
 use smart_clipboard_proto::MimeFamily;
 
@@ -96,7 +96,18 @@ pub fn badge(theme: &Theme, color: Rgba, label: impl Into<SharedString>) -> Div 
 
 /// A button. `kind` picks the emphasis; every kind is a real hit target of at
 /// least 28 px, because a clipboard window is used with a trackpad in a hurry.
-pub fn button(theme: &Theme, id: impl Into<ElementId>, label: impl Into<SharedString>, kind: ButtonKind) -> Div {
+/// A button.
+///
+/// The return type is `Stateful<Div>`, not `Div`, because a button must have an
+/// id (it is a click target, a hover target and a focus stop) and in gpui 0.2 an
+/// `id` is what makes an element stateful. Returning `Div` would compile the id
+/// away and then fail at every `.on_click`.
+pub fn button(
+    theme: &Theme,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+) -> Stateful<Div> {
     let (background, foreground, border) = match kind {
         ButtonKind::Primary => (theme.signal_soft, theme.text, theme.signal),
         ButtonKind::Secondary => (alpha(theme.text_faint, 0.10), theme.text, theme.line),
